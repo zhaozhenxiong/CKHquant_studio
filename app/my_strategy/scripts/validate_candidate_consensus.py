@@ -111,7 +111,7 @@ def run(symbols, *, end="2026-10-09", device="cpu"):
             coverage[symbol] = {key: {"version": value["version"], "config": value["config"],
                 "config_hash": value["config_hash"], "action_counts": dict(Counter(
                     r["action"] for r in value["rows"] if r["date"] >= "2025-01-01")),
-                "diagnostics": value.get("diagnostics", {}),
+                "diagnostics": value.get("funnel", {}),
                 "events_sha256": stable_hash(value["events"])} for key, value in variants.items()}
             analysis_runs[symbol] = {"data_version": analysis["data_version"],
                 "data_end": analysis["data_end"], "model_run_id": (analysis["next_session_decision"].get(
