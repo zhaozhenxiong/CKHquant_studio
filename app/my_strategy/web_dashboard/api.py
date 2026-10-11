@@ -35,7 +35,7 @@ class AnalysisRequest(BaseModel):
     calendar_run_id: str | None = None
     device: str | None = None
     consensus_config: dict[str, Any] | None = None
-    consensus_version: Literal["czsc_agent_consensus_v1", "czsc_agent_consensus_v2"] | None = None
+    consensus_version: Literal["czsc_agent_consensus_v1", "czsc_agent_consensus_v2", "czsc_agent_consensus_v3"] | None = None
     _symbol = field_validator("symbol")(clean_symbol)
 
     @model_validator(mode="after")

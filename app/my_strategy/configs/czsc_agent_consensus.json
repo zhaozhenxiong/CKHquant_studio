@@ -1,5 +1,5 @@
 {
-  "version": "czsc_agent_consensus_v2",
+  "version": "czsc_agent_consensus_v3",
   "source_weights": {
     "ma": 0.4,
     "structure": 0.2,
@@ -16,5 +16,6 @@
   "high_return_threshold": 0.1,
   "require_high_return_when_family": true,
   "signal_valid_bars": 20,
-  "cooldown_bars": 5
+  "cooldown_bars": 5,
+  "evidence_valid_bars": 3
 }

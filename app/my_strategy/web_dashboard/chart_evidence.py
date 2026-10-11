@@ -260,6 +260,19 @@ def decorate_analysis(result, *, raw=None, features=None, overlay=None, consensu
     prefix_days = sorted({day for (stock, day) in observations if stock == symbol and (not cutoff or day <= cutoff)}
                          | set(display_days))
     prefix_rows = [evidence_row(day, full_events_by_day.get((symbol, day), [])) for day in prefix_days]
+    from my_strategy.services.czsc_agent_consensus import consensus_config as resolve_consensus_config
+    from my_strategy.services.czsc_candidate_evidence import V3_VERSION, build_candidate_evidence
+    effective_config = resolve_consensus_config(consensus_config, version=consensus_version)
+    if effective_config.get("version") == V3_VERSION:
+        # v1/v2 adapters stay byte-compatible. New daily assessments are an
+        # explicit additional contract, independent of original entry risk.
+        candidate_evidence = build_candidate_evidence(prefix_rows, features,
+            policy=overlay.get("candidate_evidence_policy"), config=effective_config)
+        for row in prefix_rows:
+            row["candidate_evidence"] = candidate_evidence[row["date"]]
+        for row in rows:
+            row["candidate_evidence"] = copy.deepcopy(candidate_evidence[row["date"]])
+        output["chart_evidence"]["candidate_assessment_version"] = "czsc_candidate_evidence_v1"
     consensus = build_consensus(prefix_rows, symbol=symbol,
                                 model_family=result.get("model_family", "ma_trend"), config=consensus_config,
                                 version=consensus_version)

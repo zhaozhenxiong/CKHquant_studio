@@ -31,7 +31,7 @@ def weighted_fixture():
 def test_weighted_exact_boundaries_full_prefix_and_display_crop():
     result, raw, features, overlay = weighted_fixture()
     original = copy.deepcopy(result)
-    full = decorate_analysis(result, raw=raw, features=features, overlay=overlay)["consensus_decisions"]
+    full = decorate_analysis(result, raw=raw, features=features, overlay=overlay, consensus_version=V2)["consensus_decisions"]
     assert full["version"] == V2
     assert [(event["date"], event["side"]) for event in full["events"]] == [(DAYS[0], "BUY"), (DAYS[2], "SELL")]
     assert full["rows"][0]["buy_base_score"] == .5
@@ -42,7 +42,7 @@ def test_weighted_exact_boundaries_full_prefix_and_display_crop():
     clipped = copy.deepcopy(result)
     clipped["frequencies"]["日线"]["bars"] = clipped["frequencies"]["日线"]["bars"][1:]
     clipped["events"] = [point for point in clipped["events"] if point["date"] >= DAYS[1]]
-    actual = decorate_analysis(clipped, raw=raw, features=features, overlay=overlay)["consensus_decisions"]
+    actual = decorate_analysis(clipped, raw=raw, features=features, overlay=overlay, consensus_version=V2)["consensus_decisions"]
     assert actual["rows"] == full["rows"][1:]
     assert actual["events"] == [event for event in full["events"] if event["date"] >= DAYS[1]]
     assert actual["state_before_display"] == "bullish"
@@ -50,13 +50,13 @@ def test_weighted_exact_boundaries_full_prefix_and_display_crop():
 
 def test_weighted_history_asof_uses_only_visible_scores_and_events():
     result, raw, features, overlay = weighted_fixture()
-    full = decorate_analysis(result, raw=raw, features=features, overlay=overlay)["consensus_decisions"]
+    full = decorate_analysis(result, raw=raw, features=features, overlay=overlay, consensus_version=V2)["consensus_decisions"]
     result["as_of"] = DAYS[1]
-    historical = decorate_analysis(result, raw=raw, features=features, overlay=overlay)["consensus_decisions"]
+    historical = decorate_analysis(result, raw=raw, features=features, overlay=overlay, consensus_version=V2)["consensus_decisions"]
     assert historical["rows"] == full["rows"][:2]
     assert historical["events"] == full["events"][:1]
     overlay["rows"][0]["model_resolution"]["available_at"] = DAYS[1]
-    unavailable = decorate_analysis(result, raw=raw, features=features, overlay=overlay)["consensus_decisions"]
+    unavailable = decorate_analysis(result, raw=raw, features=features, overlay=overlay, consensus_version=V2)["consensus_decisions"]
     assert unavailable["rows"][0]["action"] == "WAIT"
     assert unavailable["rows"][0]["buy_quality_bonus"] == 0
 
@@ -75,10 +75,10 @@ def api_client(monkeypatch):
     return TestClient(app), forwarded
 
 
-def test_api_defaults_to_v2_and_saves_effective_version_config(monkeypatch):
+def test_api_explicit_v2_saves_effective_version_config(monkeypatch):
     client, forwarded = api_client(monkeypatch)
     with client:
-        response = client.post("/api/analysis", json={"symbol": SYMBOL, "research": False})
+        response = client.post("/api/analysis", json={"symbol": SYMBOL, "research": False, "consensus_version": V2})
         assert response.status_code == 200, response.text
         data = response.json()
         assert data["consensus_decisions"]["version"] == V2

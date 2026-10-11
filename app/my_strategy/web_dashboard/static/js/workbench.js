@@ -27,6 +27,7 @@
   let markerGroups = [];
   let chartSelection = {hover:null,pinned:null,selectedDate:null,popupOpen:false};
   let popupAnchor = null;
+  let selectedReferenceLine = null, selectedReferenceSeries = null, selectedReferenceKey = null;
   let historyRows = [];
   let historyPage = 0;
   let analysisLoading = false;
@@ -197,7 +198,7 @@
     const symbol = state.query?.symbol;
     const tradeMarkers = KHQuantMarkers.build({bars, dailyBars:normalizeBars(state.analysis.frequencies?.['日线']?.bars), frequency:state.frequency,
       events:$('layer-signals').checked ? state.analysis.consensus_decisions?.events || [] : [], trades:$('layer-trades').checked ? state.backtest?.trades || [] : [],
-      symbol,start:state.query?.start || '',asOf:day(state.query?.as_of || state.analysis.as_of || state.analysis.data_end),up:c.up,down:c.down});
+      symbol,consensusVersion:state.analysis.consensus_decisions?.version || state.analysis.consensus_decisions?.config?.version || '',start:state.query?.start || '',asOf:day(state.query?.as_of || state.analysis.as_of || state.analysis.data_end),up:c.up,down:c.down});
     markers.push(...tradeMarkers.markers);
     const wyckoffMarkers = KHQuantWyckoffMarkers.build({events:$('layer-wyckoff').checked ? state.analysis.wyckoff_events || [] : [],bars,frequency:state.frequency,asOf:day(state.query?.as_of || state.analysis.as_of || state.analysis.data_end)});
     markers.push(...wyckoffMarkers);
@@ -205,7 +206,7 @@
     markerMappings = tradeMarkers.mappings;
     markerGroups = tradeMarkers.groups || [];
     $('marker-details').textContent = KHQuantMarkers.describe(markerMappings,null,state.frequency);
-    $('marker-summary').textContent = state.analysis.consensus_decisions ? `最终 B/S ${markerGroups.filter((group) => group.visible !== false && group.kind === 'intention').length} 个${!tradeMarkers.intentCount && !tradeMarkers.deferredCount ? ' · 本区间暂无满足仲裁条件的最终点，可在历史判断查看原因' : ''} · 实际成交 ${tradeMarkers.tradeCount} 条${wyckoffMarkers.length ? ` · 量价参考 ${wyckoffMarkers.length}` : ''} · 点击查看多 Agent 判断${state.frequency === '日线' ? '' : '与原始日期'}${tradeMarkers.deferredCount ? ` · ${tradeMarkers.deferredCount} 个标记等待所属周期闭合` : ''}` : '该结果没有多 Agent 仲裁，不显示最终买卖点；请重新分析。';
+    $('marker-summary').textContent = state.analysis.consensus_decisions ? `最终 B/S ${tradeMarkers.intentCount} 个 · 周期标记 ${tradeMarkers.intentMarkerCount} 个${!tradeMarkers.intentCount && !tradeMarkers.deferredCount ? ' · 本区间暂无满足仲裁条件的最终点，可在历史判断查看原因' : ''} · 实际成交 ${tradeMarkers.tradeCount} 条${wyckoffMarkers.length ? ` · 量价参考 ${wyckoffMarkers.length}` : ''} · 点击查看多 Agent 判断${state.frequency === '日线' ? '' : '与原始日期'}${tradeMarkers.formingProjectedCount ? ` · ${tradeMarkers.formingProjectedCount} 个日线最终点投影于形成中周期` : ''}${tradeMarkers.deferredCount ? ` · ${tradeMarkers.deferredCount} 个标记等待所属周期闭合` : ''}` : '该结果没有多 Agent 仲裁，不显示最终买卖点；请重新分析。';
     markers.sort((a,b) => a.time.localeCompare(b.time));
     candles.setMarkers(markers);
     if (fit) chart.timeScale().fitContent();
@@ -247,7 +248,25 @@
     if (previous.hover !== chartSelection.hover || previous.pinned !== chartSelection.pinned || previous.selectedDate !== chartSelection.selectedDate || type === 'clear') { drawChipProfile(); syncChartRange(); }
     renderChartPopup();
   }
+  function clearSelectedReference() {
+    if (selectedReferenceLine && candles?.removePriceLine) candles.removePriceLine(selectedReferenceLine);
+    if (selectedReferenceSeries && chart) chart.removeSeries(selectedReferenceSeries);
+    selectedReferenceLine = null; selectedReferenceSeries = null; selectedReferenceKey = null;
+  }
+  function renderSelectedReference(groups, active) {
+    const selection = evidenceUI()?.referenceSelection({evidence:state.analysis?.chart_evidence,consensus:state.analysis?.consensus_decisions,groups,barDate:active,selectedDate:chartSelection.selectedDate});
+    if (!selection || !candles?.createPriceLine || !chart) { clearSelectedReference(); return; }
+    const key = [state.frequency,selection.bar_date,selection.signal_date,selection.event_id,selection.price,selection.action].join(':');
+    if (key === selectedReferenceKey) return;
+    clearSelectedReference();
+    const c = colors(), buying = selection.action === 'BUY', color = buying ? c.up : c.down;
+    selectedReferenceLine = candles.createPriceLine({price:selection.price,color,lineWidth:1,lineStyle:LightweightCharts.LineStyle.Dashed,axisLabelVisible:true,title:`${buying ? 'B' : 'S'} 参考 · 非成交`});
+    selectedReferenceSeries = chart.addLineSeries({color,lineVisible:false,pointMarkersVisible:true,pointMarkersRadius:4,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false});
+    selectedReferenceSeries.setData([{time:selection.bar_date,value:selection.price}]);
+    selectedReferenceKey = key;
+  }
   function resetChartSelection() {
+    clearSelectedReference();
     chartSelection = {hover:null,pinned:null,selectedDate:null,popupOpen:false}; popupAnchor = null;
     $('chart-evidence-popup').hidden = true; $('chart-evidence-popup').replaceChildren(); $('chart-evidence-reset').hidden = true;
     $('chart-selection-status').textContent = '悬浮 K 线切换筹码分布；点击固定日期。';
@@ -255,7 +274,8 @@
   function renderChartPopup() {
     const ui = evidenceUI(), host = $('chart-evidence-popup'), active = chartSelection.pinned;
     const groups = finalGroupsAt(active);
-    if (!ui || !chartSelection.popupOpen || !active || !state.analysis || analysisLoading || !groups.length) { host.hidden = true; return; }
+    if (!ui || !chartSelection.popupOpen || !active || !state.analysis || analysisLoading || !groups.length) { host.hidden = true; clearSelectedReference(); return; }
+    renderSelectedReference(groups,active);
     host.dataset.pinned = String(Boolean(chartSelection.pinned));
     host.innerHTML = ui.popupHtml({evidence:state.analysis.chart_evidence,consensus:state.analysis.consensus_decisions,groups,barDate:active,frequency:state.frequency,selectedDate:chartSelection.selectedDate,pinned:Boolean(chartSelection.pinned),profileAsOf:selectedChipProfile()?.as_of});
     host.hidden = false;
@@ -582,7 +602,7 @@
     const evidence = state.analysis?.chart_evidence;
     const selected = state.query?.as_of || state.analysis?.as_of || state.analysis?.data_end || state.dates[state.replayIndex];
     const row = ui.rowAt(evidence,selected), decision = ui.consensusAt(state.analysis?.consensus_decisions,selected);
-    $('replay-evidence-card').innerHTML = state.analysis ? `<strong>信息截止 ${esc(selected || '—')}</strong>${ui.consensusHtml(decision,state.analysis?.consensus_decisions?.config,state.analysis?.consensus_decisions?.version)}${ui.referenceHtml(row)}${ui.agentsHtml(row,false,decision,state.analysis?.consensus_decisions?.config,state.analysis?.consensus_decisions?.version)}${ui.riskHtml(row?.raw_risk_plan)}${ui.rawEventsHtml(row)}<p class="subtle">参考价使用该日行情；评分按当时可见的模型与事件展示。</p>` : '<p class="subtle">尚无成功分析结果，参考价与评分不可用。</p>';
+    $('replay-evidence-card').innerHTML = state.analysis ? `<strong>信息截止 ${esc(selected || '—')}</strong>${ui.consensusHtml(decision,state.analysis?.consensus_decisions?.config,state.analysis?.consensus_decisions?.version)}${ui.referenceHtml(row)}${ui.agentsHtml(row,false,decision,state.analysis?.consensus_decisions?.config,state.analysis?.consensus_decisions?.version)}${ui.riskHtml(row?.raw_risk_plan)}${ui.rawEventsHtml(row,[],state.analysis?.consensus_decisions?.version)}<p class="subtle">参考价使用该日行情；评分按当时可见的模型与事件展示。</p>` : '<p class="subtle">尚无成功分析结果，参考价与评分不可用。</p>';
     if (!state.analysis) { $('history-evidence-table').innerHTML = '<p class="subtle">历史参考记录不可用，请重新分析。</p>'; return; }
     const cutoff = day(state.query?.as_of || state.analysis?.as_of || state.analysis?.data_end);
     const rows = cutoff ? historyRows.filter((item) => item.date <= cutoff) : historyRows;

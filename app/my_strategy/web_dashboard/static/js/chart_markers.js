@@ -15,15 +15,18 @@
   const groupId = (symbol, frequency, time, kind, action) =>
     ['khq-marker',symbol,frequency,time,kind,action].map((value) => encodeURIComponent(value || '')).join(':');
   function build({bars = [], dailyBars = [], frequency, events = [], trades = [], symbol,
-                  start = '', asOf, up, down, includeExcluded = false}) {
+                  start = '', asOf, up, down, includeExcluded = false, consensusVersion = ''}) {
     const mappings = [], grouped = new Map(), seenEvents = new Set();
+    const periodBars = new Map(bars.map((bar) => [periodKey(bar.time,frequency),bar]));
     const byPeriod = new Map(bars.filter((bar) => bar.is_closed !== false)
       .map((bar) => [periodKey(bar.time,frequency),day(bar.time)]));
     const observedDaily = dailyBars.map((bar) => day(bar.time)).filter(Boolean).sort();
-    let intentCount = 0, tradeCount = 0, deferredCount = 0, ignoredCount = 0;
+    let intentCount = 0, tradeCount = 0, deferredCount = 0, ignoredCount = 0, formingProjectedCount = 0;
     const add = (row, execution) => {
       if (row.symbol && symbol && row.symbol !== symbol) return;
-      const original = day(execution ? row.date : row.evidence_date || row.available_at || row.signal_at || row.time || row.date);
+      const firstAvailableAt = execution ? row.date : row.first_available_at || row.available_at || row.evidence_date || row.signal_at || row.time || row.date;
+      const original = day(execution ? row.date : row.evidence_date || firstAvailableAt);
+      if (asOf && day(firstAvailableAt) > asOf) return;
       if (!original || original < start || (asOf && original > asOf)) return;
       const action = row.action || row.side || '';
       const buying = /buy|open|买|开/i.test(action);
@@ -44,26 +47,47 @@
       const excluded = exclusionReasons.length > 0;
       const displayed = !excluded || includeExcluded;
       if (excluded) ignoredCount++;
-      const key = periodKey(original,frequency), time = byPeriod.get(key);
+      const version = consensusVersion || row.version || row.consensus_version;
+      const sourceFrequency = row.source_frequency || row.signal_frequency || row.frequency || '日线';
+      const nativePeriodSignal = !execution && row.source === 'consensus' && version === 'czsc_agent_consensus_v3'
+        && sourceFrequency !== '日线' && sourceFrequency === frequency;
+      const bucketDate = nativePeriodSignal ? day(row.source_period_date || row.period_end || row.time || row.date) : original;
+      const key = periodKey(bucketDate,frequency), bar = periodBars.get(key);
+      // Daily final decisions are already known facts. A forming weekly/monthly
+      // display bucket must not defer them as if they were native period signals.
+      const dailyProjection = !execution && row.source === 'consensus' && version === 'czsc_agent_consensus_v3'
+        && sourceFrequency === '日线' && frequency !== '日线';
+      const time = dailyProjection && bar ? day(bar.time) : byPeriod.get(key);
       const closedAt = frequency === '日线' ? time : observedDaily.find((date) => periodKey(date,frequency) > key);
-      if (!time || time < original || !closedAt || (asOf && closedAt > asOf)) {
+      const periodClosed = bar?.is_closed !== false && Boolean(closedAt) && (!asOf || closedAt <= asOf);
+      if (!time || (!nativePeriodSignal && time < original) || (asOf && time > asOf)
+          || (!dailyProjection && (!closedAt || (asOf && closedAt > asOf)))
+          || (nativePeriodSignal && day(firstAvailableAt) < closedAt)) {
         if (displayed) deferredCount++;
         return;
       }
       const kind = execution ? 'execution' : 'intention', side = buying ? 'BUY' : 'SELL';
-      const id = groupId(rowSymbol,frequency,time,kind,side);
+      const periodId = `${frequency}:${key}`;
+      const id = groupId(rowSymbol,frequency,version === 'czsc_agent_consensus_v3' ? periodId : time,kind,side);
+      const entryId = [id,row.event_id || '',firstAvailableAt || ''].map(encodeURIComponent).join(':');
       const source = row.source || (execution ? 'broker' : null);
       const mapping = {...row, row, group_id:id, kind, symbol:rowSymbol, action:side, side,
-        source, event_id:row.event_id || null, event_type:row.event_type || row.signal || null,
+        source, entry_id:entryId, event_id:row.event_id || null, event_type:row.event_type || row.signal || null,
+        period_id:periodId, first_available_at:firstAvailableAt || null, source_frequency:sourceFrequency,
+        daily_confirmed:dailyProjection, period_status:periodClosed ? 'closed' : 'forming',
         original_date:original, event_date:day(row.date || row.time || row.signal_at || original),
-        bar_date:time, closed_at:closedAt, excluded, displayed, exclusion_reasons:exclusionReasons};
+        bar_date:time, closed_at:periodClosed ? closedAt : null, excluded, displayed, exclusion_reasons:exclusionReasons};
       mappings.push(mapping);
       if (!grouped.has(id)) grouped.set(id, {id, group_id:id, symbol:rowSymbol, frequency,
-        time, bar_date:time, closed_at:closedAt, kind, action:side, side, entries:[], events:[]});
+        time, bar_date:time, period_id:periodId, period_status:periodClosed ? 'closed' : 'forming',
+        closed_at:periodClosed ? closedAt : null, kind, action:side, side, entries:[], events:[]});
       const group = grouped.get(id);
       group.entries.push(mapping);
       group.events.push(row);
-      if (displayed) execution ? tradeCount++ : intentCount++;
+      if (displayed) {
+        execution ? tradeCount++ : intentCount++;
+        if (dailyProjection && !periodClosed) formingProjectedCount++;
+      }
     };
     events.forEach((event) => add(event,false));
     // A chart never borrows an unrelated symbol's fill or anonymous ledger row.
@@ -82,6 +106,9 @@
       group.trade_count = group.kind === 'execution' ? visible.length : 0;
       group.total_count = group.entries.length;
       group.excluded_count = group.entries.filter((entry) => entry.excluded).length;
+      group.event_ids = visible.map((entry) => entry.event_id).filter(Boolean);
+      group.first_available_at = visible.map((entry) => entry.first_available_at).filter(Boolean).sort()[0] || null;
+      group.daily_confirmed = visible.some((entry) => entry.daily_confirmed);
       group.visible = visible.length > 0;
       if (!group.visible) continue;
       const buying = group.action === 'BUY', execution = group.kind === 'execution';
@@ -92,13 +119,14 @@
         text:execution ? `实${letter}` : letter,
         size:execution ? 1.2 : 1});
     }
-    return {markers,mappings,groups,intentCount,tradeCount,deferredCount,ignoredCount};
+    return {markers,mappings,groups,intentCount,tradeCount,deferredCount,ignoredCount,formingProjectedCount,
+      intentMarkerCount:groups.filter((group) => group.visible && group.kind === 'intention').length};
   }
   function describe(mappings, time, frequency) {
     if (!time) return '点击最终 B/S 或对应 K 线，查看多 Agent 判断；悬浮只切换指标与筹码。';
     const items = mappings.filter((item) => item.bar_date === time && item.displayed !== false);
     if (!items.length) return `${time} · 该K线无买卖标记`;
-    return items.map((item) => `${item.action === 'BUY' ? '买入' : '卖出'}${item.kind === 'execution' ? '成交' : item.source === 'consensus' ? '最终点' : '意图'} ${item.original_date}${frequency === '日线' ? '' : ` · ${frequency}闭合 ${item.closed_at}`}`).join('；');
+    return items.map((item) => `${item.action === 'BUY' ? '买入' : '卖出'}${item.kind === 'execution' ? '成交' : item.source === 'consensus' ? '最终点' : '意图'} ${item.original_date}${frequency === '日线' ? '' : item.daily_confirmed && item.period_status === 'forming' ? ` · 日线已确认／${frequency}周期形成中` : ` · ${frequency}闭合 ${item.closed_at || '时间待核验'}`}`).join('；');
   }
   const api = {periodKey,build,describe};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

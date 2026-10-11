@@ -5,7 +5,17 @@ import json
 
 import pytest
 
-from my_strategy.services.czsc_agent_consensus import build_consensus, consensus_config
+from my_strategy.services.czsc_agent_consensus import (
+    build_consensus as _versioned_build, consensus_config as _versioned_config,
+)
+
+def build_consensus(*args, **kwargs):
+    kwargs.setdefault("version", "czsc_agent_consensus_v2")
+    return _versioned_build(*args, **kwargs)
+
+def consensus_config(config=None, **kwargs):
+    kwargs.setdefault("version", "czsc_agent_consensus_v2")
+    return _versioned_config(config, **kwargs)
 from my_strategy.tests.test_czsc_agent_consensus import SYMBOL, _row
 
 V1 = "czsc_agent_consensus_v1"
@@ -247,11 +257,11 @@ def test_unknown_and_conflicting_versions_are_rejected():
 
 
 def test_complete_legacy_configuration_automatically_replays_v1_without_new_hash_fields():
-    legacy = consensus_config(version=V1)
+    legacy = _versioned_config(version=V1)
     assert "version" not in legacy and len(legacy) == 10
     row = _row(specs=[("ma", "BUY"), ("structure", "BUY")], l2=.2)
     explicit = _build([row], config=legacy, version=V1)
-    assert _build([row], config=legacy) == explicit
+    assert _versioned_build([row], symbol=SYMBOL, config=legacy) == explicit
     assert _build([row], version=V1) == explicit
     assert explicit["version"] == V1
     assert "version" not in explicit["rows"][0]
@@ -259,7 +269,7 @@ def test_complete_legacy_configuration_automatically_replays_v1_without_new_hash
     assert explicit["rows"][0]["buy_support"] == 2
     assert explicit["config_hash"] == hashlib.sha256(json.dumps(legacy, sort_keys=True, ensure_ascii=False,
         separators=(",", ":"), allow_nan=False).encode()).hexdigest()
-    assert consensus_config({"ma_entry_threshold": .9})["version"] == V2
+    assert _versioned_config({"ma_entry_threshold": .9})["version"] == "czsc_agent_consensus_v3"
 
 
 def test_legacy_replay_does_not_depend_on_current_configuration_file(monkeypatch):

@@ -129,6 +129,20 @@ def _display_model_lineage(overlay):
     return output
 
 
+def _analysis_overlay_result(result, overlay, item, *, start, usage_mode, model_policy, calendar_id):
+    """Assemble the original shadow result, shared by analysis and diagnostics."""
+    import copy
+    result = copy.deepcopy(result)
+    result["structure_baseline"] = {"events": result["events"], "next_session_decision": result["next_session_decision"]}
+    result.update(model_family="high_return", events=_events(overlay, start), signal_points=overlay.get("signal_points", []),
+                  next_session_decision=_latest(overlay, item), model_gate=overlay.get("model_gate"),
+                  publication_allowed=False, compute_info=overlay.get("compute_info", {}),
+                  research={"model_family": "high_return", "usage_mode": usage_mode, "model_policy": model_policy,
+                            "calendar_run_id": calendar_id, "model_routes": overlay.get("model_routes", []),
+                            "probability_target": overlay.get("probability_target"), "publication_allowed": False})
+    return result
+
+
 def analyze_high_return(*, symbol, start="2026-01-01", end=None, as_of=None, research=True,
                         model_family="high_return", usage_mode="historical", model_policy="auto",
                         model_run_id=None, model_fold=None, calendar_run_id=None, device=None,
@@ -140,17 +154,69 @@ def analyze_high_return(*, symbol, start="2026-01-01", end=None, as_of=None, res
     item = _prepare(symbol, result["data_end"], dates, db_path)
     overlay = _overlay(item, dates, model_run_id=model_run_id, model_fold=model_fold,
                        usage_mode=usage_mode, device=device, as_of=as_of or result["data_end"])
-    result["structure_baseline"] = {"events": result["events"], "next_session_decision": result["next_session_decision"]}
-    result.update(model_family="high_return", events=_events(overlay, start), signal_points=overlay.get("signal_points", []),
-                  next_session_decision=_latest(overlay, item), model_gate=overlay.get("model_gate"),
-                  publication_allowed=False, compute_info=overlay.get("compute_info", {}),
-                  research={"model_family": "high_return", "usage_mode": usage_mode, "model_policy": model_policy,
-                            "calendar_run_id": calendar_id, "model_routes": overlay.get("model_routes", []),
-                            "probability_target": overlay.get("probability_target"), "publication_allowed": False})
+    from my_strategy.services.czsc_agent_consensus import consensus_config as resolve_consensus_config
+    from my_strategy.services.czsc_candidate_evidence import V3_VERSION, recover_daily_evidence
+    effective_consensus = resolve_consensus_config(consensus_config, version=consensus_version)
+    if effective_consensus.get("version") == V3_VERSION:
+        # Recover the exact selected frozen daily routes only for the new chart
+        # policy. Fixed-fold routing and all original trading facts remain bound.
+        overlay = recover_daily_evidence({**overlay, "chart_model_fold": model_fold},
+                                         item["features"], dates, usage_mode=usage_mode)
+    result = _analysis_overlay_result(result, overlay, item, start=start, usage_mode=usage_mode,
+                                     model_policy=model_policy, calendar_id=calendar_id)
     from my_strategy.web_dashboard.chart_evidence import decorate_analysis
     result = decorate_analysis(result, raw=item["raw"], features=item["features"], overlay=_display_model_lineage(overlay),
                                consensus_config=consensus_config, consensus_version=consensus_version)
     return _json(result)
+
+
+def compare_high_return_chart_windows(*, symbol, start="2026-01-01", end=None, as_of=None,
+        usage_mode="historical", model_policy="auto", model_run_id=None, model_fold=None,
+        calendar_run_id=None, device="cpu", config=None, db_path=None, consensus_config=None,
+        windows=(1, 3, 5)):
+    """Compare actual v2 and independently assessed v3 evidence windows.
+
+    Prepare frozen inputs and run original shadow scoring once. The v2 control
+    receives the original unrecovered overlay. Every v3 variant rebuilds daily
+    current-state evidence under its own age bound before arbitration; no variant
+    filters another variant's already aggregated evidence. This is a read-only
+    development diagnostic, not a Broker or release assessment.
+    """
+    from my_strategy.services.czsc_analysis import analyze_stock
+    from my_strategy.services.czsc_research import _json
+    from my_strategy.services.czsc_agent_consensus import consensus_config as resolve_consensus_config
+    from my_strategy.services.czsc_candidate_evidence import V3_VERSION, recover_daily_evidence
+    from my_strategy.web_dashboard.chart_evidence import decorate_analysis
+    windows = tuple(windows)
+    if (not windows or len(set(windows)) != len(windows)
+            or any(isinstance(value, bool) or not isinstance(value, int) or value not in {1, 3, 5} for value in windows)):
+        raise ValueError("chart diagnostic windows must be distinct allowed bar counts: 1, 3, 5")
+    selected_config = resolve_consensus_config(consensus_config, version=V3_VERSION)
+    variant_configs = {window: resolve_consensus_config({**selected_config, "evidence_valid_bars": window}, version=V3_VERSION)
+                       for window in windows}
+    base = analyze_stock(symbol, start=start, end=end, as_of=as_of, db_path=db_path, config=config, research=False)
+    dates, calendar_id = _calendar(calendar_run_id)
+    item = _prepare(symbol, base["data_end"], dates, db_path)
+    original = _overlay(item, dates, model_run_id=model_run_id, model_fold=model_fold,
+                        usage_mode=usage_mode, device=device, as_of=as_of or base["data_end"])
+    recovered = recover_daily_evidence({**original, "chart_model_fold": model_fold},
+                                       item["features"], dates, usage_mode=usage_mode)
+    legacy_identity = _display_model_lineage(original)
+    recovered_identity = _display_model_lineage(recovered)
+    controls = [("v2", original, legacy_identity, None, "czsc_agent_consensus_v2")]
+    controls.extend((f"v3_{window}", recovered, recovered_identity,
+                     variant_configs[window], V3_VERSION) for window in windows)
+    variants = {}
+    for name, overlay, identity, selected, version in controls:
+        assembled = _analysis_overlay_result(base, overlay, item, start=start, usage_mode=usage_mode,
+                                            model_policy=model_policy, calendar_id=calendar_id)
+        variants[name] = decorate_analysis(assembled, raw=item["raw"], features=item["features"],
+            overlay=identity, consensus_config=selected, consensus_version=version)
+    return _json({"diagnostic_only": True, "publication_allowed": False, "variants": variants,
+                  "preparation": {"original_shadow_compute": original.get("compute_info"),
+                                  "recovered_chart_compute": recovered.get("compute_info"),
+                                  "model_run_id": recovered.get("candidate_evidence_policy", {}).get("model_run_id")},
+                  "comparison_basis": "same_full_causal_input_and_original_candidates_reassessed_per_window"})
 
 
 def scan_high_return(*, symbols=None, start="2026-01-01", end=None, model_run_id=None, model_fold=None,

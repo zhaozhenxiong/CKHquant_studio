@@ -4,7 +4,13 @@ import copy
 import pandas as pd
 import pytest
 
-from my_strategy.web_dashboard.chart_evidence import decorate_analysis
+from my_strategy.web_dashboard.chart_evidence import decorate_analysis as _decorate_analysis
+
+
+def decorate_analysis(*args, **kwargs):
+    """These frozen display-contract fixtures explicitly replay chart v2."""
+    kwargs.setdefault("consensus_version", "czsc_agent_consensus_v2")
+    return _decorate_analysis(*args, **kwargs)
 
 
 SYMBOL = "600000.SH"
@@ -251,7 +257,8 @@ def test_non_high_return_api_appends_basic_evidence_without_running_models(monke
     application.state.tasks = SimpleNamespace(results=SimpleNamespace(db_path="unused", runs_root="unused", save=lambda kind, result: result))
     application.include_router(router)
     with TestClient(application) as client:
-        response = client.post("/api/analysis", json={"symbol": SYMBOL, "research": False})
+        response = client.post("/api/analysis", json={"symbol": SYMBOL, "research": False,
+            "consensus_version": "czsc_agent_consensus_v2"})
     assert response.status_code == 200
     result = response.json()
     assert result["chart_evidence"]["version"] == "chart_evidence_v1"
@@ -277,7 +284,7 @@ def test_high_return_adapter_retains_historical_scores_and_frozen_signal_points(
     monkeypatch.setattr(high_return, "_calendar", lambda identity: (DAYS, "verified-calendar"))
     monkeypatch.setattr(high_return, "_prepare", lambda *a, **k: {"symbol": SYMBOL, "data_end": DAYS[-1], "data_version": "hash", "raw": raw, "features": raw})
     monkeypatch.setattr(high_return, "_overlay", lambda *a, **k: overlay)
-    result = high_return.analyze_high_return(symbol=SYMBOL, start=DAYS[0])
+    result = high_return.analyze_high_return(symbol=SYMBOL, start=DAYS[0], consensus_version="czsc_agent_consensus_v2")
     assert _row(result, DAYS[0])["agents"]["high_return"]["probability"] == .3
     assert _row(result, DAYS[1])["agents"]["high_return"]["probability"] is None
     assert _row(result, DAYS[2])["agents"]["high_return"]["probability"] == .8
