@@ -1,6 +1,8 @@
 """Display-only overlays; each value uses its observable history prefix."""
 from __future__ import annotations
 
+from bisect import bisect_right
+
 import numpy as np
 import pandas as pd
 
@@ -94,7 +96,20 @@ def chart_indicators(bars: list[dict], available_at: list[str], profile: pd.Data
             row["ma_alignment"] = "insufficient" if None in values else "bullish" if all(a > b for a, b in zip(values, values[1:])) else "bearish" if all(a < b for a, b in zip(values, values[1:])) else "mixed"
             row.update({f"ma{period}_direction": item[f"ma{period}_direction"] for period in (20, 60)})
             rows.append(row)
+    # Cache display snapshots once per requested bar. Hovering must select the
+    # historical prefix, rather than repainting the latest histogram. Limit
+    # each calculation to its 120 observed daily bars, including warmup before
+    # the visible chart range; a higher-frequency anchor never reads later days.
+    chip_profiles = {}
+    if rows and daily_bars is not None:
+        daily_dates = [bar["time"] for bar in daily_bars]
+        for row in rows:
+            cutoff = row["chip_as_of"] or row["time"]
+            end = bisect_right(daily_dates, cutoff)
+            window = daily_bars[max(0, end - CHIP_WINDOW):end]
+            chip_profiles[row["time"]] = _chip_profile(window, row)
     return {"version": "czsc_chart_overlays_v1", "ma_periods": list(MA_PERIODS), "boll_window": 20,
             "boll_std_multiplier": 2, "chip_window": CHIP_WINDOW, "chip_mass": .7,
             "chip_method": "daily_hlc3_volume_weighted_quantiles", "rows": rows,
-            "chip_profile": _chip_profile(daily_bars, rows[-1]) if rows and daily_bars is not None else None}
+            "chip_profile": chip_profiles.get(rows[-1]["time"]) if rows else None,
+            "chip_profiles": chip_profiles}

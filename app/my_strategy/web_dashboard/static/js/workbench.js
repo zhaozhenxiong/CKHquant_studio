@@ -24,6 +24,14 @@
   let computeLoaded = false;
   let latestDefaultEnd;
   let markerMappings = [];
+  let markerGroups = [];
+  let chartSelection = {hover:null,pinned:null,selectedDate:null};
+  let popupAnchor = null;
+  let historyRows = [];
+  let historyPage = 0;
+  let analysisLoading = false;
+  let openRunSequence = 0;
+  const evidenceUI = () => globalThis.KHQuantChartEvidence;
   let priceOverlayFrame = null;
   const computeSequences = {analysis:0,scan:0,backtest:0,data:0};
   const usageNames = {historical:'历史滚动研究',production:'当前生产判断',retrospective:'最新模型事后研究'};
@@ -49,6 +57,7 @@
   function route() {
     const name = location.hash.slice(1) || location.pathname.replace(/^\//,'');
     const selected = ['analysis', 'scan', 'backtest', 'watchlist', 'holdings', 'data'].includes(name) ? name : 'analysis';
+    if (selected !== 'analysis') resetChartSelection();
     document.querySelectorAll('.view').forEach((view) => { view.hidden = view.id !== `view-${selected}`; });
     document.querySelectorAll('[data-route]').forEach((link) => { if (link.dataset.route === selected) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current'); });
     requestAnimationFrame(resizeCharts);
@@ -72,10 +81,10 @@
     chart.timeScale().subscribeVisibleLogicalRangeChange(refreshChartOverlays);
     chart.subscribeCrosshairMove((param) => {
       const bar = param.seriesData.get(candles);
-      $('marker-details').textContent = KHQuantMarkers.describe(markerMappings,bar ? day(param.time) : null,state.frequency);
-      renderIndicatorReadout(bar ? day(param.time) : null);
+      updateChartSelection(bar ? 'hover' : 'leave',bar ? day(param.time) : null,param.point);
     });
-    chart.subscribeClick((param) => { if (param.time) highlightEvent(day(param.time)); });
+    chart.subscribeClick((param) => { if (param.time) { const time = day(param.time); updateChartSelection('pin',time,param.point); highlightEvent(evidenceUI()?.groupDates(groupsAt(time)) || [time]); } });
+    $('analysis-chart').addEventListener('pointerleave',() => updateChartSelection('leave'));
     ['pointermove','pointerup','wheel'].forEach((event) => $('analysis-chart').addEventListener(event,schedulePriceOverlays));
     resizeObserver = new ResizeObserver(resizeCharts);
     resizeObserver.observe($('analysis-chart'));
@@ -85,6 +94,7 @@
     if (chart && !$('view-analysis').hidden) chart.resize(Math.max(1, $('analysis-chart').clientWidth), $('analysis-chart').clientHeight);
     if (equityChart && !$('view-backtest').hidden) equityChart.resize(Math.max(1, $('equity-chart').clientWidth), $('equity-chart').clientHeight);
     refreshChartOverlays();
+    if (chartSelection.pinned) renderChartPopup();
   }
   function setTheme(theme) {
     document.documentElement.dataset.theme = theme;
@@ -94,7 +104,7 @@
     if (chart) { chart.applyOptions(chartOptions($('analysis-chart'))); candles.applyOptions({upColor:c.up,downColor:c.down,borderUpColor:c.up,borderDownColor:c.down,wickUpColor:c.up,wickDownColor:c.down}); renderAnalysis(false); }
     if (equityChart) { equityChart.applyOptions(chartOptions($('equity-chart'))); equitySeries.applyOptions({color:c.accent}); }
   }
-  function emptyChart(message, detail) { clearIndicators(); $('chip-profile').hidden = true; $('chip-profile-caption').hidden = true; $('chip-profile-overlay').replaceChildren(); syncChartRange(); $('divergence-details').hidden = true; $('divergence-list').replaceChildren(); $('analysis-empty').hidden = false; $('analysis-empty').querySelector('strong').textContent = message; $('analysis-empty').querySelector('span').textContent = detail; $('marker-summary').textContent = '尚无可展示的买卖标记'; markerMappings = []; $('marker-details').textContent = KHQuantMarkers.describe(markerMappings,null,state.frequency); $('zone-overlay').replaceChildren(); }
+  function emptyChart(message, detail) { resetChartSelection(); clearIndicators(); $('chip-profile').hidden = true; $('chip-profile-caption').hidden = true; $('chip-profile-overlay').replaceChildren(); syncChartRange(); $('divergence-details').hidden = true; $('divergence-list').replaceChildren(); $('analysis-empty').hidden = false; $('analysis-empty').querySelector('strong').textContent = message; $('analysis-empty').querySelector('span').textContent = detail; $('marker-summary').textContent = '尚无可展示的买卖标记'; markerMappings = []; markerGroups = []; $('marker-details').textContent = KHQuantMarkers.describe(markerMappings,null,state.frequency); $('zone-overlay').replaceChildren(); }
   function normalizeBars(rows) {
     return (rows || []).map((bar) => ({time:day(bar.time), open:Number(bar.open), high:Number(bar.high), low:Number(bar.low), close:Number(bar.close), volume:Number(bar.volume ?? bar.vol ?? 0), is_closed:bar.is_closed !== false}));
   }
@@ -132,7 +142,8 @@
     $('indicator-boll').hidden = !$('layer-boll').checked;
     $('indicator-boll').textContent = `BOLL20（2σ）上 ${number(row.boll_upper,2)} · 中 ${number(row.boll_mid,2)} · 下 ${number(row.boll_lower,2)}`;
     $('indicator-chips').hidden = !$('layer-chips').checked;
-    $('indicator-chips').textContent = `70%估算下 ${number(row.chip70_low,2)} · 上 ${number(row.chip70_high,2)} · 中位价 ${number(row.chip50,2)} · 日线截至 ${row.chip_as_of ? day(row.chip_as_of) : '—'}`;
+    const profile = selectedChipProfile();
+    $('indicator-chips').textContent = profile ? `70%估算下 ${number(profile.chip70_low,2)} · 上 ${number(profile.chip70_high,2)} · 中位价 ${number(profile.chip50,2)} · 日线截至 ${profile.as_of ? day(profile.as_of) : '—'}` : `70%估算下 ${number(row.chip70_low,2)} · 上 ${number(row.chip70_high,2)} · 中位价 ${number(row.chip50,2)} · 日线截至 ${row.chip_as_of ? day(row.chip_as_of) : '—'}`;
   }
   function renderAnalysis(fit = true) {
     if (!state.analysis) { clearIndicators(); $('chip-profile').hidden = true; $('chip-profile-caption').hidden = true; $('chip-profile-overlay').replaceChildren(); syncChartRange(); return; }
@@ -189,8 +200,9 @@
     markers.push(...wyckoffMarkers);
 
     markerMappings = tradeMarkers.mappings;
+    markerGroups = tradeMarkers.groups || [];
     $('marker-details').textContent = KHQuantMarkers.describe(markerMappings,null,state.frequency);
-    $('marker-summary').textContent = `意图 ${tradeMarkers.intentCount} · 成交 ${tradeMarkers.tradeCount}${wyckoffMarkers.length ? ` · 量价事件 ${wyckoffMarkers.length}（确认日，非成交）` : ''}${state.frequency === '日线' ? '' : ' · 标记保留原始日期与周期闭合日'}${tradeMarkers.deferredCount ? ` · ${tradeMarkers.deferredCount} 个标记等待所属周期闭合` : ''}`;
+    $('marker-summary').textContent = `B/S 汇总 ${markerGroups.filter((group) => group.visible !== false && group.kind === 'intention').length} 组 · 原始意图 ${tradeMarkers.intentCount} 条 · 成交 ${tradeMarkers.tradeCount} 条${wyckoffMarkers.length ? ` · 量价事件 ${wyckoffMarkers.length}（确认日，非成交）` : ''}${state.frequency === '日线' ? '' : ' · 点击查看各原始日期评分'}${tradeMarkers.deferredCount ? ` · ${tradeMarkers.deferredCount} 个标记等待所属周期闭合` : ''}`;
     markers.sort((a,b) => a.time.localeCompare(b.time));
     candles.setMarkers(markers);
     if (fit) chart.timeScale().fitContent();
@@ -207,17 +219,59 @@
     priceOverlayFrame = requestAnimationFrame(() => { priceOverlayFrame = null; drawZones(); drawChipProfile(); });
   }
   function refreshChartOverlays() { drawZones(); drawChipProfile(); syncChartRange(); schedulePriceOverlays(); }
+  function selectedChipProfile() {
+    if (chartSelection.pinned && chartSelection.selectedDate) return state.analysis?.frequencies?.['日线']?.indicators?.chip_profiles?.[chartSelection.selectedDate] || {status:'unavailable',as_of:chartSelection.selectedDate};
+    const indicators = state.analysis?.frequencies?.[state.frequency]?.indicators;
+    const selected = chartSelection.pinned || chartSelection.hover;
+    return selected ? indicators?.chip_profiles?.[selected] || {status:'unavailable',as_of:selected} : indicators?.chip_profile;
+  }
+  function groupsAt(time) { return markerGroups.filter((group) => day(group.time || group.bar_date) === time); }
+  function updateChartSelection(type, time = null, point = null, selectedDate = null) {
+    const ui = evidenceUI();
+    if (analysisLoading) return;
+    if (!ui) { $('marker-details').textContent = KHQuantMarkers.describe(markerMappings,time,state.frequency); renderIndicatorReadout(time); return; }
+    const previous = chartSelection;
+    chartSelection = ui.selectionTransition(chartSelection,{type,time,date:selectedDate});
+    if (chartSelection.pinned && (type === 'hover' || type === 'leave')) return;
+    if (point) { const rect = $('analysis-chart').getBoundingClientRect(); popupAnchor = {x:rect.left + point.x,y:rect.top + point.y}; }
+    const active = chartSelection.pinned || chartSelection.hover;
+    $('marker-details').textContent = KHQuantMarkers.describe(markerMappings,active,state.frequency);
+    $('chart-evidence-reset').hidden = !chartSelection.pinned;
+    $('chart-selection-status').textContent = active ? `${chartSelection.pinned ? '已固定' : '所指 K 线'} ${active} · ${state.frequency} · 筹码截至 ${selectedChipProfile()?.as_of || active}` : '悬浮 K 线切换筹码分布；点击固定日期。';
+    renderIndicatorReadout(active);
+    if (previous.hover !== chartSelection.hover || previous.pinned !== chartSelection.pinned || previous.selectedDate !== chartSelection.selectedDate || type === 'clear') { drawChipProfile(); syncChartRange(); }
+    renderChartPopup();
+  }
+  function resetChartSelection() {
+    chartSelection = {hover:null,pinned:null,selectedDate:null}; popupAnchor = null;
+    $('chart-evidence-popup').hidden = true; $('chart-evidence-popup').replaceChildren(); $('chart-evidence-reset').hidden = true;
+    $('chart-selection-status').textContent = '悬浮 K 线切换筹码分布；点击固定日期。';
+  }
+  function renderChartPopup() {
+    const ui = evidenceUI(), host = $('chart-evidence-popup'), active = chartSelection.pinned || chartSelection.hover;
+    const groups = groupsAt(active);
+    if (!ui || !active || !state.analysis || analysisLoading || !chartSelection.pinned && !groups.some((group) => group.visible !== false)) { host.hidden = true; return; }
+    host.dataset.pinned = String(Boolean(chartSelection.pinned));
+    host.innerHTML = ui.popupHtml({evidence:state.analysis.chart_evidence,groups,barDate:active,frequency:state.frequency,selectedDate:chartSelection.selectedDate,pinned:Boolean(chartSelection.pinned),profileAsOf:selectedChipProfile()?.as_of});
+    host.hidden = false;
+    const anchor = popupAnchor || {x:Math.min(window.innerWidth - 24,160),y:Math.min(window.innerHeight - 24,180)};
+    const width = host.offsetWidth, height = host.offsetHeight;
+    const left = Math.max(12,Math.min(window.innerWidth - width - 12,anchor.x + width + 24 > window.innerWidth ? anchor.x - width - 12 : anchor.x + 12));
+    const top = Math.max(12,Math.min(window.innerHeight - height - 12,anchor.y - 35));
+    host.style.left = `${left}px`; host.style.top = `${top}px`;
+  }
   function drawChipProfile() {
     const overlay = $('chip-profile-overlay');
     overlay.replaceChildren();
     if (!chart || !state.analysis || !$('layer-chips').checked || $('view-analysis').hidden) return;
-    const profile = state.analysis.frequencies?.[state.frequency]?.indicators?.chip_profile;
+    const profile = selectedChipProfile();
     const width = $('chip-profile').clientWidth, height = $('analysis-chart').clientHeight;
     if (!width || !height) return;
     const c = colors(), plotHeight = height - chart.timeScale().height();
     overlay.setAttribute('viewBox',`0 0 ${width} ${height}`);
     const node = (tag, attributes, text = null) => { const item = document.createElementNS('http://www.w3.org/2000/svg',tag); Object.entries(attributes).forEach(([key,value]) => item.setAttribute(key,String(value))); if (text != null) item.textContent = text; overlay.append(item); return item; };
-    $('chip-profile-caption').textContent = `右侧筹码量价估算 · ${profile?.window_bars || 120}日 · 截至 ${profile?.as_of || '—'} · 非真实持仓筹码`;
+    const caption = `右侧筹码量价估算 · ${profile?.window_bars || 120}日 · 截至 ${profile?.as_of || '—'}${chartSelection.pinned ? ' · 已固定' : ''} · 非真实持仓筹码`;
+    $('chip-profile-caption').textContent = caption;
     if (profile?.status !== 'available') { node('text',{x:8,y:25,fill:c.muted,'font-size':10},profile?.status === 'no_volume' ? '窗口内无有效成交量' : profile?.status === 'insufficient_history' ? `历史不足 ${profile.window_bars} 根` : '暂无分布数据'); return; }
     const bins = profile.bins || [], maximum = Math.max(...bins.map((bin) => bin.mass_fraction),0);
     bins.forEach((bin) => {
@@ -230,6 +284,11 @@
       const length = (width - 16) * bin.mass_fraction / maximum;
       const rect = node('rect',{x:width - 8 - length,y,width:length,height:Math.max(1,bottom - y - .5),fill:in70 ? c.chips : c.muted,'fill-opacity':in70 ? .8 : .35});
       const title = document.createElementNS('http://www.w3.org/2000/svg','title'); title.textContent = `${number(bin.price_low,2)}–${number(bin.price_high,2)} 元 · 窗口成交量占比 ${percent(bin.mass_fraction)}`; rect.append(title);
+      rect.setAttribute('tabindex','0');
+      rect.setAttribute('aria-label',title.textContent);
+      const showBin = () => { rect.setAttribute('fill-opacity','1'); rect.setAttribute('stroke',c.accent); $('chip-profile-caption').textContent = `${caption} · ${title.textContent}`; };
+      const hideBin = () => { rect.setAttribute('fill-opacity',in70 ? '.8' : '.35'); rect.setAttribute('stroke','none'); $('chip-profile-caption').textContent = caption; };
+      rect.addEventListener('pointerenter',showBin); rect.addEventListener('focus',showBin); rect.addEventListener('pointerleave',hideBin); rect.addEventListener('blur',hideBin);
     });
     const middle = candles.priceToCoordinate(profile.chip50);
     if (middle != null && middle >= 0 && middle <= plotHeight) node('line',{x1:6,x2:width - 6,y1:middle,y2:middle,stroke:c.chips,'stroke-dasharray':'3 3'});
@@ -245,7 +304,7 @@
     const from = Math.max(0,Math.min(bars.length - 1,Math.ceil(range.from))), to = Math.max(from,Math.min(bars.length - 1,Math.floor(range.to)));
     ['chart-range-start','chart-range-end'].forEach((id) => { $(id).min = day(bars[0].time); $(id).max = day(bars.at(-1).time); });
     $('chart-range-start').value = day(bars[from].time); $('chart-range-end').value = day(bars[to].time);
-    $('chart-range-summary').textContent = `${state.frequency} · 显示 ${to - from + 1} 根 · 判断 / 筹码截至 ${state.analysis.data_end || state.query?.as_of || '—'} · 滚轮缩放 / 拖动平移`;
+    $('chart-range-summary').textContent = `${state.frequency} · 显示 ${to - from + 1} 根 · 判断截至 ${state.analysis.data_end || state.query?.as_of || '—'} · 筹码截至 ${selectedChipProfile()?.as_of || '—'} · 滚轮缩放 / 拖动平移`;
   }
   function applyChartRange() {
     const bars = state.analysis?.frequencies?.[state.frequency]?.bars || [];
@@ -463,14 +522,14 @@
     $('analysis-research-evidence').hidden = !research;
     $('analysis-research-evidence').innerHTML = research ? researchEvidence({...research,...state.analysis.next_session_decision}) : '';
     if (state.analysis?.compute_info) $('analysis-compute-status').textContent = research ? researchComputeCaption(state.analysis.compute_info,state.analysis) : computeCaption(state.analysis.compute_info);
-    $('event-list').innerHTML = events.length ? [...events].reverse().map((event) => `<article class="event-entry" data-event-time="${esc(day(event.time))}"><strong>${esc(readableEvent(event))}</strong><p><span class="badge ${actionClass(event.action)}">${actionShape(event.action)}${esc(actionLabel(event.action))}意图</span></p><p class="event-reference">${esc(referencePriceText(event.reference_price,event.reference_price_date,`${actionLabel(event.action)}参考价`))}</p>${event.entry_plan ? entryPlanHtml(event) : ''}<p>${esc(readableReason(event))}</p><p class="event-time">发生 ${esc(display(event.time))}<br>可用 ${esc(display(event.available_at))}</p><button type="button" data-locate-event="${esc(day(event.time))}">定位主图</button>${ruleOriginal(event)}</article>`).join('') : '<div class="empty-copy">该时点没有规则事件。形成中的结构不代表确认信号。</div>';
+    $('event-list').innerHTML = events.length ? [...events].reverse().map((event) => `<article class="event-entry" data-event-time="${esc(day(event.time))}" data-evidence-date="${esc(day(event.evidence_date || event.time))}"><strong>${esc(readableEvent(event))}</strong><p><span class="badge ${actionClass(event.action)}">${actionShape(event.action)}${esc(actionLabel(event.action))}意图</span></p><p class="event-reference">${esc(referencePriceText(event.reference_price,event.reference_price_date,`${actionLabel(event.action)}参考价`))}</p>${event.entry_plan ? entryPlanHtml(event) : ''}<p>${esc(readableReason(event))}</p><p class="event-time">发生 ${esc(display(event.time))}<br>可用 ${esc(display(event.available_at))}</p><button type="button" data-locate-event="${esc(day(event.evidence_date || event.time))}">定位主图</button>${ruleOriginal(event)}</article>`).join('') : '<div class="empty-copy">该时点没有规则事件。形成中的结构不代表确认信号。</div>';
   }
-  function highlightEvent(time) { document.querySelectorAll('[data-event-time]').forEach((entry) => { entry.style.background = entry.dataset.eventTime === time ? 'var(--accent-soft)' : ''; }); }
+  function highlightEvent(time) { const dates = new Set(Array.isArray(time) ? time : [time]); document.querySelectorAll('[data-event-time]').forEach((entry) => { entry.style.background = (dates.has(entry.dataset.eventTime) || dates.has(entry.dataset.evidenceDate)) ? 'var(--accent-soft)' : ''; }); }
   function locateTime(time) {
     if (!chart) return;
     const bars = state.analysis?.frequencies?.[state.frequency]?.bars || [];
     const index = bars.findIndex((bar) => KHQuantMarkers.periodKey(bar.time,state.frequency) === KHQuantMarkers.periodKey(time,state.frequency));
-    if (index >= 0) chart.timeScale().setVisibleLogicalRange({from:Math.max(0,index - 35),to:index + 5});
+    if (index >= 0) { chart.timeScale().setVisibleLogicalRange({from:Math.max(0,index - 35),to:index + 5}); updateChartSelection('pin',day(bars[index].time),null,time); }
     highlightEvent(time);
   }
   function getSymbol(value) { const text = value.trim(); const known = [...state.symbolCatalog.values()].find((item) => item.symbol === text.toUpperCase() || item.symbol.slice(0,6) === text || item.name === text); if (known) return known.symbol; const match = text.match(/\d{6}(?:\.(?:SH|SZ|BJ))?/i); return match ? match[0].toUpperCase() : text; }
@@ -478,18 +537,26 @@
   function dateSpec(prefix) { const spec = {}; ['start','end'].forEach((key) => { if ($(`${prefix}-${key}`).value) spec[key] = $(`${prefix}-${key}`).value; }); if (spec.start && spec.end && spec.start > spec.end) throw new Error('开始日期不能晚于结束日期。'); return spec; }
   async function analyze(query, preserveDates = false, locate = null) {
     const sequence = ++state.analysisSequence;
+    analysisLoading = true; resetChartSelection();
+    emptyChart('正在按所选时点分析','参考价与评分加载中…');
+    $('event-context').textContent = '正在按所选时点加载判断…'; $('event-list').innerHTML = '<div class="empty-copy">事件加载中…</div>';
+    $('analysis-research-evidence').hidden = true; $('analysis-research-evidence').replaceChildren();
+    if (!preserveDates) { historyRows = []; historyPage = 0; }
+    renderReplayEvidence(); updateReplay();
     $('analysis-state').textContent = '正在分析…';
     $('analysis-form').querySelector('[type=submit]').disabled = true;
     try {
       const data = await request('/api/analysis', {method:'POST',body:JSON.stringify(query)});
       if (sequence !== state.analysisSequence) return;
-      state.analysis = data; state.query = query;
+      state.analysis = data; state.query = query; analysisLoading = false;
+      const incoming = data.chart_evidence?.rows || [];
+      historyRows = preserveDates ? [...new Map([...historyRows,...incoming].map((row) => [row.date,row])).values()] : incoming;
       if (!preserveDates) { state.dates = (data.frequencies?.['日线']?.bars || []).map((bar) => day(bar.time)); state.replayIndex = Math.max(0,state.dates.length - 1); }
       renderAnalysis(); renderEvents(); updateReplay();
       if (locate) locateTime(locate);
     } catch (error) {
       if (sequence !== state.analysisSequence) return;
-      state.analysis = null;
+      state.analysis = null; analysisLoading = false;
       $('event-context').innerHTML = nextSessionGuidance(null);
       $('analysis-research-evidence').hidden = true; $('analysis-research-evidence').replaceChildren();
       if (candles) { candles.setData([]); candles.setMarkers([]); penSeries.forEach((series) => chart.removeSeries(series)); penSeries = []; volume.setData([]); }
@@ -497,14 +564,28 @@
       $('event-count').textContent = '0'; $('analysis-state').textContent = '分析失败';
       $('chart-symbol').textContent = query.symbol; $('chart-information').textContent = '未完成'; $('structure-list').replaceChildren(); $('analysis-caveats').hidden = true; updateReplay();
       emptyChart('分析未完成', error.message); showError(error);
-    } finally { if (sequence === state.analysisSequence) $('analysis-form').querySelector('[type=submit]').disabled = false; }
+    } finally { if (sequence === state.analysisSequence) { analysisLoading = false; $('analysis-form').querySelector('[type=submit]').disabled = false; updateReplay(); } }
+  }
+  function renderReplayEvidence() {
+    const ui = evidenceUI(); if (!ui) return;
+    if (analysisLoading) { $('replay-evidence-card').innerHTML = '<p class="subtle">正在按所选日期重新判断，参考价与评分加载中…</p>'; $('history-evidence-table').innerHTML = '<p class="subtle">历史参考记录加载中…</p>'; return; }
+    const evidence = state.analysis?.chart_evidence;
+    const selected = state.query?.as_of || state.analysis?.as_of || state.analysis?.data_end || state.dates[state.replayIndex];
+    const row = ui.rowAt(evidence,selected);
+    $('replay-evidence-card').innerHTML = state.analysis ? `<strong>信息截止 ${esc(selected || '—')}</strong>${ui.referenceHtml(row)}${ui.agentsHtml(row)}${ui.riskHtml(row?.raw_risk_plan)}<p class="subtle">参考价使用该日行情；评分按当时可见的模型与事件展示。</p>` : '<p class="subtle">尚无成功分析结果，参考价与评分不可用。</p>';
+    if (!state.analysis) { $('history-evidence-table').innerHTML = '<p class="subtle">历史参考记录不可用，请重新分析。</p>'; return; }
+    const cutoff = day(state.query?.as_of || state.analysis?.as_of || state.analysis?.data_end);
+    const rows = cutoff ? historyRows.filter((item) => item.date <= cutoff) : historyRows;
+    historyPage = ui.historyPage(rows,historyPage).page;
+    $('history-evidence-table').innerHTML = ui.historyHtml(rows,historyPage,day(selected));
   }
   function updateReplay() {
-    const available = Boolean(state.analysis) && state.dates.length > 0;
+    const available = Boolean(state.analysis) && state.dates.length > 0 && !analysisLoading;
     ['replay-slider','replay-date','replay-reset'].forEach((id) => { $(id).disabled = !available; });
     $('replay-slider').max = String(Math.max(0,state.dates.length - 1)); $('replay-slider').value = String(state.replayIndex);
     $('replay-date').min = state.dates[0] || ''; $('replay-date').max = state.dates[state.dates.length - 1] || ''; $('replay-date').value = state.dates[state.replayIndex] || '';
     $('replay-prev').disabled = !available || state.replayIndex === 0; $('replay-next').disabled = !available || state.replayIndex >= state.dates.length - 1;
+    renderReplayEvidence();
   }
   async function replay(index) {
     if (!state.query || !state.dates.length) return;
@@ -1092,7 +1173,29 @@
     if (context.device) $(`${prefix}-device`).value = context.device;
     updateResearchControls(prefix);
   }
-  async function openRun(id) { const data = await request(`/api/runs/${encodeURIComponent(id)}`); const result = data.result || data; const kind = data.kind || (result.model_manifest && result.evaluation ? 'research_train' : result.trades ? 'backtest' : result.rows ? 'scan' : result.data_status ? 'update' : 'analysis'); if (kind === 'analysis') { state.analysis = result; state.query = {...(result.request || {symbol:result.symbol,start:null,end:result.data_end,as_of:result.as_of}),...resultResearchContext(result)}; applyResearchContext('analysis',state.query); $('analysis-symbol').value = state.query.symbol || result.symbol; $('analysis-start').value = state.query.start || ''; $('analysis-end').value = state.query.end || result.data_end; state.dates = (result.frequencies?.['日线']?.bars || []).map((bar) => day(bar.time)); state.replayIndex = Math.max(0,state.dates.length - 1); location.hash = 'analysis'; renderAnalysis(); renderEvents(); updateReplay(); } else showResult(kind,result,true); }
+  async function openRun(id) {
+    const sequence = ++openRunSequence, analysisAtStart = state.analysisSequence;
+    let data;
+    try { data = await request(`/api/runs/${encodeURIComponent(id)}`); }
+    catch (error) { if (sequence !== openRunSequence) return; throw error; }
+    if (sequence !== openRunSequence) return;
+    const result = data.result || data;
+    const kind = data.kind || (result.model_manifest && result.evaluation ? 'research_train' : result.trades ? 'backtest' : result.rows ? 'scan' : result.data_status ? 'update' : 'analysis');
+    if (kind !== 'analysis') { showResult(kind,result,true); return; }
+    // A saved analysis replaces only the generation that existed when opened.
+    // Other run types keep a pending analysis intact; a newer analysis wins.
+    if (analysisAtStart !== state.analysisSequence) return;
+    ++state.analysisSequence;
+    resetChartSelection(); analysisLoading = false;
+    $('analysis-form').querySelector('[type=submit]').disabled = false;
+    historyRows = result.chart_evidence?.rows || []; historyPage = 0;
+    state.analysis = result;
+    state.query = {...(result.request || {symbol:result.symbol,start:null,end:result.data_end,as_of:result.as_of}),...resultResearchContext(result)};
+    applyResearchContext('analysis',state.query);
+    $('analysis-symbol').value = state.query.symbol || result.symbol; $('analysis-start').value = state.query.start || ''; $('analysis-end').value = state.query.end || result.data_end;
+    state.dates = (result.frequencies?.['日线']?.bars || []).map((bar) => day(bar.time)); state.replayIndex = Math.max(0,state.dates.length - 1);
+    location.hash = 'analysis'; renderAnalysis(); renderEvents(); updateReplay();
+  }
   async function analyzeSymbol(symbol,end,source = null) {
     $('analysis-symbol').value = symbol;
     location.hash = 'analysis';
@@ -1103,12 +1206,14 @@
   }
   function bind() {
     window.addEventListener('hashchange',route);
+    window.addEventListener('keydown',(event) => { if (event.key === 'Escape') updateChartSelection('clear'); });
+    $('chart-evidence-reset').addEventListener('click',() => updateChartSelection('clear'));
     $('theme-toggle').addEventListener('click',() => setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
     $('page-error').querySelector('button').addEventListener('click',() => { $('page-error').hidden = true; });
     $('analysis-symbol').addEventListener('input',() => { clearTimeout(searchTimer); searchTimer = setTimeout(() => searchSymbols($('analysis-symbol').value).catch(showError),250); });
     $('analysis-form').addEventListener('submit',(event) => { event.preventDefault(); try { analyze({symbol:getSymbol($('analysis-symbol').value),...dateSpec('analysis'),...researchSpec('analysis')}); } catch (error) { showError(error); } });
     $('send-backtest').addEventListener('click',() => { try { const symbol = getSymbol($('analysis-symbol').value); if (!symbol) { notice('请先选择股票'); return; } const context = researchSpec('analysis'); if (context.usage_mode === 'retrospective') throw new Error('事后研究历史图不能转为可执行回测，请先切换历史滚动研究或当前生产判断。'); $('backtest-symbols').value = symbol; ['start','end'].forEach((key) => { $(`backtest-${key}`).value = $(`analysis-${key}`).value; }); applyResearchContext('backtest',context); location.hash = 'backtest'; } catch (error) { showError(error); } });
-    document.querySelectorAll('[data-frequency]').forEach((button) => button.addEventListener('click',() => { state.frequency = button.dataset.frequency; document.querySelectorAll('[data-frequency]').forEach((item) => item.setAttribute('aria-pressed',String(item === button))); renderAnalysis(); }));
+    document.querySelectorAll('[data-frequency]').forEach((button) => button.addEventListener('click',() => { resetChartSelection(); state.frequency = button.dataset.frequency; document.querySelectorAll('[data-frequency]').forEach((item) => item.setAttribute('aria-pressed',String(item === button))); renderAnalysis(); }));
     ['ma','boll','chips','fractals','pens','zones','divergences','signals','wyckoff','trades','volume'].forEach((name) => $(`layer-${name}`).addEventListener('change',() => renderAnalysis(false)));
     $('chart-range-apply').addEventListener('click',applyChartRange);
     $('chart-zoom-in').addEventListener('click',() => zoomChart(.7)); $('chart-zoom-out').addEventListener('click',() => zoomChart(1.4));
@@ -1169,6 +1274,11 @@
     });
     document.addEventListener('click',(event) => {
       const button = event.target.closest('button'); if (!button) return;
+      if (button.hasAttribute('data-chart-evidence-close')) updateChartSelection('clear');
+      if (button.dataset.evidenceDate) { chartSelection = evidenceUI().selectionTransition(chartSelection,{type:'date',date:button.dataset.evidenceDate}); renderChartPopup(); drawChipProfile(); renderIndicatorReadout(chartSelection.pinned); syncChartRange(); $('chart-selection-status').textContent = `已固定原始日期 ${button.dataset.evidenceDate} · 筹码截至 ${selectedChipProfile()?.as_of || '—'}`; }
+      if (button.dataset.evidenceLocate) { highlightEvent(button.dataset.evidenceLocate); const entry = [...document.querySelectorAll('[data-event-time]')].find((item) => item.dataset.eventTime === button.dataset.evidenceLocate || item.dataset.evidenceDate === button.dataset.evidenceLocate); entry?.scrollIntoView({behavior:'smooth',block:'nearest'}); }
+      if (button.dataset.evidenceReplay || button.dataset.historyDate) { const time = button.dataset.evidenceReplay || button.dataset.historyDate; const index = state.dates.findIndex((item) => item === time); if (index >= 0 && !analysisLoading) replay(index).catch(showError); }
+      if (button.dataset.historyPage != null && !analysisLoading) { historyPage = Number(button.dataset.historyPage); renderReplayEvidence(); }
       if (button.dataset.favorite) changeWatchlist(button.dataset.favorite,state.favorites.has(button.dataset.favorite)).catch(showError);
       if (button.dataset.removeWatchlist) changeWatchlist(button.dataset.removeWatchlist,true).catch(showError);
       if (button.dataset.editHolding) editHolding(button.dataset.editHolding);

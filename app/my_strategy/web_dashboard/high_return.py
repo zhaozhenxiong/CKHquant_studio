@@ -114,6 +114,8 @@ def analyze_high_return(*, symbol, start="2026-01-01", end=None, as_of=None, res
                   research={"model_family": "high_return", "usage_mode": usage_mode, "model_policy": model_policy,
                             "calendar_run_id": calendar_id, "model_routes": overlay.get("model_routes", []),
                             "probability_target": overlay.get("probability_target"), "publication_allowed": False})
+    from my_strategy.web_dashboard.chart_evidence import decorate_analysis
+    result = decorate_analysis(result, raw=item["raw"], features=item["features"], overlay=overlay)
     return _json(result)
 
 

@@ -334,6 +334,9 @@ async def analysis(spec: AnalysisRequest, request: Request):
             result = analyze_high_return(**query, config=settings)
         else:
             result = analyze_stock(**query, config=settings)
+        if "chart_evidence" not in result:
+            from my_strategy.web_dashboard.chart_evidence import decorate_analysis
+            result = decorate_analysis(result)
         run_config = {"request": query, "strategy": settings}
         if spec.entry_policy != "legacy" and result.get("research", {}).get("entry_plan_config_hash"):
             run_config["entry_plan_config_hash"] = result["research"]["entry_plan_config_hash"]
