@@ -43,6 +43,30 @@ def _zone_key(zone: Any) -> tuple[Any, ...]:
     return (_day(zone.sdt), _day(zone.edt), float(zone.zd), float(zone.zg))
 
 
+def _forming_pen(analysis: Any, observed_at: str, pending_time: Any = None) -> dict[str, Any] | None:
+    """Read a native unfinished stroke; its endpoint is still free to move."""
+    unfinished = analysis.ubi
+    if not unfinished:
+        return None
+    anchor = unfinished["fx_a"]
+    # Native UBI includes the preceding neighbour of its starting fractal.
+    # That neighbour cannot be the endpoint of a stroke starting later.
+    raw_bars = [bar for bar in unfinished["raw_bars"] if bar.dt >= anchor.dt]
+    if not raw_bars:
+        return None
+    downward = str(unfinished["direction"]) == "向下"
+    endpoint = min(raw_bars, key=lambda bar: (float(bar.low), -pd.Timestamp(bar.dt).value)) if downward else max(
+        raw_bars, key=lambda bar: (float(bar.high), pd.Timestamp(bar.dt).value))
+    def visible_day(value: Any) -> str:
+        return observed_at[:10] if pending_time is not None and value == pending_time else _day(value)
+    start, end = visible_day(anchor.dt), visible_day(endpoint.dt)
+    if start >= end:
+        return None
+    return {"start_time": start, "end_time": end, "start_price": float(anchor.fx),
+            "end_price": float(endpoint.low if downward else endpoint.high),
+            "confirmed_at": None, "is_confirmed": False, "observed_at": observed_at}
+
+
 class IntentSession:
     """Chronological native Position replay; never supplies chart confirmations."""
     def __init__(self, symbol: str, config: dict[str, Any], *, create_position: bool = True):
@@ -177,6 +201,9 @@ class CzscSession(IntentSession):
                      "close": float(bar.close), "volume": float(bar.vol), "is_closed": True} for bar in self.closed[frequency]]
             pending = self.pending.get(frequency)
             availability = list(self.closed_available[frequency])
+            observed_at = _day(self.closed["日线"][-1].dt) + "T15:00:00+08:00"
+            display_analysis = analysis
+            pending_time = None
             if pending is not None and self.closed["日线"] and not any(bar.dt == pending.dt for bar in self.closed[frequency]):
                 observed_day = _day(self.closed["日线"][-1].dt)
                 # Display the observed OHLC snapshot only; pending is never advanced
@@ -186,6 +213,11 @@ class CzscSession(IntentSession):
                              "close": float(pending.close), "volume": float(pending.vol), "is_closed": False,
                              "observed_at": observed_day + "T15:00:00+08:00"})
                 availability.append(observed_day + "T15:00:00+08:00")
+                # This independent display snapshot may supply forming strokes,
+                # but never confirmations, signals, or the live session state.
+                display_analysis = self.czsc.CZSC([*self.closed[frequency], pending],
+                    min_bi_len=int(self.config["min_bi_len"]), max_bi_num=int(self.config["max_bi_num"]))
+                pending_time = pending.dt
             fractals, pens, zones = [], [], []
             if analysis is not None:
                 confirmed = self.confirmations[frequency]
@@ -196,8 +228,23 @@ class CzscSession(IntentSession):
                 finished = {_pen_key(pen) for pen in analysis.finished_bis}
                 for pen in analysis.bi_list:
                     key = _pen_key(pen)
+                    if display_analysis is not analysis and key not in finished:
+                        continue
                     pens.append({"start_time": key[0], "end_time": key[1], "start_price": key[2], "end_price": key[3],
                                  "confirmed_at": confirmed["pens"].get(key) if key in finished else None, "is_confirmed": key in finished})
+                if display_analysis is not analysis:
+                    last_confirmed_end = pens[-1]["end_time"] if pens else None
+                    for pen in display_analysis.bi_list:
+                        key = _pen_key(pen)
+                        start_time = observed_at[:10] if pen.fx_a.dt == pending_time else key[0]
+                        end_time = observed_at[:10] if pen.fx_b.dt == pending_time else key[1]
+                        if key in finished or start_time >= end_time or (last_confirmed_end and start_time < last_confirmed_end):
+                            continue
+                        pens.append({"start_time": start_time, "end_time": end_time, "start_price": key[2], "end_price": key[3],
+                                     "confirmed_at": None, "is_confirmed": False, "observed_at": observed_at})
+                forming = _forming_pen(display_analysis, observed_at, pending_time)
+                if forming and (not pens or forming["start_time"] >= pens[-1]["end_time"]):
+                    pens.append(forming)
                 for zone in analysis.zs_list:
                     if len(zone.bis) < 3 or not zone.is_valid():
                         continue

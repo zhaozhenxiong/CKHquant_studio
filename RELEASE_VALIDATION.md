@@ -1,3 +1,19 @@
+# KHQuant 0.1.2 GitHub 发行验证
+
+2026-10-11。本次发布完整的独立 MA / 结构 / 威科夫买卖点、真实交易区间和 L2 高收益入场/持仓退出实现，并保留 GitHub 原有 Windows UTF-8 与克隆日历 SHA 修复。
+
+- 新源码完整回归：1,296 通过、10 项跳过、1 项既有 Starlette 弃用提示，69.52 秒。随后单独复核 Windows 原生重建的 wheel 索引回归和语法门槛。
+- 29 项冻结训练核心、默认参数与本机正式基线逐项 SHA 一致；公共159项中155项一致，CLI、runtime_env、doctor、dual calendar 四项保留上游兼容性修复。
+- 新主程序 wheel 独立安装后在真实 Apple Silicon / Python 3.12 通过 CPU 和 MPS：严格 doctor、合成训练保存/重载/40行推理、结构分析/扫描/回测、六入口与关注/持仓跨重启保存。复用既有锁定依赖，不宣称重新下载依赖的全新环境。
+- 保留226项冻结CZSC源码及Windows x64/macOS ARM64原生资产的原SHA；CI重建得到的新物理wheel SHA由各自索引记录，不能用历史附件wheel SHA比较新构建。
+- GitHub 0.1.2 Windows/Linux CPU CI 单独执行；CUDA、Intel Mac、完整新嵌套模型状态迁移未认证。源码包暂只附Windows x64/macOS ARM64原生资产。实际完成状态以 Actions 和发布验收资产为准。
+
+公开资产仅含代码、原生运行时与参数；不含行情、训练模型、真实研究账本或私人状态。本机79头权重及原始科学冻结资产保持原样。高收益实证仍为连续扣费 −0.4142365082%，参考 −0.2856443810%；收益改善未通过，独立未来验证 pending。正式软件发布不授予模型市场收益资格。
+
+安装资产绑定发布Git提交及逐文件SHA，见 release.json、image-manifest.json、RELEASE_MANIFEST.json 和 SHA256SUMS.txt。构建宿主绝对路径仅保留本机审计材料。
+
+---
+
 # KHQuant 0.1.1 GitHub 发行验证
 
 2026-10-10。最终主程序运行时代码与 25a66bc96ff180837e438b5ee6bae4b9c3c8d03c 的内容一致；后续变更仅安装验证脚本、回归测试及发行记录。

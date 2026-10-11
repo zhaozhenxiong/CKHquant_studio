@@ -57,6 +57,10 @@ requests==2.34.2
 requests-toolbelt==1.0.0
 rich==15.0.0
 scipy==1.18.1
+scikit-learn==1.7.2
+joblib==1.6.0
+threadpoolctl==3.7.0
+cloudpickle==3.1.2
 setuptools==83.0.0
 shellingham==1.5.4
 simplejson==4.1.1

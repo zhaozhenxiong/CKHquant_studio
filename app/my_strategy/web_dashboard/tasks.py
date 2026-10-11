@@ -83,8 +83,8 @@ class TaskManager:
             return job
 
     def submit(self, kind: str, spec: dict[str, Any]) -> dict[str, Any]:
-        if kind not in {"scan", "backtest", "update", "research_train", "dual_research_train", "wyckoff_research_train"}:
-            raise ValueError("仅支持结构扫描、CZSC回测和行情更新")
+        if kind not in {"scan", "backtest", "update", "research_train", "dual_research_train", "wyckoff_research_train", "high_return_points_build", "high_return_episodes_build", "high_return_train", "high_return_backtest"}:
+            raise ValueError("任务类型不受支持")
         with self._lock:
             if self._closed:
                 raise RuntimeError("任务服务正在关闭")
@@ -138,7 +138,7 @@ class TaskManager:
                 self._cancel.pop(job_id, None)
 
     def _finish_research_run(self, job: dict[str, Any]) -> None:
-        if not job.get("run_id") or not (job["kind"] in {"research_train", "dual_research_train", "wyckoff_research_train"} or job["spec"].get("research")):
+        if not job.get("run_id") or not (job["kind"] in {"research_train", "dual_research_train", "wyckoff_research_train", "high_return_points_build", "high_return_episodes_build", "high_return_train", "high_return_backtest"} or job["spec"].get("research")):
             return
         path = (self.results.runs_root / job["run_id"] / "metadata.json").resolve()
         if not path.is_relative_to(self.results.runs_root.resolve()):
@@ -155,6 +155,40 @@ class TaskManager:
         from my_strategy.services.czsc_analysis import strategy_config
         if kind == "update":
             return self._update(job_id, spec)
+        if kind in {"high_return_points_build", "high_return_episodes_build", "high_return_train", "high_return_backtest"}:
+            from my_strategy.services.czsc_high_return_research import (
+                build_high_return_artifacts, train_high_return_research, backtest_high_return,
+            )
+            def high_return_progress(stage, current, total, failed=0):
+                self._check(job_id)
+                self._patch(job_id, progress_detail={"stage": stage, "current": current, "total": total, "failed": failed})
+            callbacks = {"progress": high_return_progress, "check_cancel": lambda: self._check(job_id),
+                         "run_callback": lambda run_id: self._patch(job_id, run_id=run_id)}
+            common = {"symbols": spec.get("symbols") or None, "end": spec.get("end"),
+                      "cpu_workers": spec.get("cpu_workers") or 4, "config": spec.get("research_config"), **callbacks}
+            if kind == "high_return_backtest":
+                if not spec.get("model_run_id"):
+                    raise ValueError("离线高收益策略回放需要明确模型运行")
+                return backtest_high_return(**common, model_run_id=spec["model_run_id"],
+                                            start=spec.get("start"), device=spec.get("device") or "cpu")
+            if not spec.get("source_training_run_id"):
+                raise ValueError("高收益研究需要明确冻结来源运行")
+            common["source_training_run_id"] = spec["source_training_run_id"]
+            if kind == "high_return_train":
+                return train_high_return_research(**common, device=spec.get("device") or "auto")
+            return build_high_return_artifacts(**common, stage="points" if kind == "high_return_points_build" else "episodes")
+        if spec.get("research") and spec.get("model_family") == "high_return":
+            if kind == "backtest":
+                raise ValueError("高收益策略须使用显式离线 high_return_backtest 任务并选择模型运行")
+            from my_strategy.web_dashboard.high_return import scan_high_return
+            def high_return_scan_progress(stage, current, total, failed=0):
+                self._check(job_id)
+                self._patch(job_id, progress=min(95, current / total * 95) if total else 0,
+                            progress_detail={"stage": stage, "current": current, "total": total, "failed": failed})
+            return scan_high_return(**{key: spec.get(key) for key in
+                ("symbols", "start", "end", "model_run_id", "model_fold", "usage_mode", "calendar_run_id", "device", "cpu_workers")},
+                progress=high_return_scan_progress, check_cancel=lambda: self._check(job_id),
+                run_callback=lambda run_id: self._patch(job_id, run_id=run_id))
         if kind == "wyckoff_research_train":
             from my_strategy.services.czsc_wyckoff_research import train_wyckoff_research
             def wyckoff_progress(stage, current, total, failed):

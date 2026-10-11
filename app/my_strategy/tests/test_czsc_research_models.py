@@ -6,6 +6,8 @@ from pathlib import Path
 import shutil
 import sqlite3
 
+import numpy as np
+import pandas as pd
 import pytest
 
 from my_strategy.core.run_context import stable_hash
@@ -149,6 +151,33 @@ def test_ma_profile_routes_and_releases_without_borrowing_legacy_identity(ma_mod
     assert mismatched.catalog_errors and mismatched.resolve("2026-10-08")["model_dir"] is None
 
 
+@pytest.mark.parametrize("extension", [False, True])
+def test_ma_runtime_calendar_preserves_frozen_identity_and_only_appends_dates(ma_models, extension):
+    store, root, training, _ = ma_models
+    profile = get_feature_profile("ma_trend_v1")
+    frozen = json.loads((store.runs_root / "calendar/reports/calendar.json").read_text())["dates"]
+    runtime = [*frozen, "2026-10-09"] if extension else frozen
+    arguments = {"model_run_id": "training", "store": store, "feature_version": profile["version"],
+        "feature_schema_hash": profile["schema_hash"], "feature_columns": profile["columns"],
+        "strategy_version": profile["strategy_version"], "calendar_run_id": "runtime-calendar"}
+    assert not ModelResolver(**arguments).catalog  # Old ID-only requests remain exact.
+    before = (root / "models/production/manifest.json").read_bytes()
+    resolver = ModelResolver(**arguments, runtime_calendar_dates=runtime)
+    assert resolver.catalog and not resolver.catalog_errors
+    route = resolver.resolve("2026-10-09")
+    assert route["calendar_run_id"] == "calendar" and route["calendar_hash"] == training["calendar"]["hash"]
+    assert route["calendar_dates_hash"] == stable_hash(frozen)
+    assert route["runtime_calendar_run_id"] == "runtime-calendar" and route["runtime_calendar_dates_hash"] == stable_hash(runtime)
+    assert route["calendar_compatibility"] == ("frozen_dates_prefix" if extension else "identical_dates")
+    assert not route["applied_to_entry"] and before == (root / "models/production/manifest.json").read_bytes()
+    changed = [*runtime]; changed[1] = "2025-03-28"
+    rejected = ModelResolver(**arguments, runtime_calendar_dates=changed)
+    assert not rejected.catalog and "prefix" in rejected.catalog_errors[0]["reason"]
+    (root / "models/production/model.pt").write_bytes(b"tampered")
+    damaged = ModelResolver(**arguments, runtime_calendar_dates=runtime)
+    assert not damaged.catalog and "checkpoint hash" in damaged.catalog_errors[0]["reason"]
+
+
 @pytest.mark.parametrize("change", ["column_order", "schema_hash", "declared_profile", "strategy_version", "missing_strategy"])
 def test_ma_signed_but_incompatible_schema_cannot_route_or_publish(ma_models, change):
     store, root, training, _ = ma_models
@@ -219,6 +248,22 @@ def test_pinned_future_remains_explicitly_unavailable_and_retrospective_never_pr
     retro = ModelResolver(usage_mode="retrospective", **pinned).resolve("2025-01-01")
     assert retro["model_dir"] and retro["retrospective_overlap"]
     assert not retro["applied_to_entry"]
+
+
+@pytest.mark.parametrize("hour", [13, 16])
+def test_ma_daily_resolver_routes_midnight_dates_at_close_and_preserves_explicit_instants(models, hour):
+    store, _, _, _ = models
+    resolver = ModelResolver(model_run_id="training", store=store)
+    resolver.catalog = [{**resolver.catalog[-1], "available_at": f"2026-10-09T{hour}:00:00+08:00"}]
+    days = ["2026-10-09", pd.Timestamp("2026-10-09"), pd.Timestamp("2026-10-09").date(), np.datetime64("2026-10-09")]
+    routes = resolver.resolve_dates(days)
+    expected = resolver.resolve("2026-10-09")
+    assert all(route == expected for route in routes)
+    assert expected["status"] == ("production_shadow" if hour == 13 else "rules_no_model")
+    instant = resolver.resolve("2026-10-09T13:00:00+08:00")
+    assert instant["status"] == expected["status"]
+    if hour == 13:
+        assert resolver.resolve("2026-10-09T12:59:00+08:00")["status"] == "rules_no_model"
 
 
 def test_missing_incompatible_and_tampered_models_fail_closed(models):

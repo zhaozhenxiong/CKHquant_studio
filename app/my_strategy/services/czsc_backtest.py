@@ -126,8 +126,13 @@ def execute_decisions(symbol: str, frame: pd.DataFrame, decisions: list[dict[str
             previous = rows[index - 1] if index else None
             intent = decisions[index - 1] if index else None
             if previous is not None and intent is not None:
-                target = float(intent["target_weight"])
                 held = broker.shares(symbol)
+                target = float(intent["target_weight"])
+                # Independent event streams have no theoretical target path.
+                # Neutral events preserve the actual account and never invent
+                # a planned entry while flat. Existing target paths opt out.
+                if planned and intent.get("hold_current_position") is True:
+                    target = float(settings["max_weight"]) if held > 0 else 0.0
                 side = "BUY" if target > 0 and held == 0 else "SELL" if target == 0 and held > 0 else None
                 plan = intent.get("entry_plan")
                 if planned and held > 0:
@@ -261,9 +266,12 @@ def execute_decisions(symbol: str, frame: pd.DataFrame, decisions: list[dict[str
                             if broker.shares(symbol) == 0:
                                 actual_position, sell_pending = None, None
                                 model_exit_request = None
+            native_target = float(decisions[index]["target_weight"])
+            if planned and decisions[index].get("hold_current_position") is True:
+                native_target = float(settings["max_weight"]) if broker.shares(symbol) > 0 else 0.0
             daily.append({"date": date, "cash": float(broker.cash), "shares": broker.shares(symbol), "close": float(row.close),
                           "market_value": broker.market_value(symbol, float(row.close)), "equity": broker.equity({symbol: float(row.close)}),
-                          "target_weight": float(decisions[index]["target_weight"]), "run_id": run_id})
+                          "target_weight": native_target, "run_id": run_id})
             if planned:
                 daily[-1].update(entry_policy=entry_policy, actual_entry_price=(actual_position or {}).get("entry_price"),
                     actual_stop_price=(actual_position or {}).get("stop_price"), actual_plan_id=(actual_position or {}).get("plan_id"),
@@ -278,7 +286,7 @@ def execute_decisions(symbol: str, frame: pd.DataFrame, decisions: list[dict[str
                     "holding_bars": index - last_buy_index if last_buy_index is not None else None,
                     "entry_shares": position.get("entry_shares"), "stop_price": position.get("stop_price"),
                     "entry_policy": entry_policy, "plan_id": position.get("plan_id"),
-                    "sell_pending": sell_pending, "native_target_weight": float(decisions[index]["target_weight"]),
+                    "sell_pending": sell_pending, "native_target_weight": native_target,
                     "ledger_entries_seen": len(broker.ledger.entries),
                     "last_ledger_entry": broker.ledger.entries[-1].to_dict(),
                     "next_market_session": next_market.get(date),

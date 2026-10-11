@@ -120,13 +120,8 @@ def _prepare(symbol: str, end: str, market_dates: list[str], config: dict[str, A
 
 
 def _calendar(calendar_run_id: str) -> tuple[list[str], dict[str, Any]]:
-    root = run_path(calendar_run_id)
-    path = root / "reports" / "calendar.json"
-    value = json.loads(path.read_text(encoding="utf-8"))
-    if not value.get("verified") or not value.get("source"):
-        raise ValueError("研究标签需要已核验的交易日历")
-    dates = sorted(set(value["dates"]))
-    return dates, {"run_id": calendar_run_id, "source": value["source"], "hash": stable_hash(value), "path": str(path)}
+    from my_strategy.services.czsc_research_calendar import load_verified_calendar
+    return load_verified_calendar(calendar_run_id, runs_root=ARTIFACT_RUNS_ROOT)
 
 
 def build_dataset(symbols: list[str], end: str, context, config: dict[str, Any], market_dates: list[str],

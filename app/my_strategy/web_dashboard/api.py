@@ -4,10 +4,10 @@ from __future__ import annotations
 import asyncio
 from datetime import date
 import re
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Query, Request
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 router = APIRouter(prefix="/api")
 SYMBOL = re.compile(r"^\d{6}\.(SH|SZ|BJ)$")
@@ -26,7 +26,7 @@ class AnalysisRequest(BaseModel):
     end: date | None = None
     as_of: str | None = None
     research: bool = Field(default=True, strict=True)
-    model_family: Literal["ma_trend", "dual", "wyckoff"] = "ma_trend"
+    model_family: Literal["ma_trend", "dual", "wyckoff", "high_return"] = "ma_trend"
     usage_mode: Literal["production", "historical", "retrospective"] = "historical"
     model_policy: Literal["auto", "pinned"] = "auto"
     entry_policy: Literal["legacy", "fresh", "risk"] = "legacy"
@@ -55,6 +55,8 @@ class AnalysisRequest(BaseModel):
     def dates(self):
         if self.start and self.end and self.start > self.end:
             raise ValueError("开始日期不得晚于结束日期")
+        if self.research and self.model_family == "high_return" and self.usage_mode == "retrospective":
+            raise ValueError("高收益区间研究只支持前向历史检查点，不能使用事后模型研究历史图")
         if self.model_fold:
             self.model_policy = "pinned"
         if self.model_policy == "pinned" and not self.model_run_id:
@@ -63,11 +65,22 @@ class AnalysisRequest(BaseModel):
             self.model_fold = "production"
         if self.usage_mode == "retrospective" and self.model_policy != "pinned":
             raise ValueError("事后研究需要明确固定模型检查点")
-        if self.entry_policy == "risk" and self.usage_mode == "production":
+        if self.entry_policy == "risk" and self.usage_mode == "production" and self.model_family != "high_return":
             raise ValueError("价格与风险入场尚为实验，请使用历史研究模式")
         if not self.research and self.entry_policy != "legacy":
             raise ValueError("新入场计划需要组合研究模式")
         return self
+
+
+class ReplayHoldingRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    replay_run_id: str = Field(pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,179}$')
+    window: str = Field(pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$')
+    arm: Literal['reference','full','entry_only','exit_only','ma','structure','wyckoff'] = 'full'
+    symbol: str
+    as_of: date
+    usage_mode: Literal['production','historical'] = 'production'
+    _symbol = field_validator('symbol')(clean_symbol)
 
 
 class TaskSpec(BaseModel):
@@ -79,8 +92,9 @@ class TaskSpec(BaseModel):
     cpu_workers: int | None = Field(default=None, ge=1, le=16, strict=True)
     batch_size: int | None = Field(default=None, ge=1, le=128, strict=True)
     research: bool = Field(default=False, strict=True)
-    model_family: Literal["ma_trend", "dual", "wyckoff"] = "ma_trend"
+    model_family: Literal["ma_trend", "dual", "wyckoff", "high_return"] = "ma_trend"
     source_training_run_id: str | None = None
+    research_config: dict[str, Any] | None = None
     model_run_id: str | None = None
     model_fold: str | None = None
     calendar_run_id: str | None = None
@@ -123,7 +137,7 @@ class TaskSpec(BaseModel):
             self.model_policy = "pinned"
         if self.model_policy == "pinned" and self.model_run_id and not self.model_fold:
             self.model_fold = "production"
-        if self.entry_policy == "risk" and self.usage_mode == "production":
+        if self.entry_policy == "risk" and self.usage_mode == "production" and self.model_family != "high_return":
             raise ValueError("价格与风险入场尚为实验，请使用历史研究模式")
         if not self.research and self.entry_policy != "legacy":
             raise ValueError("新入场计划需要组合研究模式")
@@ -131,16 +145,16 @@ class TaskSpec(BaseModel):
 
 
 class TaskRequest(BaseModel):
-    kind: Literal["scan", "backtest", "update", "research_train", "dual_research_train", "wyckoff_research_train"]
+    kind: Literal["scan", "backtest", "update", "research_train", "dual_research_train", "wyckoff_research_train", "high_return_points_build", "high_return_episodes_build", "high_return_train", "high_return_backtest"]
     spec: TaskSpec = Field(default_factory=TaskSpec)
 
     @model_validator(mode="after")
     def research_start(self):
-        if self.spec.model_fold is not None and (self.kind not in {"scan", "backtest"} or not self.spec.research or self.spec.model_run_id is None):
+        if self.spec.model_fold is not None and (self.kind not in {"scan", "backtest", "high_return_backtest"} or not self.spec.research or self.spec.model_run_id is None):
             raise ValueError("模型检查点需要研究模式及模型运行")
         if self.spec.model_policy == "pinned" and not self.spec.model_run_id:
             raise ValueError("固定模型需要研究运行标识")
-        if self.spec.usage_mode == "retrospective" and self.kind in {"scan", "backtest"}:
+        if self.spec.usage_mode == "retrospective" and self.kind in {"scan", "backtest", "high_return_backtest"}:
             raise ValueError("事后模型研究仅用于结构分析，不用于策略扫描或回测认证")
         if self.kind == "research_train" and (self.spec.end is None or self.spec.calendar_run_id is None):
             raise ValueError("研究训练需要明确截止日及已核验交易日历运行")
@@ -152,7 +166,21 @@ class TaskRequest(BaseModel):
             if self.spec.end is None or self.spec.source_training_run_id is None:
                 raise ValueError("威科夫研究需要明确截止日及冻结来源运行")
             self.spec.model_family = "wyckoff"
-        if self.kind in {"scan", "backtest"} and self.spec.start is None:
+        if self.kind in {"high_return_points_build", "high_return_episodes_build", "high_return_train"}:
+            if self.spec.source_training_run_id is None:
+                raise ValueError("高收益区间研究需要明确的冻结来源运行")
+            self.spec.model_family = "high_return"
+            self.spec.research = True
+        if self.kind == "high_return_backtest":
+            if self.spec.model_run_id is None:
+                raise ValueError("高收益区间离线回测需要明确的高收益模型运行")
+            if self.spec.model_policy != "auto" or self.spec.model_fold is not None:
+                raise ValueError("高收益区间离线回测按日期自动匹配检查点，不能固定检查点")
+            if self.spec.usage_mode != "historical":
+                raise ValueError("高收益区间离线回测只支持历史滚动研究，尚未取得当前生产资格")
+            self.spec.model_family = "high_return"
+            self.spec.research = True
+        if self.kind in {"scan", "backtest", "high_return_backtest"} and self.spec.start is None:
             self.spec.start = date(2026, 1, 1)
             self.spec.dates()
         return self
@@ -244,6 +272,24 @@ async def wyckoff_status():
     return await asyncio.to_thread(wyckoff_research_status)
 
 
+@router.get("/research/high-return-status")
+async def high_return_status():
+    from my_strategy.services.czsc_high_return_research import status_high_return
+    return await asyncio.to_thread(status_high_return)
+
+
+@router.get("/research/high-return-forward-status")
+async def high_return_forward_status(model_run_id: str = Query(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,179}$")):
+    from my_strategy.services.czsc_high_return_forward import forward_status
+    return await asyncio.to_thread(forward_status, model_run_id)
+
+
+@router.post('/research/high-return-holding')
+async def high_return_holding(spec: ReplayHoldingRequest):
+    from my_strategy.web_dashboard.holding_evidence import holding_exit_research
+    return await asyncio.to_thread(holding_exit_research, **spec.model_dump(mode='json'))
+
+
 class ModelPromotionRequest(BaseModel):
     model_run_id: str
     checkpoint: str = "production"
@@ -283,9 +329,13 @@ async def analysis(spec: AnalysisRequest, request: Request):
     def calculate():
         query = spec.model_dump(mode="json", exclude_none=True)
         settings = strategy_config()
-        result = analyze_stock(**query, config=settings)
+        if spec.research and spec.model_family == "high_return":
+            from my_strategy.web_dashboard.high_return import analyze_high_return
+            result = analyze_high_return(**query, config=settings)
+        else:
+            result = analyze_stock(**query, config=settings)
         run_config = {"request": query, "strategy": settings}
-        if spec.entry_policy != "legacy":
+        if spec.entry_policy != "legacy" and result.get("research", {}).get("entry_plan_config_hash"):
             run_config["entry_plan_config_hash"] = result["research"]["entry_plan_config_hash"]
         context = create_run_context(task="czsc-analysis", as_of_date=result["data_end"],
                                      config=run_config,
