@@ -35,15 +35,15 @@ class AnalysisRequest(BaseModel):
     calendar_run_id: str | None = None
     device: str | None = None
     consensus_config: dict[str, Any] | None = None
+    consensus_version: Literal["czsc_agent_consensus_v1", "czsc_agent_consensus_v2"] | None = None
     _symbol = field_validator("symbol")(clean_symbol)
 
-    @field_validator("consensus_config")
-    @classmethod
-    def arbitration_parameters(cls, value):
-        if value is not None:
+    @model_validator(mode="after")
+    def arbitration_parameters(self):
+        if self.consensus_config is not None or self.consensus_version is not None:
             from my_strategy.services.czsc_agent_consensus import consensus_config as validate_config
-            return validate_config(value)
-        return value
+            self.consensus_config = validate_config(self.consensus_config, version=self.consensus_version)
+        return self
 
     @field_validator("model_run_id", "model_fold", "calendar_run_id")
     @classmethod
@@ -337,19 +337,23 @@ async def analysis(spec: AnalysisRequest, request: Request):
     from my_strategy.core.run_context import create_run_context
     def calculate():
         query = spec.model_dump(mode="json", exclude_none=True)
-        calculation_query = {key: value for key, value in query.items() if key != "consensus_config"}
+        calculation_query = {key: value for key, value in query.items()
+                             if key not in {"consensus_config", "consensus_version"}}
         settings = strategy_config()
         if spec.research and spec.model_family == "high_return":
             from my_strategy.web_dashboard.high_return import analyze_high_return
-            result = analyze_high_return(**calculation_query, config=settings, consensus_config=spec.consensus_config)
+            result = analyze_high_return(**calculation_query, config=settings, consensus_config=spec.consensus_config,
+                                         consensus_version=spec.consensus_version)
         else:
             result = analyze_stock(**calculation_query, config=settings)
         if "chart_evidence" not in result:
             from my_strategy.web_dashboard.chart_evidence import decorate_analysis
-            result = decorate_analysis(result, consensus_config=spec.consensus_config)
+            result = decorate_analysis(result, consensus_config=spec.consensus_config,
+                                       consensus_version=spec.consensus_version)
         consensus = result.get("consensus_decisions") or {}
         if consensus.get("config"):
             query["consensus_config"] = consensus["config"]
+            query["consensus_version"] = consensus["version"]
         run_config = {"request": query, "strategy": settings}
         if consensus.get("config_hash"):
             run_config["consensus_config_hash"] = consensus["config_hash"]

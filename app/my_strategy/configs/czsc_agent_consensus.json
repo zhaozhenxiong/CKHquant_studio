@@ -1,8 +1,16 @@
 {
-  "source_weights": {"ma": 1.0, "structure": 1.0, "wyckoff": 1.0},
-  "min_buy_support": 2.0,
-  "min_sell_support": 2.0,
-  "min_direction_margin": 1.0,
+  "version": "czsc_agent_consensus_v2",
+  "source_weights": {
+    "ma": 0.4,
+    "structure": 0.2,
+    "wyckoff": 0.3
+  },
+  "high_return_quality_weight": 0.1,
+  "min_buy_base_support": 0.5,
+  "min_buy_support": 0.6,
+  "min_sell_support": 0.5,
+  "min_direction_margin": 0.2,
+  "min_independent_families": 2,
   "ma_entry_threshold": 0.55,
   "wyckoff_min_strength": 0.5,
   "high_return_threshold": 0.1,

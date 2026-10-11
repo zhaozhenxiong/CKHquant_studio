@@ -540,6 +540,11 @@
   function getSymbol(value) { const text = value.trim(); const known = [...state.symbolCatalog.values()].find((item) => item.symbol === text.toUpperCase() || item.symbol.slice(0,6) === text || item.name === text); if (known) return known.symbol; const match = text.match(/\d{6}(?:\.(?:SH|SZ|BJ))?/i); return match ? match[0].toUpperCase() : text; }
   function symbols(value) { return [...new Set(value.split(/[\s,，;；]+/).map(getSymbol).filter(Boolean))]; }
   function dateSpec(prefix) { const spec = {}; ['start','end'].forEach((key) => { if ($(`${prefix}-${key}`).value) spec[key] = $(`${prefix}-${key}`).value; }); if (spec.start && spec.end && spec.start > spec.end) throw new Error('开始日期不能晚于结束日期。'); return spec; }
+  function consensusRequestContext(result) {
+    const consensus = result?.consensus_decisions;
+    const version = consensus?.version || consensus?.config?.version || result?.request?.consensus_version;
+    return {...(consensus?.config ? {consensus_config:consensus.config} : {}),...(version ? {consensus_version:version} : {})};
+  }
   async function analyze(query, preserveDates = false, locate = null) {
     const sequence = ++state.analysisSequence;
     analysisLoading = true; resetChartSelection();
@@ -553,7 +558,7 @@
     try {
       const data = await request('/api/analysis', {method:'POST',body:JSON.stringify(query)});
       if (sequence !== state.analysisSequence) return;
-      state.analysis = data; state.query = {...query,...data.request,...(data.consensus_decisions?.config ? {consensus_config:data.consensus_decisions.config} : {})}; analysisLoading = false;
+      state.analysis = data; state.query = {...query,...data.request,...consensusRequestContext(data)}; analysisLoading = false;
       const incoming = evidenceUI()?.mergeEvidenceRows(data.chart_evidence?.rows,data.consensus_decisions?.rows) || data.chart_evidence?.rows || [];
       historyRows = preserveDates ? [...new Map([...historyRows,...incoming].map((row) => [row.date,row])).values()] : incoming;
       if (!preserveDates) { state.dates = (data.frequencies?.['日线']?.bars || []).map((bar) => day(bar.time)); state.replayIndex = Math.max(0,state.dates.length - 1); }
@@ -577,7 +582,7 @@
     const evidence = state.analysis?.chart_evidence;
     const selected = state.query?.as_of || state.analysis?.as_of || state.analysis?.data_end || state.dates[state.replayIndex];
     const row = ui.rowAt(evidence,selected), decision = ui.consensusAt(state.analysis?.consensus_decisions,selected);
-    $('replay-evidence-card').innerHTML = state.analysis ? `<strong>信息截止 ${esc(selected || '—')}</strong>${ui.consensusHtml(decision,state.analysis?.consensus_decisions?.config)}${ui.referenceHtml(row)}${ui.agentsHtml(row,false,decision)}${ui.riskHtml(row?.raw_risk_plan)}${ui.rawEventsHtml(row)}<p class="subtle">参考价使用该日行情；评分按当时可见的模型与事件展示。</p>` : '<p class="subtle">尚无成功分析结果，参考价与评分不可用。</p>';
+    $('replay-evidence-card').innerHTML = state.analysis ? `<strong>信息截止 ${esc(selected || '—')}</strong>${ui.consensusHtml(decision,state.analysis?.consensus_decisions?.config,state.analysis?.consensus_decisions?.version)}${ui.referenceHtml(row)}${ui.agentsHtml(row,false,decision,state.analysis?.consensus_decisions?.config,state.analysis?.consensus_decisions?.version)}${ui.riskHtml(row?.raw_risk_plan)}${ui.rawEventsHtml(row)}<p class="subtle">参考价使用该日行情；评分按当时可见的模型与事件展示。</p>` : '<p class="subtle">尚无成功分析结果，参考价与评分不可用。</p>';
     if (!state.analysis) { $('history-evidence-table').innerHTML = '<p class="subtle">历史参考记录不可用，请重新分析。</p>'; return; }
     const cutoff = day(state.query?.as_of || state.analysis?.as_of || state.analysis?.data_end);
     const rows = cutoff ? historyRows.filter((item) => item.date <= cutoff) : historyRows;
@@ -1196,7 +1201,7 @@
     $('analysis-form').querySelector('[type=submit]').disabled = false;
     historyRows = evidenceUI()?.mergeEvidenceRows(result.chart_evidence?.rows,result.consensus_decisions?.rows) || result.chart_evidence?.rows || []; historyPage = 0;
     state.analysis = result;
-    state.query = {...(result.request || {symbol:result.symbol,start:null,end:result.data_end,as_of:result.as_of}),...resultResearchContext(result),...(result.consensus_decisions?.config ? {consensus_config:result.consensus_decisions.config} : {})};
+    state.query = {...(result.request || {symbol:result.symbol,start:null,end:result.data_end,as_of:result.as_of}),...resultResearchContext(result),...consensusRequestContext(result)};
     applyResearchContext('analysis',state.query);
     $('analysis-symbol').value = state.query.symbol || result.symbol; $('analysis-start').value = state.query.start || ''; $('analysis-end').value = state.query.end || result.data_end;
     state.dates = (result.frequencies?.['日线']?.bars || []).map((bar) => day(bar.time)); state.replayIndex = Math.max(0,state.dates.length - 1);

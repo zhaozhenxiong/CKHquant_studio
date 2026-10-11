@@ -39,11 +39,13 @@ def fixture():
 
 def test_display_start_keeps_warmup_direction_and_identical_overlapping_events():
     result, raw, features = fixture()
-    full = decorate_analysis(result, raw=raw, features=features)["consensus_decisions"]
+    full = decorate_analysis(result, raw=raw, features=features,
+                             consensus_version="czsc_agent_consensus_v1")["consensus_decisions"]
     clipped = copy.deepcopy(result)
     clipped["frequencies"]["日线"]["bars"] = clipped["frequencies"]["日线"]["bars"][1:]
     clipped["events"] = [point for point in clipped["events"] if point["date"] >= DAYS[1]]
-    actual = decorate_analysis(clipped, raw=raw, features=features)["consensus_decisions"]
+    actual = decorate_analysis(clipped, raw=raw, features=features,
+                               consensus_version="czsc_agent_consensus_v1")["consensus_decisions"]
     assert [(event["date"], event["side"]) for event in full["events"]] == [(DAYS[0], "BUY"), (DAYS[2], "SELL")]
     assert actual["events"] == [event for event in full["events"] if event["date"] >= DAYS[1]]
     assert actual["rows"] == full["rows"][1:]
@@ -53,9 +55,11 @@ def test_display_start_keeps_warmup_direction_and_identical_overlapping_events()
 
 def test_asof_suffix_cannot_change_already_observable_final_decisions():
     result, raw, features = fixture()
-    full = decorate_analysis(result, raw=raw, features=features)["consensus_decisions"]
+    full = decorate_analysis(result, raw=raw, features=features,
+                             consensus_version="czsc_agent_consensus_v1")["consensus_decisions"]
     result["as_of"] = DAYS[1]
-    historical = decorate_analysis(result, raw=raw, features=features)["consensus_decisions"]
+    historical = decorate_analysis(result, raw=raw, features=features,
+                                   consensus_version="czsc_agent_consensus_v1")["consensus_decisions"]
     assert historical["rows"] == full["rows"][:2]
     assert historical["events"] == [event for event in full["events"] if event["date"] <= DAYS[1]]
     assert historical["prefix_bars"] == 2
@@ -75,10 +79,13 @@ def test_api_binds_effective_config_and_never_passes_arbitration_to_frozen_strat
     app.include_router(router)
     with TestClient(app) as client:
         response = client.post("/api/analysis", json={"symbol": SYMBOL, "research": False,
+                                                     "consensus_version": "czsc_agent_consensus_v1",
                                                      "consensus_config": {"min_buy_support": 1}})
         assert response.status_code == 200
         data = response.json()
         assert "consensus_config" not in forwarded[0]
+        assert "consensus_version" not in forwarded[0]
+        assert data["request"]["consensus_version"] == "czsc_agent_consensus_v1"
         assert data["request"]["consensus_config"] == data["consensus_decisions"]["config"]
         assert data["consensus_decisions"]["config"]["min_buy_support"] == 1
         assert data["run_context"]["config_hash"]

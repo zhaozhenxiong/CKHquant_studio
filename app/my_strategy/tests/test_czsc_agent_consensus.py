@@ -4,7 +4,19 @@ import datetime as dt
 
 import pytest
 
-from my_strategy.services.czsc_agent_consensus import build_consensus, consensus_config
+from my_strategy.services.czsc_agent_consensus import (
+    build_consensus as _versioned_build_consensus, consensus_config as _versioned_consensus_config,
+)
+
+
+def build_consensus(*args, **kwargs):
+    """Keep all original v1 behavior checks explicit after the default changes."""
+    kwargs.setdefault("version", "czsc_agent_consensus_v1")
+    return _versioned_build_consensus(*args, **kwargs)
+
+
+def consensus_config(config=None):
+    return _versioned_consensus_config(config, version="czsc_agent_consensus_v1")
 
 
 SYMBOL = "000001.SZ"
@@ -421,18 +433,18 @@ def test_zero_weight_does_not_count_independent_family():
 def test_shared_config_loader_is_used_and_malformed_stored_weights_raise_value_error(monkeypatch):
     import my_strategy.services.czsc_agent_consensus as module
 
-    config = consensus_config()
+    config = module.consensus_config()
     config["ma_entry_threshold"] = .9
     seen = []
     def loader(name):
         seen.append(name)
         return copy.deepcopy(config)
     monkeypatch.setattr(module, "load_config", loader)
-    assert consensus_config()["ma_entry_threshold"] == .9
+    assert module.consensus_config()["ma_entry_threshold"] == .9
     assert seen == ["czsc_agent_consensus"]
     config["source_weights"] = {"ma": 1}
     with pytest.raises(ValueError, match="file source weights"):
-        consensus_config()
+        module.consensus_config()
 
 
 @pytest.mark.parametrize("source,key,head", [("ma", "head", "holding_exit"),

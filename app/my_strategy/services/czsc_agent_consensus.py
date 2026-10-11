@@ -12,18 +12,24 @@ import datetime as dt
 import hashlib
 import json
 import math
+from decimal import Decimal
 from collections.abc import Mapping
 
 from my_strategy.core.config_loader import load_config
+from my_strategy.services import czsc_agent_consensus_v1 as _v1
 
 
-CONSENSUS_VERSION = "czsc_agent_consensus_v1"
+CONSENSUS_VERSION = "czsc_agent_consensus_v2"
+LEGACY_VERSION = "czsc_agent_consensus_v1"
 SEMANTICS = "market_direction_research"
 SOURCES = ("ma", "structure", "wyckoff")
 _ZONE = dt.timezone(dt.timedelta(hours=8))
 _DEFAULTS = {
-    "source_weights": {"ma": 1., "structure": 1., "wyckoff": 1.},
-    "min_buy_support": 2., "min_sell_support": 2., "min_direction_margin": 1.,
+    "version": CONSENSUS_VERSION,
+    "source_weights": {"ma": .4, "structure": .2, "wyckoff": .3},
+    "high_return_quality_weight": .1,
+    "min_buy_base_support": .5, "min_buy_support": .6, "min_sell_support": .5,
+    "min_direction_margin": .2, "min_independent_families": 2,
     "ma_entry_threshold": .55, "wyckoff_min_strength": .5,
     "high_return_threshold": .1, "require_high_return_when_family": True,
     "signal_valid_bars": 20, "cooldown_bars": 5,
@@ -45,14 +51,43 @@ def _hash(value):
                                     separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
-def consensus_config(config=None):
-    """Load editable defaults and validate a partial, explicit override."""
+def _decimal(value):
+    """Compare configured decimal weights without binary float boundary drift."""
+    return Decimal(str(value))
+
+
+def _sum(values):
+    return float(sum((_decimal(value) for value in values), Decimal(0)))
+
+
+def _selected_version(config, version):
+    if version is not None and (not isinstance(version, str) or version not in {LEGACY_VERSION, CONSENSUS_VERSION}):
+        raise ValueError("unknown consensus version")
+    if config is not None and not isinstance(config, Mapping):
+        raise ValueError("consensus configuration must be a mapping")
+    supplied = config.get("version") if config is not None else None
+    if config is not None and "version" in config and (not isinstance(supplied, str) or supplied not in {LEGACY_VERSION, CONSENSUS_VERSION}):
+        raise ValueError("unknown consensus configuration version")
+    if version is not None and supplied is not None and supplied != version:
+        raise ValueError("conflicting consensus versions")
+    # Old results persisted every legacy key but had no version in the config.
+    inferred = LEGACY_VERSION if config is not None and set(config) == set(_v1._DEFAULTS) else None
+    return version or supplied or inferred or CONSENSUS_VERSION
+
+
+def consensus_config(config=None, *, version=None):
+    """Resolve a version, then validate editable v2 or frozen legacy settings."""
+    selected = _selected_version(config, version)
+    if selected == LEGACY_VERSION:
+        legacy = dict(config or {})
+        legacy.pop("version", None)
+        return _v1.consensus_config(legacy)
     stored = load_config("czsc_agent_consensus")
-    if not isinstance(stored, Mapping) or set(stored) != set(_DEFAULTS):
+    if not isinstance(stored, Mapping) or set(stored) != set(_DEFAULTS) or stored.get("version") != CONSENSUS_VERSION:
         raise ValueError("invalid consensus configuration file contract")
     if not isinstance(stored["source_weights"], Mapping) or set(stored["source_weights"]) != set(SOURCES):
         raise ValueError("invalid consensus configuration file source weights")
-    if config is not None and (not isinstance(config, Mapping) or set(config) - set(_DEFAULTS)):
+    if config is not None and set(config) - set(_DEFAULTS):
         raise ValueError("unknown consensus configuration keys")
     values = {**copy.deepcopy(stored), **copy.deepcopy(dict(config or {}))}
     weights = values["source_weights"]
@@ -60,19 +95,28 @@ def consensus_config(config=None):
         raise ValueError("invalid consensus source weights")
     weights = {**stored["source_weights"], **weights}
     for source in SOURCES:
-        weight = _finite(weights[source])
-        if weight is None or weight < 0:
+        weight = _finite(weights[source], unit=True)
+        if weight is None:
             raise ValueError("invalid consensus source weight: " + source)
         weights[source] = weight
-    total = sum(weights.values())
-    if total <= 0:
-        raise ValueError("consensus requires a positive source weight")
+    quality = _finite(values["high_return_quality_weight"], unit=True)
+    if quality is None:
+        raise ValueError("invalid high-return quality weight")
+    total = sum((_decimal(weight) for weight in weights.values()), Decimal(0))
+    if total <= 0 or total + _decimal(quality) != Decimal(1):
+        raise ValueError("consensus source and quality weights must sum to one")
     values["source_weights"] = weights
-    for key in ("min_buy_support", "min_sell_support", "min_direction_margin"):
+    values["high_return_quality_weight"] = quality
+    for key in ("min_buy_base_support", "min_buy_support", "min_sell_support", "min_direction_margin"):
         number = _finite(values[key])
-        if number is None or not 0 < number <= total:
+        limit = total + _decimal(quality) if key == "min_buy_support" else total
+        if number is None or not Decimal(0) < _decimal(number) <= limit:
             raise ValueError("invalid or impossible consensus support: " + key)
         values[key] = number
+    families = _finite(values["min_independent_families"])
+    if families is None or families != int(families) or not 2 <= families <= sum(weight > 0 for weight in weights.values()):
+        raise ValueError("invalid or impossible minimum independent families")
+    values["min_independent_families"] = int(families)
     for key in ("ma_entry_threshold", "wyckoff_min_strength", "high_return_threshold"):
         number = _finite(values[key], unit=True)
         if number is None:
@@ -83,8 +127,8 @@ def consensus_config(config=None):
         if number is None or number != int(number) or number < minimum:
             raise ValueError("invalid consensus bar count: " + key)
         values[key] = int(number)
-    if not isinstance(values["require_high_return_when_family"], bool):
-        raise ValueError("consensus high-return requirement must be boolean")
+    if values["require_high_return_when_family"] is not True:
+        raise ValueError("v2 requires the high-return quality gate for every BUY")
     return values
 
 
@@ -308,26 +352,93 @@ def _gate_agent(evidence, *, day, close_at, config, required, has_buy_candidate)
     return agent
 
 
+def _assisted_structure(event):
+    return ("native_ma_assisted_definition" in (event.get("dependencies") or [])
+            or str(event.get("event_type", "")).startswith(("native_bs2_", "native_bs3_")))
+
+
 def _supports(agents, by_source, config):
+    """Allocate each source once, then merge dependencies and abstain conflicts.
+
+    Independent structural events receive the structural budget first. Mixed
+    structural evidence retains its MA dependency for detecting disagreement,
+    but cannot spend its budget twice in two families.
+    """
     families = {"BUY": {}, "SELL": {}}
-    reasons = []
+    reasons, members = [], {source: [] for source in SOURCES}
+    contributions = {source: {"configured_weight": config["source_weights"][source],
+                              "buy_contribution": 0., "sell_contribution": 0.,
+                              "quality_contribution": 0., "families": []} for source in SOURCES}
     for source in SOURCES:
         side = agents[source]["judgment"]
+        weight = config["source_weights"][source]
+        if weight <= 0:
+            continue
+        supporting = [event for event in by_source[source] if str(event["event_id"]) in agents[source]["event_ids"]]
+        if side == "CONFLICT":
+            # An abstaining source still carries its qualified disagreement
+            # into each actual dependency family. Zero-budget opinions expose
+            # conflict without spending the same source in either direction.
+            grouped = {}
+            for event in supporting:
+                family = "ma" if source == "structure" and _assisted_structure(event) else source
+                event_side = _side(event)
+                if event_side in families:
+                    grouped.setdefault((family, event_side), []).append(event)
+            for (family, event_side), events in grouped.items():
+                members[family].append({"source": source, "side": event_side, "weight": 0., "events": events})
+            if grouped:
+                reasons.append("source_conflict_propagated_to_dependency_family")
+            continue
         if side not in families:
             continue
-        family = source
-        supporting = [event for event in by_source[source] if str(event["event_id"]) in agents[source]["event_ids"]]
-        if source == "structure" and supporting and all(
-                "native_ma_assisted_definition" in (event.get("dependencies") or [])
-                or str(event.get("event_type", "")).startswith(("native_bs2_", "native_bs3_"))
-                for event in supporting):
-            family = "ma"
-            reasons.append("ma_assisted_structure_dependency_merged")
-        families[side][family] = max(families[side].get(family, 0.), config["source_weights"][source])
-    # Zero-weight sources are recorded as opinions, but not independent votes.
-    families = {side: {name: weight for name, weight in values.items() if weight > 0}
-                for side, values in families.items()}
-    return families, reasons
+        if source == "structure":
+            independent = [event for event in supporting if not _assisted_structure(event)]
+            assisted = [event for event in supporting if _assisted_structure(event)]
+            if independent:
+                members["structure"].append({"source": source, "side": side, "weight": weight,
+                                             "events": independent})
+            if assisted:
+                reasons.append("ma_assisted_structure_dependency_merged")
+                members["ma"].append({"source": source, "side": side,
+                                       "weight": 0. if independent else weight, "events": assisted})
+                if independent:
+                    reasons.append("mixed_structure_budget_assigned_to_independent_evidence")
+        else:
+            members[source].append({"source": source, "side": side, "weight": weight, "events": supporting})
+    details, conflicts, supporting_ids = {}, [], {"BUY": set(), "SELL": set()}
+    for family, opinions in members.items():
+        sides = {opinion["side"] for opinion in opinions}
+        conflict = len(sides) > 1
+        actual = 0.
+        allocated = {}
+        if conflict:
+            conflicts.append(family)
+            reasons.append("opposing_sources_within_dependency_family")
+        elif opinions:
+            # Ties prefer MA's own evidence over its assisted structural copy.
+            winner = max(opinions, key=lambda opinion: (opinion["weight"], -SOURCES.index(opinion["source"])))
+            actual = winner["weight"]
+            if actual > 0:
+                side = winner["side"]
+                families[side][family] = actual
+                contributions[winner["source"]][side.lower() + "_contribution"] = _sum(
+                    [contributions[winner["source"]][side.lower() + "_contribution"], actual])
+                contributions[winner["source"]]["families"].append(family)
+                allocated[winner["source"]] = actual
+                supporting_ids[side].update(str(event["event_id"]) for opinion in opinions for event in opinion["events"])
+        side = "CONFLICT" if conflict else next(iter(sides)) if sides and actual > 0 else "ABSTAIN"
+        details[family] = {"family": family, "side": side, "weight": actual, "conflict": conflict,
+            "sources": sorted({opinion["source"] for opinion in opinions}),
+            "event_ids": sorted({str(event["event_id"]) for opinion in opinions for event in opinion["events"]}),
+            "buy_event_ids": sorted({str(event["event_id"]) for opinion in opinions if opinion["side"] == "BUY" for event in opinion["events"]}),
+            "sell_event_ids": sorted({str(event["event_id"]) for opinion in opinions if opinion["side"] == "SELL" for event in opinion["events"]}),
+            "contributions": allocated}
+    for source in SOURCES:
+        agents[source].update(copy.deepcopy(contributions[source]))
+        if source in {opinion["source"] for family in conflicts for opinion in members[family]}:
+            agents[source]["reason_codes"].append("opposing_sources_within_dependency_family")
+    return families, list(dict.fromkeys(reasons)), contributions, details, conflicts, supporting_ids
 
 
 def _risk_reasons(plan, *, symbol, day, close_at, required):
@@ -348,7 +459,7 @@ def _risk_reasons(plan, *, symbol, day, close_at, required):
     return list(dict.fromkeys(reasons))
 
 
-def build_consensus(rows, *, symbol, model_family="high_return", config=None):
+def build_consensus(rows, *, symbol, model_family="high_return", config=None, version=None):
     """Arbitrate a full chronological evidence prefix before display cropping.
 
     Each L1 source has at most one opinion per day. A consumed opportunity can
@@ -357,7 +468,10 @@ def build_consensus(rows, *, symbol, model_family="high_return", config=None):
     """
     if not isinstance(symbol, str) or not symbol:
         raise ValueError("consensus requires a symbol")
-    values = consensus_config(config)
+    selected_version = _selected_version(config, version)
+    values = consensus_config(config, version=selected_version)
+    if selected_version == LEGACY_VERSION:
+        return _v1.build_consensus(rows, symbol=symbol, model_family=model_family, config=values)
     config_hash = _hash(values)
     if isinstance(rows, Mapping) or isinstance(rows, (str, bytes)):
         raise ValueError("consensus rows must be a chronological sequence")
@@ -422,22 +536,46 @@ def build_consensus(rows, *, symbol, model_family="high_return", config=None):
             evidence = {}
         agents = {source: _source_agent(source, evidence.get(source) if isinstance(evidence.get(source), Mapping) else {},
             by_source[source], day=day, close_at=close_at, config=values) for source in SOURCES}
-        families, dependency_reasons = _supports(agents, by_source, values)
+        families, dependency_reasons, contributions, family_details, family_conflicts, supporting_ids = _supports(agents, by_source, values)
         reasons.extend(dependency_reasons)
-        buy_support, sell_support = (sum(families[side].values()) for side in ("BUY", "SELL"))
-        proposed = "WAIT"
-        if buy_support >= values["min_buy_support"] and buy_support - sell_support >= values["min_direction_margin"]:
-            proposed = "BUY"
-        elif sell_support >= values["min_sell_support"] and sell_support - buy_support >= values["min_direction_margin"]:
-            proposed = "SELL"
-        else:
-            reasons.append("direction_conflict_or_insufficient_margin" if buy_support and sell_support else
-                           "insufficient_independent_support" if buy_support or sell_support else "no_eligible_source_support")
-        required = model_family == "high_return" and values["require_high_return_when_family"]
+        buy_support, sell_support = (_sum(families[side].values()) for side in ("BUY", "SELL"))
+        # V2 quality is mandatory for BUY in every research family. It can only
+        # add the configured fixed bonus to an existing visible L1 candidate.
+        required = True
         l2_evidence = evidence.get("high_return") if isinstance(evidence.get("high_return"), Mapping) else {}
         agents["high_return"] = _gate_agent(l2_evidence, day=day, close_at=close_at, config=values,
-                                             required=required, has_buy_candidate=any(_side(event) == "BUY"
-                                                for events in by_source.values() for event in events))
+            required=required, has_buy_candidate=any(_side(event) == "BUY"
+                for events in by_source.values() for event in events))
+        quality_bonus = values["high_return_quality_weight"] if agents["high_return"]["status"] == "passed" else 0.
+        buy_total = _sum([buy_support, quality_bonus])
+        contributions["high_return"] = {"configured_weight": values["high_return_quality_weight"],
+            "buy_contribution": quality_bonus, "sell_contribution": 0., "quality_contribution": quality_bonus,
+            "families": []}
+        agents["high_return"].update(copy.deepcopy(contributions["high_return"]))
+        proposed = "WAIT"
+        buy_base_pass = _decimal(buy_support) >= _decimal(values["min_buy_base_support"])
+        buy_total_pass = _decimal(buy_total) >= _decimal(values["min_buy_support"])
+        sell_base_pass = _decimal(sell_support) >= _decimal(values["min_sell_support"])
+        buy_margin_pass = _decimal(buy_support) - _decimal(sell_support) >= _decimal(values["min_direction_margin"])
+        sell_margin_pass = _decimal(sell_support) - _decimal(buy_support) >= _decimal(values["min_direction_margin"])
+        buy_families_pass = len(families["BUY"]) >= values["min_independent_families"]
+        sell_families_pass = len(families["SELL"]) >= values["min_independent_families"]
+        # Proposed direction records L1 agreement even when L2 then vetoes it.
+        if buy_base_pass and buy_margin_pass and buy_families_pass:
+            proposed = "BUY"
+        elif sell_base_pass and sell_margin_pass and sell_families_pass:
+            proposed = "SELL"
+        else:
+            if buy_support or sell_support:
+                if not (buy_families_pass or sell_families_pass):
+                    reasons.append("insufficient_independent_families")
+                if buy_support and not buy_base_pass:
+                    reasons.append("buy_base_support_below_threshold")
+                if sell_support and not sell_base_pass:
+                    reasons.append("sell_base_support_below_threshold")
+                reasons.append("direction_conflict_or_insufficient_margin" if buy_support and sell_support else "insufficient_independent_support")
+            else:
+                reasons.append("no_eligible_source_support")
         action = proposed
         if not exact_price:
             action = "WAIT"
@@ -447,8 +585,11 @@ def build_consensus(rows, *, symbol, model_family="high_return", config=None):
             reasons.extend(risk)
             if risk:
                 action = "WAIT"
-            if required and agents["high_return"]["status"] != "passed":
+            if agents["high_return"]["status"] != "passed":
                 reasons.extend(agents["high_return"]["reason_codes"])
+                action = "WAIT"
+            if not buy_total_pass:
+                reasons.append("buy_total_support_below_threshold")
                 action = "WAIT"
         if action in {"BUY", "SELL"}:
             desired = "bullish" if action == "BUY" else "bearish"
@@ -462,10 +603,9 @@ def build_consensus(rows, *, symbol, model_family="high_return", config=None):
                 reasons.append("same_direction_cooldown")
                 action = "WAIT"
         emitted = action in {"BUY", "SELL"}
-        selected_ids = sorted({identifier for source in SOURCES if agents[source]["judgment"] == proposed
-                               for identifier in agents[source]["event_ids"]})
-        selected_opportunities = sorted({identifier for source in SOURCES if agents[source]["judgment"] == proposed
-                                         for identifier in agents[source]["opportunity_ids"]})
+        selected_ids = sorted(supporting_ids.get(proposed, set()))
+        selected_opportunities = sorted({_opportunity(event) for events in by_source.values()
+            for event in events if str(event["event_id"]) in selected_ids})
         if "same_direction_already_active" in reasons:
             consumed.update(selected_opportunities)
         if emitted:
@@ -476,10 +616,16 @@ def build_consensus(rows, *, symbol, model_family="high_return", config=None):
             reasons.append("multi_agent_direction_confirmed")
         agents["arbiter"] = {"judgment": action, "type": "direction_arbitration", "status": "emitted" if emitted else "wait",
             "reason_codes": list(dict.fromkeys(reasons)), "probability": None, "exit_probability": None,
-            "counts_as_vote": False, "semantics": SEMANTICS}
+            "counts_as_vote": False, "semantics": SEMANTICS, "configured_weight": 0.,
+            "buy_contribution": 0., "sell_contribution": 0., "quality_contribution": 0.}
         decision = {"date": day, "symbol": symbol, "action": action, "proposed_action": proposed,
             "reason_codes": list(dict.fromkeys(reasons)), "agents": agents,
+            "version": CONSENSUS_VERSION,
             "buy_support": buy_support, "sell_support": sell_support,
+            "buy_base_score": buy_support, "sell_base_score": sell_support,
+            "buy_quality_bonus": quality_bonus, "buy_total_score": buy_total,
+            "direction_margin": float(abs(_decimal(buy_support) - _decimal(sell_support))),
+            "contributions": contributions, "family_details": family_details, "family_conflicts": family_conflicts,
             "buy_independent_families": sorted(families["BUY"]), "sell_independent_families": sorted(families["SELL"]),
             "buy_independent_count": len(families["BUY"]), "sell_independent_count": len(families["SELL"]),
             "evidence_event_ids": selected_ids, "opportunity_ids": selected_opportunities,

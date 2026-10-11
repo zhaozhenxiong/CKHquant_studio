@@ -182,7 +182,7 @@ def _high_return_agent(row, day, candidate):
     return result
 
 
-def decorate_analysis(result, *, raw=None, features=None, overlay=None, consensus_config=None):
+def decorate_analysis(result, *, raw=None, features=None, overlay=None, consensus_config=None, consensus_version=None):
     """Append display evidence and arbitrate the full causal history before clipping."""
     output = copy.deepcopy(result)
     symbol = str(result.get("symbol", ""))
@@ -261,7 +261,8 @@ def decorate_analysis(result, *, raw=None, features=None, overlay=None, consensu
                          | set(display_days))
     prefix_rows = [evidence_row(day, full_events_by_day.get((symbol, day), [])) for day in prefix_days]
     consensus = build_consensus(prefix_rows, symbol=symbol,
-                                model_family=result.get("model_family", "ma_trend"), config=consensus_config)
+                                model_family=result.get("model_family", "ma_trend"), config=consensus_config,
+                                version=consensus_version)
     visible_days = set(display_days)
     hidden_rows = [row for row in consensus["rows"] if display_days and row["date"] < min(display_days)]
     consensus.update(state_before_display=copy.deepcopy(hidden_rows[-1]["state_after"] if hidden_rows else consensus["initial_state"]),

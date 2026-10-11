@@ -132,7 +132,7 @@ def _display_model_lineage(overlay):
 def analyze_high_return(*, symbol, start="2026-01-01", end=None, as_of=None, research=True,
                         model_family="high_return", usage_mode="historical", model_policy="auto",
                         model_run_id=None, model_fold=None, calendar_run_id=None, device=None,
-                        entry_policy="legacy", config=None, db_path=None, consensus_config=None):
+                        entry_policy="legacy", config=None, db_path=None, consensus_config=None, consensus_version=None):
     from my_strategy.services.czsc_analysis import analyze_stock
     from my_strategy.services.czsc_research import _json
     result = analyze_stock(symbol, start=start, end=end, as_of=as_of, db_path=db_path, config=config, research=False)
@@ -149,7 +149,7 @@ def analyze_high_return(*, symbol, start="2026-01-01", end=None, as_of=None, res
                             "probability_target": overlay.get("probability_target"), "publication_allowed": False})
     from my_strategy.web_dashboard.chart_evidence import decorate_analysis
     result = decorate_analysis(result, raw=item["raw"], features=item["features"], overlay=_display_model_lineage(overlay),
-                               consensus_config=consensus_config)
+                               consensus_config=consensus_config, consensus_version=consensus_version)
     return _json(result)
 
 
