@@ -25,7 +25,7 @@
   let latestDefaultEnd;
   let markerMappings = [];
   let markerGroups = [];
-  let chartSelection = {hover:null,pinned:null,selectedDate:null};
+  let chartSelection = {hover:null,pinned:null,selectedDate:null,popupOpen:false};
   let popupAnchor = null;
   let historyRows = [];
   let historyPage = 0;
@@ -54,12 +54,15 @@
   }
   function showError(error) { $('page-error').hidden = false; $('page-error').querySelector('span').textContent = error.message || String(error); }
   function notice(message) { clearTimeout(noticeTimer); $('notice').textContent = message; $('notice').hidden = false; noticeTimer = setTimeout(() => { $('notice').hidden = true; }, 4000); }
+  function showView(selected) {
+    document.querySelectorAll('.view').forEach((view) => { view.hidden = view.id !== `view-${selected}`; });
+    document.querySelectorAll('[data-route]').forEach((link) => { if (link.dataset.route === selected) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current'); });
+  }
   function route() {
     const name = location.hash.slice(1) || location.pathname.replace(/^\//,'');
     const selected = ['analysis', 'scan', 'backtest', 'watchlist', 'holdings', 'data'].includes(name) ? name : 'analysis';
     if (selected !== 'analysis') resetChartSelection();
-    document.querySelectorAll('.view').forEach((view) => { view.hidden = view.id !== `view-${selected}`; });
-    document.querySelectorAll('[data-route]').forEach((link) => { if (link.dataset.route === selected) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current'); });
+    showView(selected);
     requestAnimationFrame(resizeCharts);
     if (selected === 'data') { refreshTasks().catch(showError); refreshRuns().catch(showError); }
     if (['analysis','scan','backtest'].includes(selected)) refreshResearch().catch(showError);
@@ -83,7 +86,7 @@
       const bar = param.seriesData.get(candles);
       updateChartSelection(bar ? 'hover' : 'leave',bar ? day(param.time) : null,param.point);
     });
-    chart.subscribeClick((param) => { if (param.time) { const time = day(param.time); updateChartSelection('pin',time,param.point); highlightEvent(evidenceUI()?.groupDates(groupsAt(time)) || [time]); } });
+    chart.subscribeClick((param) => { const time = param.time ? day(param.time) : null, groups = finalGroupsAt(time); if (time && groups.length) { const clickedGroup = groups.find((group) => group.id === param.hoveredObjectId); const selectedDate = clickedGroup ? evidenceUI()?.groupDates([clickedGroup]).at(-1) : null; updateChartSelection('pin',time,param.point,selectedDate); highlightEvent(evidenceUI()?.groupDates(groups) || [time]); } else updateChartSelection('clear'); });
     $('analysis-chart').addEventListener('pointerleave',() => updateChartSelection('leave'));
     ['pointermove','pointerup','wheel'].forEach((event) => $('analysis-chart').addEventListener(event,schedulePriceOverlays));
     resizeObserver = new ResizeObserver(resizeCharts);
@@ -193,7 +196,7 @@
     $('divergence-list').innerHTML = [...divergences].sort((a,b) => String(b.available_at).localeCompare(String(a.available_at))).slice(0,3).map((item) => `<article class="event-entry"><strong class="${item.kind === 'top' ? 'valuation-loss' : 'valuation-gain'}">${esc(item.label)} · 锚点 ${esc(day(item.time))} · ${number(item.price,2)}</strong><p>末笔确认 ${esc(item.confirmed_at || '—')}<br>首次可见 ${esc(item.available_at || '—')}</p><details class="rule-original"><summary>五笔锚点</summary><p>${(item.pen_anchors || []).map((pen) => `${esc(day(pen[0]))} → ${esc(day(pen[1]))}`).join('<br>')}</p></details><button type="button" data-locate-event="${esc(day(item.time))}">定位参考</button></article>`).join('');
     const symbol = state.query?.symbol;
     const tradeMarkers = KHQuantMarkers.build({bars, dailyBars:normalizeBars(state.analysis.frequencies?.['日线']?.bars), frequency:state.frequency,
-      events:$('layer-signals').checked ? state.analysis.events || [] : [], trades:$('layer-trades').checked ? state.backtest?.trades || [] : [],
+      events:$('layer-signals').checked ? state.analysis.consensus_decisions?.events || [] : [], trades:$('layer-trades').checked ? state.backtest?.trades || [] : [],
       symbol,start:state.query?.start || '',asOf:day(state.query?.as_of || state.analysis.as_of || state.analysis.data_end),up:c.up,down:c.down});
     markers.push(...tradeMarkers.markers);
     const wyckoffMarkers = KHQuantWyckoffMarkers.build({events:$('layer-wyckoff').checked ? state.analysis.wyckoff_events || [] : [],bars,frequency:state.frequency,asOf:day(state.query?.as_of || state.analysis.as_of || state.analysis.data_end)});
@@ -202,7 +205,7 @@
     markerMappings = tradeMarkers.mappings;
     markerGroups = tradeMarkers.groups || [];
     $('marker-details').textContent = KHQuantMarkers.describe(markerMappings,null,state.frequency);
-    $('marker-summary').textContent = `B/S 汇总 ${markerGroups.filter((group) => group.visible !== false && group.kind === 'intention').length} 组 · 原始意图 ${tradeMarkers.intentCount} 条 · 成交 ${tradeMarkers.tradeCount} 条${wyckoffMarkers.length ? ` · 量价事件 ${wyckoffMarkers.length}（确认日，非成交）` : ''}${state.frequency === '日线' ? '' : ' · 点击查看各原始日期评分'}${tradeMarkers.deferredCount ? ` · ${tradeMarkers.deferredCount} 个标记等待所属周期闭合` : ''}`;
+    $('marker-summary').textContent = state.analysis.consensus_decisions ? `最终 B/S ${markerGroups.filter((group) => group.visible !== false && group.kind === 'intention').length} 个${!tradeMarkers.intentCount && !tradeMarkers.deferredCount ? ' · 本区间暂无满足仲裁条件的最终点，可在历史判断查看原因' : ''} · 实际成交 ${tradeMarkers.tradeCount} 条${wyckoffMarkers.length ? ` · 量价参考 ${wyckoffMarkers.length}` : ''} · 点击查看多 Agent 判断${state.frequency === '日线' ? '' : '与原始日期'}${tradeMarkers.deferredCount ? ` · ${tradeMarkers.deferredCount} 个标记等待所属周期闭合` : ''}` : '该结果没有多 Agent 仲裁，不显示最终买卖点；请重新分析。';
     markers.sort((a,b) => a.time.localeCompare(b.time));
     candles.setMarkers(markers);
     if (fit) chart.timeScale().fitContent();
@@ -226,12 +229,14 @@
     return selected ? indicators?.chip_profiles?.[selected] || {status:'unavailable',as_of:selected} : indicators?.chip_profile;
   }
   function groupsAt(time) { return markerGroups.filter((group) => day(group.time || group.bar_date) === time); }
+  function finalGroupsAt(time) { return groupsAt(time).filter((group) => group.visible !== false && group.kind === 'intention' && group.sources?.includes('consensus')); }
   function updateChartSelection(type, time = null, point = null, selectedDate = null) {
     const ui = evidenceUI();
     if (analysisLoading) return;
     if (!ui) { $('marker-details').textContent = KHQuantMarkers.describe(markerMappings,time,state.frequency); renderIndicatorReadout(time); return; }
     const previous = chartSelection;
-    chartSelection = ui.selectionTransition(chartSelection,{type,time,date:selectedDate});
+    const canOpen = type === 'pin' && finalGroupsAt(time).length > 0;
+    chartSelection = ui.selectionTransition(chartSelection,{type:type === 'locate' ? 'pin' : type,time,date:selectedDate,popupOpen:canOpen});
     if (chartSelection.pinned && (type === 'hover' || type === 'leave')) return;
     if (point) { const rect = $('analysis-chart').getBoundingClientRect(); popupAnchor = {x:rect.left + point.x,y:rect.top + point.y}; }
     const active = chartSelection.pinned || chartSelection.hover;
@@ -243,16 +248,16 @@
     renderChartPopup();
   }
   function resetChartSelection() {
-    chartSelection = {hover:null,pinned:null,selectedDate:null}; popupAnchor = null;
+    chartSelection = {hover:null,pinned:null,selectedDate:null,popupOpen:false}; popupAnchor = null;
     $('chart-evidence-popup').hidden = true; $('chart-evidence-popup').replaceChildren(); $('chart-evidence-reset').hidden = true;
     $('chart-selection-status').textContent = '悬浮 K 线切换筹码分布；点击固定日期。';
   }
   function renderChartPopup() {
-    const ui = evidenceUI(), host = $('chart-evidence-popup'), active = chartSelection.pinned || chartSelection.hover;
-    const groups = groupsAt(active);
-    if (!ui || !active || !state.analysis || analysisLoading || !chartSelection.pinned && !groups.some((group) => group.visible !== false)) { host.hidden = true; return; }
+    const ui = evidenceUI(), host = $('chart-evidence-popup'), active = chartSelection.pinned;
+    const groups = finalGroupsAt(active);
+    if (!ui || !chartSelection.popupOpen || !active || !state.analysis || analysisLoading || !groups.length) { host.hidden = true; return; }
     host.dataset.pinned = String(Boolean(chartSelection.pinned));
-    host.innerHTML = ui.popupHtml({evidence:state.analysis.chart_evidence,groups,barDate:active,frequency:state.frequency,selectedDate:chartSelection.selectedDate,pinned:Boolean(chartSelection.pinned),profileAsOf:selectedChipProfile()?.as_of});
+    host.innerHTML = ui.popupHtml({evidence:state.analysis.chart_evidence,consensus:state.analysis.consensus_decisions,groups,barDate:active,frequency:state.frequency,selectedDate:chartSelection.selectedDate,pinned:Boolean(chartSelection.pinned),profileAsOf:selectedChipProfile()?.as_of});
     host.hidden = false;
     const anchor = popupAnchor || {x:Math.min(window.innerWidth - 24,160),y:Math.min(window.innerHeight - 24,180)};
     const width = host.offsetWidth, height = host.offsetHeight;
@@ -525,11 +530,11 @@
     $('event-list').innerHTML = events.length ? [...events].reverse().map((event) => `<article class="event-entry" data-event-time="${esc(day(event.time))}" data-evidence-date="${esc(day(event.evidence_date || event.time))}"><strong>${esc(readableEvent(event))}</strong><p><span class="badge ${actionClass(event.action)}">${actionShape(event.action)}${esc(actionLabel(event.action))}意图</span></p><p class="event-reference">${esc(referencePriceText(event.reference_price,event.reference_price_date,`${actionLabel(event.action)}参考价`))}</p>${event.entry_plan ? entryPlanHtml(event) : ''}<p>${esc(readableReason(event))}</p><p class="event-time">发生 ${esc(display(event.time))}<br>可用 ${esc(display(event.available_at))}</p><button type="button" data-locate-event="${esc(day(event.evidence_date || event.time))}">定位主图</button>${ruleOriginal(event)}</article>`).join('') : '<div class="empty-copy">该时点没有规则事件。形成中的结构不代表确认信号。</div>';
   }
   function highlightEvent(time) { const dates = new Set(Array.isArray(time) ? time : [time]); document.querySelectorAll('[data-event-time]').forEach((entry) => { entry.style.background = (dates.has(entry.dataset.eventTime) || dates.has(entry.dataset.evidenceDate)) ? 'var(--accent-soft)' : ''; }); }
-  function locateTime(time) {
+  function locateTime(time, openPopup = true) {
     if (!chart) return;
     const bars = state.analysis?.frequencies?.[state.frequency]?.bars || [];
     const index = bars.findIndex((bar) => KHQuantMarkers.periodKey(bar.time,state.frequency) === KHQuantMarkers.periodKey(time,state.frequency));
-    if (index >= 0) { chart.timeScale().setVisibleLogicalRange({from:Math.max(0,index - 35),to:index + 5}); updateChartSelection('pin',day(bars[index].time),null,time); }
+    if (index >= 0) { chart.timeScale().setVisibleLogicalRange({from:Math.max(0,index - 35),to:index + 5}); updateChartSelection(openPopup ? 'pin' : 'locate',day(bars[index].time),null,time); }
     highlightEvent(time);
   }
   function getSymbol(value) { const text = value.trim(); const known = [...state.symbolCatalog.values()].find((item) => item.symbol === text.toUpperCase() || item.symbol.slice(0,6) === text || item.name === text); if (known) return known.symbol; const match = text.match(/\d{6}(?:\.(?:SH|SZ|BJ))?/i); return match ? match[0].toUpperCase() : text; }
@@ -548,12 +553,12 @@
     try {
       const data = await request('/api/analysis', {method:'POST',body:JSON.stringify(query)});
       if (sequence !== state.analysisSequence) return;
-      state.analysis = data; state.query = query; analysisLoading = false;
-      const incoming = data.chart_evidence?.rows || [];
+      state.analysis = data; state.query = {...query,...data.request,...(data.consensus_decisions?.config ? {consensus_config:data.consensus_decisions.config} : {})}; analysisLoading = false;
+      const incoming = evidenceUI()?.mergeEvidenceRows(data.chart_evidence?.rows,data.consensus_decisions?.rows) || data.chart_evidence?.rows || [];
       historyRows = preserveDates ? [...new Map([...historyRows,...incoming].map((row) => [row.date,row])).values()] : incoming;
       if (!preserveDates) { state.dates = (data.frequencies?.['日线']?.bars || []).map((bar) => day(bar.time)); state.replayIndex = Math.max(0,state.dates.length - 1); }
       renderAnalysis(); renderEvents(); updateReplay();
-      if (locate) locateTime(locate);
+      if (locate) locateTime(locate,false);
     } catch (error) {
       if (sequence !== state.analysisSequence) return;
       state.analysis = null; analysisLoading = false;
@@ -571,8 +576,8 @@
     if (analysisLoading) { $('replay-evidence-card').innerHTML = '<p class="subtle">正在按所选日期重新判断，参考价与评分加载中…</p>'; $('history-evidence-table').innerHTML = '<p class="subtle">历史参考记录加载中…</p>'; return; }
     const evidence = state.analysis?.chart_evidence;
     const selected = state.query?.as_of || state.analysis?.as_of || state.analysis?.data_end || state.dates[state.replayIndex];
-    const row = ui.rowAt(evidence,selected);
-    $('replay-evidence-card').innerHTML = state.analysis ? `<strong>信息截止 ${esc(selected || '—')}</strong>${ui.referenceHtml(row)}${ui.agentsHtml(row)}${ui.riskHtml(row?.raw_risk_plan)}<p class="subtle">参考价使用该日行情；评分按当时可见的模型与事件展示。</p>` : '<p class="subtle">尚无成功分析结果，参考价与评分不可用。</p>';
+    const row = ui.rowAt(evidence,selected), decision = ui.consensusAt(state.analysis?.consensus_decisions,selected);
+    $('replay-evidence-card').innerHTML = state.analysis ? `<strong>信息截止 ${esc(selected || '—')}</strong>${ui.consensusHtml(decision,state.analysis?.consensus_decisions?.config)}${ui.referenceHtml(row)}${ui.agentsHtml(row,false,decision)}${ui.riskHtml(row?.raw_risk_plan)}${ui.rawEventsHtml(row)}<p class="subtle">参考价使用该日行情；评分按当时可见的模型与事件展示。</p>` : '<p class="subtle">尚无成功分析结果，参考价与评分不可用。</p>';
     if (!state.analysis) { $('history-evidence-table').innerHTML = '<p class="subtle">历史参考记录不可用，请重新分析。</p>'; return; }
     const cutoff = day(state.query?.as_of || state.analysis?.as_of || state.analysis?.data_end);
     const rows = cutoff ? historyRows.filter((item) => item.date <= cutoff) : historyRows;
@@ -1174,6 +1179,7 @@
     updateResearchControls(prefix);
   }
   async function openRun(id) {
+    resetChartSelection();
     const sequence = ++openRunSequence, analysisAtStart = state.analysisSequence;
     let data;
     try { data = await request(`/api/runs/${encodeURIComponent(id)}`); }
@@ -1188,13 +1194,13 @@
     ++state.analysisSequence;
     resetChartSelection(); analysisLoading = false;
     $('analysis-form').querySelector('[type=submit]').disabled = false;
-    historyRows = result.chart_evidence?.rows || []; historyPage = 0;
+    historyRows = evidenceUI()?.mergeEvidenceRows(result.chart_evidence?.rows,result.consensus_decisions?.rows) || result.chart_evidence?.rows || []; historyPage = 0;
     state.analysis = result;
-    state.query = {...(result.request || {symbol:result.symbol,start:null,end:result.data_end,as_of:result.as_of}),...resultResearchContext(result)};
+    state.query = {...(result.request || {symbol:result.symbol,start:null,end:result.data_end,as_of:result.as_of}),...resultResearchContext(result),...(result.consensus_decisions?.config ? {consensus_config:result.consensus_decisions.config} : {})};
     applyResearchContext('analysis',state.query);
     $('analysis-symbol').value = state.query.symbol || result.symbol; $('analysis-start').value = state.query.start || ''; $('analysis-end').value = state.query.end || result.data_end;
     state.dates = (result.frequencies?.['日线']?.bars || []).map((bar) => day(bar.time)); state.replayIndex = Math.max(0,state.dates.length - 1);
-    location.hash = 'analysis'; renderAnalysis(); renderEvents(); updateReplay();
+    location.hash = 'analysis'; showView('analysis'); renderAnalysis(); renderEvents(); updateReplay();
   }
   async function analyzeSymbol(symbol,end,source = null) {
     $('analysis-symbol').value = symbol;
@@ -1210,12 +1216,14 @@
     $('chart-evidence-reset').addEventListener('click',() => updateChartSelection('clear'));
     $('theme-toggle').addEventListener('click',() => setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
     $('page-error').querySelector('button').addEventListener('click',() => { $('page-error').hidden = true; });
-    $('analysis-symbol').addEventListener('input',() => { clearTimeout(searchTimer); searchTimer = setTimeout(() => searchSymbols($('analysis-symbol').value).catch(showError),250); });
+    $('analysis-symbol').addEventListener('input',() => { updateChartSelection('clear'); clearTimeout(searchTimer); searchTimer = setTimeout(() => searchSymbols($('analysis-symbol').value).catch(showError),250); });
     $('analysis-form').addEventListener('submit',(event) => { event.preventDefault(); try { analyze({symbol:getSymbol($('analysis-symbol').value),...dateSpec('analysis'),...researchSpec('analysis')}); } catch (error) { showError(error); } });
     $('send-backtest').addEventListener('click',() => { try { const symbol = getSymbol($('analysis-symbol').value); if (!symbol) { notice('请先选择股票'); return; } const context = researchSpec('analysis'); if (context.usage_mode === 'retrospective') throw new Error('事后研究历史图不能转为可执行回测，请先切换历史滚动研究或当前生产判断。'); $('backtest-symbols').value = symbol; ['start','end'].forEach((key) => { $(`backtest-${key}`).value = $(`analysis-${key}`).value; }); applyResearchContext('backtest',context); location.hash = 'backtest'; } catch (error) { showError(error); } });
     document.querySelectorAll('[data-frequency]').forEach((button) => button.addEventListener('click',() => { resetChartSelection(); state.frequency = button.dataset.frequency; document.querySelectorAll('[data-frequency]').forEach((item) => item.setAttribute('aria-pressed',String(item === button))); renderAnalysis(); }));
-    ['ma','boll','chips','fractals','pens','zones','divergences','signals','wyckoff','trades','volume'].forEach((name) => $(`layer-${name}`).addEventListener('change',() => renderAnalysis(false)));
-    $('chart-range-apply').addEventListener('click',applyChartRange);
+    ['ma','boll','chips','fractals','pens','zones','divergences','signals','wyckoff','trades','volume'].forEach((name) => $(`layer-${name}`).addEventListener('change',() => { resetChartSelection(); renderAnalysis(false); }));
+    ['start','end','mode','model-family','entry-policy','usage-mode','model-policy','model','checkpoint','device'].forEach((name) => $(`analysis-${name}`).addEventListener('change',() => updateChartSelection('clear')));
+    ['chart-range-start','chart-range-end'].forEach((id) => $(id).addEventListener('change',() => updateChartSelection('clear')));
+    $('chart-range-apply').addEventListener('click',() => { updateChartSelection('clear'); applyChartRange(); });
     $('chart-zoom-in').addEventListener('click',() => zoomChart(.7)); $('chart-zoom-out').addEventListener('click',() => zoomChart(1.4));
     $('chart-range-reset').addEventListener('click',() => { if (chart) chart.timeScale().fitContent(); });
     $('replay-slider').addEventListener('change',() => replay(Number($('replay-slider').value)));

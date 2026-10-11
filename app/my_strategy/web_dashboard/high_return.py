@@ -96,10 +96,43 @@ def _events(overlay, start=None):
     return events
 
 
+def _display_model_lineage(overlay):
+    """Attach verified saved entry-head identity to display scores without inference."""
+    import copy
+    from my_strategy.services.czsc_high_return_runtime import _read_run, _head_path
+    from my_strategy.services.czsc_high_return_models import load_head
+
+    output = copy.deepcopy(overlay)
+    runs, manifests = {}, {}
+    for row in output.get("rows", []):
+        identity = row.get("model_resolution") or {}
+        if row.get("high_return_probability") is None or not identity.get("model_run_id") or not identity.get("checkpoint"):
+            continue
+        key = (identity["model_run_id"], identity["checkpoint"])
+        if key not in manifests:
+            if key[0] not in runs:
+                root, report, _ = _read_run(key[0])
+                runs[key[0]] = (root, {bundle["name"]: bundle for bundle in report.get("model_bundles", [])})
+            root, bundles = runs[key[0]]
+            bundle = bundles.get(key[1])
+            if bundle is None:
+                raise ValueError("图表评分的高收益模型检查点身份缺失")
+            manifest = load_head(_head_path(root, bundle, "entry"))
+            if manifest["head"] != "entry" or manifest["available_at"] != identity["available_at"]:
+                raise ValueError("图表评分的高收益模型身份与冻结清单不一致")
+            manifests[key] = manifest
+        manifest = manifests[key]
+        identity.update(train_label_end=manifest["train_label_end"], model_head=manifest["head"],
+                        target_contract_hash=manifest["target_contract_hash"], manifest_sha256=manifest["manifest_sha256"],
+                        actual_training_completed_at=manifest["training_completed_at"],
+                        fold=copy.deepcopy(manifest["fold"]))
+    return output
+
+
 def analyze_high_return(*, symbol, start="2026-01-01", end=None, as_of=None, research=True,
                         model_family="high_return", usage_mode="historical", model_policy="auto",
                         model_run_id=None, model_fold=None, calendar_run_id=None, device=None,
-                        entry_policy="legacy", config=None, db_path=None):
+                        entry_policy="legacy", config=None, db_path=None, consensus_config=None):
     from my_strategy.services.czsc_analysis import analyze_stock
     from my_strategy.services.czsc_research import _json
     result = analyze_stock(symbol, start=start, end=end, as_of=as_of, db_path=db_path, config=config, research=False)
@@ -115,7 +148,8 @@ def analyze_high_return(*, symbol, start="2026-01-01", end=None, as_of=None, res
                             "calendar_run_id": calendar_id, "model_routes": overlay.get("model_routes", []),
                             "probability_target": overlay.get("probability_target"), "publication_allowed": False})
     from my_strategy.web_dashboard.chart_evidence import decorate_analysis
-    result = decorate_analysis(result, raw=item["raw"], features=item["features"], overlay=overlay)
+    result = decorate_analysis(result, raw=item["raw"], features=item["features"], overlay=_display_model_lineage(overlay),
+                               consensus_config=consensus_config)
     return _json(result)
 
 

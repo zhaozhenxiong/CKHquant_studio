@@ -34,7 +34,16 @@ class AnalysisRequest(BaseModel):
     model_fold: str | None = None
     calendar_run_id: str | None = None
     device: str | None = None
+    consensus_config: dict[str, Any] | None = None
     _symbol = field_validator("symbol")(clean_symbol)
+
+    @field_validator("consensus_config")
+    @classmethod
+    def arbitration_parameters(cls, value):
+        if value is not None:
+            from my_strategy.services.czsc_agent_consensus import consensus_config as validate_config
+            return validate_config(value)
+        return value
 
     @field_validator("model_run_id", "model_fold", "calendar_run_id")
     @classmethod
@@ -328,16 +337,23 @@ async def analysis(spec: AnalysisRequest, request: Request):
     from my_strategy.core.run_context import create_run_context
     def calculate():
         query = spec.model_dump(mode="json", exclude_none=True)
+        calculation_query = {key: value for key, value in query.items() if key != "consensus_config"}
         settings = strategy_config()
         if spec.research and spec.model_family == "high_return":
             from my_strategy.web_dashboard.high_return import analyze_high_return
-            result = analyze_high_return(**query, config=settings)
+            result = analyze_high_return(**calculation_query, config=settings, consensus_config=spec.consensus_config)
         else:
-            result = analyze_stock(**query, config=settings)
+            result = analyze_stock(**calculation_query, config=settings)
         if "chart_evidence" not in result:
             from my_strategy.web_dashboard.chart_evidence import decorate_analysis
-            result = decorate_analysis(result)
+            result = decorate_analysis(result, consensus_config=spec.consensus_config)
+        consensus = result.get("consensus_decisions") or {}
+        if consensus.get("config"):
+            query["consensus_config"] = consensus["config"]
         run_config = {"request": query, "strategy": settings}
+        if consensus.get("config_hash"):
+            run_config["consensus_config_hash"] = consensus["config_hash"]
+            run_config["consensus_version"] = consensus["version"]
         if spec.entry_policy != "legacy" and result.get("research", {}).get("entry_plan_config_hash"):
             run_config["entry_plan_config_hash"] = result["research"]["entry_plan_config_hash"]
         context = create_run_context(task="czsc-analysis", as_of_date=result["data_end"],

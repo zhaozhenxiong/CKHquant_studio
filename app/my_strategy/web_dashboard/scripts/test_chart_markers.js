@@ -67,7 +67,7 @@ assert.equal(merged.tradeCount,2);
 assert.equal(merged.ignoredCount,3);
 assert.equal(merged.markers.length,3);
 assert.equal(merged.groups.length,4); // Excluded-only evidence has no default marker.
-assert.deepEqual(merged.markers.map((marker) => marker.text),['B·3','实B','S·2']);
+assert.deepEqual(merged.markers.map((marker) => marker.text),['B','实B','S']);
 const buyGroup = merged.groups.find((group) => group.kind === 'intention' && group.action === 'BUY');
 assert.equal(buyGroup.event_count,4);
 assert.equal(buyGroup.source_count,3); // Two MA events count as one agent.
@@ -110,7 +110,7 @@ const weeklyPoints = [point('week-buy-1','ma','BUY','2026-01-05'),
   point('week-sell-1','wyckoff','SELL','2026-01-09')];
 const mergedWeekly = build({...common,bars:[{time:'2026-01-09'}],frequency:'周线',events:weeklyPoints,trades:[]});
 assert.equal(mergedWeekly.markers.length,2);
-assert.deepEqual(mergedWeekly.markers.map((marker) => marker.text),['B·2','S']);
+assert.deepEqual(mergedWeekly.markers.map((marker) => marker.text),['B','S']);
 assert.deepEqual(mergedWeekly.groups[0].entries.map((entry) => entry.original_date),['2026-01-05','2026-01-09']);
 assert(mergedWeekly.mappings.every((entry) => entry.closed_at === '2026-01-12'));
 const mergedMonth = build({...common,bars:[{time:'2026-01-30'}],frequency:'月线',events:weeklyPoints,trades:[]});
@@ -127,7 +127,7 @@ const yearMerged = build({...common,dailyBars:yearDaily,bars:[{time:'2026-01-02'
 assert.equal(periodKey('2026-01-02','周线'),'2026-01');
 assert.equal(periodKey('2021-01-01','周线'),'2020-53');
 assert.equal(yearMerged.markers.length,1);
-assert.equal(yearMerged.markers[0].text,'B·2');
+assert.equal(yearMerged.markers[0].text,'B');
 assert.equal(yearMerged.groups[0].closed_at,'2026-01-05');
 assert.deepEqual(yearMerged.groups[0].entries.map((entry) => entry.original_date),['2025-12-31','2026-01-02']);
 

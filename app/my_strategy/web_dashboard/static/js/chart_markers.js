@@ -89,16 +89,16 @@
       markers.push({id:group.id, time:group.time, position:buying ? 'belowBar' : 'aboveBar',
         color:buying ? up : down,
         shape:execution ? buying ? 'circle' : 'square' : buying ? 'arrowUp' : 'arrowDown',
-        text:execution ? `实${letter}` : `${letter}${group.source_count > 1 ? `·${group.source_count}` : ''}`,
+        text:execution ? `实${letter}` : letter,
         size:execution ? 1.2 : 1});
     }
     return {markers,mappings,groups,intentCount,tradeCount,deferredCount,ignoredCount};
   }
   function describe(mappings, time, frequency) {
-    if (!time) return '移到买卖标记所在K线，查看原始日期与周期闭合日期。';
+    if (!time) return '点击最终 B/S 或对应 K 线，查看多 Agent 判断；悬浮只切换指标与筹码。';
     const items = mappings.filter((item) => item.bar_date === time && item.displayed !== false);
     if (!items.length) return `${time} · 该K线无买卖标记`;
-    return items.map((item) => `${item.action === 'BUY' ? '买入' : '卖出'}${item.kind === 'execution' ? '成交' : '意图'} ${item.original_date}${frequency === '日线' ? '' : ` · ${frequency}闭合 ${item.closed_at}`}`).join('；');
+    return items.map((item) => `${item.action === 'BUY' ? '买入' : '卖出'}${item.kind === 'execution' ? '成交' : item.source === 'consensus' ? '最终点' : '意图'} ${item.original_date}${frequency === '日线' ? '' : ` · ${frequency}闭合 ${item.closed_at}`}`).join('；');
   }
   const api = {periodKey,build,describe};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

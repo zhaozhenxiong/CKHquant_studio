@@ -1,8 +1,8 @@
 """Display-only dated prices and agent evidence from already computed inputs.
 
-No model, signal, account, or training artifact is produced here.  The adapter
-copies events and joins exact symbol/day observations; it never uses a later
-quote or the latest model decision to fill an earlier date.
+The adapter joins exact symbol/day observations and derives independent market
+direction arbitration from saved evidence. It never runs models, changes the
+Broker, or uses a later quote to fill an earlier date.
 """
 from __future__ import annotations
 
@@ -182,8 +182,8 @@ def _high_return_agent(row, day, candidate):
     return result
 
 
-def decorate_analysis(result, *, raw=None, features=None, overlay=None):
-    """Copy an analysis and append dated display evidence without new inference."""
+def decorate_analysis(result, *, raw=None, features=None, overlay=None, consensus_config=None):
+    """Append display evidence and arbitrate the full causal history before clipping."""
     output = copy.deepcopy(result)
     symbol = str(result.get("symbol", ""))
     cutoff = min(filter(None, (_day(result.get("as_of")), _day(result.get("data_end")))), default=None)
@@ -195,29 +195,36 @@ def decorate_analysis(result, *, raw=None, features=None, overlay=None):
     candidates = _index(overlay.get("candidates", []), symbol)
     routes = {_day(row.get("date")): row for row in _records(overlay.get("ma_routes", []))}
     basis = result.get("price_basis") or getattr(raw, "attrs", {}).get("price_basis") or "unavailable"
-    events, events_by_day = [], {}
-    for original in result.get("events", []):
-        event = copy.deepcopy(original)
-        day = _event_day(event)
-        event_symbol = str(event.get("symbol", symbol))
-        if not day or cutoff and day > cutoff or not _visible(event.get("available_at"), cutoff or day):
-            continue
-        observation = observations.get((event_symbol, day), {})
-        close = _number(observation.get("close"))
-        event.update(evidence_date=day, original_event_date=_day(original.get("date") or original.get("time")),
-                     reference_price=close, reference_price_date=day, reference_price_source="signal_day_close",
-                     reference_price_basis=basis, reference_price_reason=None if close is not None else "signal_day_bar_unavailable")
-        events.append(event)
-        events_by_day.setdefault((event_symbol, day), []).append(event)
+    def dated_events(values):
+        events = []
+        for original in _records(values):
+            event = copy.deepcopy(original)
+            day = _event_day(event)
+            event_symbol = str(event.get("symbol", symbol))
+            if not day or cutoff and day > cutoff or not _visible(event.get("available_at"), cutoff or day):
+                continue
+            observation = observations.get((event_symbol, day), {})
+            close = _number(observation.get("close"))
+            event.update(evidence_date=day, original_event_date=_day(original.get("date") or original.get("time")),
+                         reference_price=close, reference_price_date=day, reference_price_source="signal_day_close",
+                         reference_price_basis=basis, reference_price_reason=None if close is not None else "signal_day_bar_unavailable")
+            events.append(event)
+        return events
+
+    # The original displayed event list remains an inspectable candidate list.
+    # Arbitration uses the saved full signal-point prefix, including warm-up.
+    events = dated_events(result.get("events", []))
     output["events"] = events
-    rows = []
-    for bar in display:
-        day = _day(bar.get("time") or bar.get("date"))
-        if not day or cutoff and day > cutoff:
-            continue
+    full_events = dated_events(overlay.get("signal_points", result.get("signal_points", result.get("events", []))))
+    full_events_by_day, events_by_day = {}, {}
+    for event in full_events:
+        full_events_by_day.setdefault((str(event.get("symbol", symbol)), event["evidence_date"]), []).append(event)
+    for event in events:
+        events_by_day.setdefault((str(event.get("symbol", symbol)), event["evidence_date"]), []).append(event)
+
+    def evidence_row(day, dated_events):
         key = (symbol, day)
         observation, feature, decision, candidate = (index.get(key, {}) for index in (observations, feature_index, decisions, candidates))
-        dated_events = events_by_day.get(key, [])
         visible = [event for event in dated_events if event.get("evidence_visible") is not False
                    and event.get("candidate_eligible") is not False]
         by_source = {source: [event for event in visible if event.get("source") == source] for source in ("ma", "structure", "wyckoff")}
@@ -236,12 +243,30 @@ def decorate_analysis(result, *, raw=None, features=None, overlay=None):
             agents[source]["excluded_events"] = [event for event in dated_events
                 if event.get("source") == source and (event.get("evidence_visible") is False
                                                       or event.get("candidate_eligible") is False)]
-        rows.append({"date": day, "symbol": symbol, "reference_close": _number(observation.get("close")),
+        return {"date": day, "symbol": symbol, "reference_close": _number(observation.get("close")),
             "reference_price_date": day, "reference_price_source": "signal_day_close", "reference_price_basis": basis,
             "reference_price_reason": None if _number(observation.get("close")) is not None else "signal_day_bar_unavailable",
             "ohlc": {column: _number(observation.get(column)) for column in ("open", "high", "low", "close")},
             "next_market_session": following, "raw_risk_plan": copy.deepcopy(risk_plan), "events": dated_events,
-            "agents": agents})
+            "agents": agents}
+
+    display_days = [_day(bar.get("time") or bar.get("date")) for bar in display]
+    display_days = [day for day in display_days if day and (not cutoff or day <= cutoff)]
+    rows = [evidence_row(day, events_by_day.get((symbol, day), [])) for day in display_days]
     output["chart_evidence"] = {"version": CHART_EVIDENCE_VERSION, "price_basis": basis, "rows": rows,
         "execution_basis": "信号日收盘参考；实际成交价、执行日与费用以 Broker 账本为准"}
+
+    from my_strategy.services.czsc_agent_consensus import build_consensus
+    prefix_days = sorted({day for (stock, day) in observations if stock == symbol and (not cutoff or day <= cutoff)}
+                         | set(display_days))
+    prefix_rows = [evidence_row(day, full_events_by_day.get((symbol, day), [])) for day in prefix_days]
+    consensus = build_consensus(prefix_rows, symbol=symbol,
+                                model_family=result.get("model_family", "ma_trend"), config=consensus_config)
+    visible_days = set(display_days)
+    hidden_rows = [row for row in consensus["rows"] if display_days and row["date"] < min(display_days)]
+    consensus.update(state_before_display=copy.deepcopy(hidden_rows[-1]["state_after"] if hidden_rows else consensus["initial_state"]),
+                     prefix_start=prefix_days[0] if prefix_days else None, prefix_bars=len(prefix_days),
+                     rows=[row for row in consensus["rows"] if row["date"] in visible_days],
+                     events=[event for event in consensus["events"] if _day(event.get("date") or event.get("time")) in visible_days])
+    output["consensus_decisions"] = consensus
     return output
