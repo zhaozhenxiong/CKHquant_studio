@@ -8,6 +8,9 @@ on:
         default: false
 permissions:
   contents: read
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
 jobs:
   wheels:
     strategy:
@@ -53,13 +56,13 @@ jobs:
         with:
           pattern: wheels-*
           path: .scratch/native-assets
-      - run: python app/build_release.py --output-dir dist/releases/0.1.1 --wheel-dir .scratch/native-assets/wheels-ubuntu-latest --wheel-dir .scratch/native-assets/wheels-windows-latest --wheel-dir .scratch/native-assets/wheels-macos-15
+      - run: python app/build_release.py --output-dir dist/releases/0.1.2 --wheel-dir .scratch/native-assets/wheels-ubuntu-latest --wheel-dir .scratch/native-assets/wheels-windows-latest --wheel-dir .scratch/native-assets/wheels-macos-15
       - uses: actions/upload-artifact@v4
         with:
           name: KHQuant-source-release
           path: |
-            dist/releases/0.1.1/*.zip
-            dist/releases/0.1.1/SHA256SUMS.txt
+            dist/releases/0.1.2/*.zip
+            dist/releases/0.1.2/SHA256SUMS.txt
   mps:
     if: ${{ inputs.verify_mps }}
     runs-on: [self-hosted, macOS, ARM64, khquant-mps]

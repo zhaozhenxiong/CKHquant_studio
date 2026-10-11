@@ -1,5 +1,8 @@
 name: CZSC runtime checks
 on: [pull_request, push]
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
 jobs:
   test:
     strategy:

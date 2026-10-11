@@ -15,7 +15,8 @@ import pandas as pd
 from my_strategy.core.paths import ARTIFACT_RUNS_ROOT
 from my_strategy.core.run_context import stable_hash
 from my_strategy.services.czsc_dual_models import (expert_inputs as dual_expert_inputs,
-    oof_splits, verified_bundle as verified_dual_bundle, _verified_catalog_context as verified_source_context)
+    oof_splits, verified_bundle as verified_dual_bundle, _verified_catalog_context as verified_source_context,
+    _model_availability_candidates)
 from my_strategy.services.czsc_research_ml import (PredictorSession, MODEL_VERSION, LABEL_VERSION,
     _date, _hash, _file_hash, _features, _fit_preprocess, _transform, _metrics, _network, _device, _verified_manifest)
 from my_strategy.services.czsc_research_profiles import get_feature_profile
@@ -509,7 +510,7 @@ class WyckoffPredictorSession:
 
 class WyckoffResolver:
     def __init__(self, *, usage_mode="production", model_policy="auto", model_run_id=None, checkpoint=None,
-                 calendar_run_id=None, runs_root=None, expected_calendar_hash=None, **_):
+                 calendar_run_id=None, runs_root=None, expected_calendar_hash=None, runtime_calendar_dates=None, **_):
         if usage_mode not in {"production", "historical", "retrospective"} or model_policy not in {"auto", "pinned"}: raise ValueError("invalid Wyckoff routing policy")
         if model_policy == "pinned" and (not model_run_id or not checkpoint): raise ValueError("pinned Wyckoff requires run/checkpoint")
         if usage_mode == "retrospective" and model_policy != "pinned": raise ValueError("retrospective Wyckoff requires explicit pin")
@@ -522,7 +523,7 @@ class WyckoffResolver:
             try:
                 report=json.loads(report_path.read_text()); metadata=json.loads((run/"metadata.json").read_text())
                 if report.get("status") != "complete" or metadata.get("status") != "complete" or report.get("publication_allowed") is not False: raise ValueError("Wyckoff run incomplete or not shadow")
-                if calendar_run_id and report["calendar"]["run_id"] != calendar_run_id: continue
+                if runtime_calendar_dates is None and calendar_run_id and report["calendar"]["run_id"] != calendar_run_id: continue
                 cache,calendar,dates=verified_source_context({**report,"dataset_records": report["source_dataset_records"]})
                 if expected_calendar_hash and expected_calendar_hash != stable_hash(dates): raise ValueError("Wyckoff requested calendar mismatch")
                 projections={r["symbol"]:r for r in report["dataset_records"]}; pending=[]
@@ -532,9 +533,17 @@ class WyckoffResolver:
                     pending.append({"model_run_id":run.name,"checkpoint":entry["name"],"name":entry["name"],"model_dir":entry["path"],
                         "available_at":bundle["available_at"],"actual_training_completed_at":bundle["training_completed_at"],
                         "probability_threshold":bundle["probability_threshold"],"manifest_sha256":bundle["bundle_sha256"],"bundle_sha256":bundle["bundle_sha256"],
-                        "exit_model":bundle.get("exit_head"),"policy_models":bundle.get("policy_heads"),"source_snapshot_hash":report["source_snapshot"]["source_report_sha256"],"target_hash":bundle["target_hash"],"feature_profile":"ma_trend_v1","manifest":bundle})
+                        "exit_model":bundle.get("exit_head"),"policy_models":bundle.get("policy_heads"),"source_snapshot_hash":report["source_snapshot"]["source_report_sha256"],"target_hash":bundle["target_hash"],"feature_profile":"ma_trend_v1",
+                        "calendar_run_id":calendar["run_id"],"calendar_hash":calendar["hash"],"calendar_dates_hash":stable_hash(dates),"manifest":bundle})
                 for symbol,record in projections.items():
                     if _file_hash(Path(record["path"])) != record["sha256"] or record["source_sha256"] != cache[symbol]["sha256"]: raise ValueError("Wyckoff projected cache/source mismatch")
+                if runtime_calendar_dates is not None:
+                    from my_strategy.services.czsc_research_calendar import calendar_prefix_compatible
+                    runtime_dates=list(runtime_calendar_dates)
+                    if not calendar_prefix_compatible(dates,runtime_dates): raise ValueError("Wyckoff frozen calendar is not a prefix of the runtime calendar")
+                    for entry in pending:
+                        entry.update(runtime_calendar_run_id=calendar_run_id,runtime_calendar_dates_hash=stable_hash(runtime_dates),
+                            calendar_compatibility="identical_dates" if dates==runtime_dates else "frozen_dates_prefix")
                 self.catalog.extend(pending); self.cache.update(projections); self.calendar,self.market_dates=calendar,dates
             except (OSError,ValueError,KeyError,TypeError,AttributeError) as exc: self.catalog_errors.append({"model_run_id":run.name,"error":str(exc)})
         self.catalog.sort(key=lambda x:(x["available_at"],x["actual_training_completed_at"]))
@@ -544,27 +553,36 @@ class WyckoffResolver:
             from my_strategy.services.czsc_dual_models import DualResolver
             frozen=load_config("czsc_wyckoff_research")["baseline_dual_run_id"]
             self.dual_fallback_resolver=DualResolver(usage_mode=usage_mode,model_policy="auto",model_run_id=frozen,
-                calendar_run_id=calendar_run_id,runs_root=runs_root,expected_calendar_hash=expected_calendar_hash)
+                calendar_run_id=calendar_run_id,runs_root=runs_root,expected_calendar_hash=expected_calendar_hash,
+                runtime_calendar_dates=runtime_calendar_dates)
             if not self.catalog and self.dual_fallback_resolver.catalog:
                 self.cache=dict(self.dual_fallback_resolver.cache);self.calendar=dict(self.dual_fallback_resolver.calendar)
                 self.market_dates=list(self.dual_fallback_resolver.market_dates)
     def resolve(self, day):
         from my_strategy.services.czsc_research_models import signal_time
         moment=signal_time(day); entries=[x for x in self.catalog if self.model_policy != "pinned" or x["model_run_id"] == self.model_run_id and x["checkpoint"] == self.checkpoint]
-        if self.usage_mode != "retrospective": entries=[x for x in entries if signal_time(x["available_at"]) <= moment and (self.usage_mode != "production" or pd.Timestamp(x["actual_training_completed_at"]) <= moment)]
+        entries,diagnostics=_model_availability_candidates(entries,moment,self.usage_mode)
         route={"date":pd.Timestamp(day).date().isoformat(),"usage_mode":self.usage_mode,"model_policy":self.model_policy,"model_family":"wyckoff",
             "model_dir":None,"probability_threshold":.55,"applied_to_entry":False,"status":"rules_no_model","reason_codes":["model_unavailable"],"release_id":None}
         if entries:
             route.update({k:v for k,v in entries[-1].items() if k != "manifest"}); route.update(status=self.usage_mode+"_shadow",
                 reason="Wyckoff experts remain shadow pending independent source/ledger qualification",reason_codes=["wyckoff_model_shadow","independent_future_window_missing"],applied_to_entry=False)
-        elif self.model_policy=="auto" and self.dual_fallback_resolver is not None:
-            fallback=self.dual_fallback_resolver.resolve(day)
-            if fallback.get("model_dir"):
-                route.update(fallback);route.update(model_family="wyckoff",bundle_family="dual",primary_model_dir=None,
-                    probability_source="dual_fallback",status="dual_fallback_shadow",fallback_model=dict(fallback),
-                    reason_codes=["wyckoff_checkpoint_unavailable","dual_fallback_shadow"],applied_to_entry=False)
+        else:
+            route["model_availability_diagnostics"]=diagnostics
+            if self.catalog_errors: diagnostics["catalog_errors"]=list(self.catalog_errors)
+            route["reason_codes"]+=list(dict.fromkeys(
+                reason for candidate in diagnostics["candidates"] for reason in candidate["reason_codes"]))
+            if self.model_policy=="auto" and self.dual_fallback_resolver is not None:
+                fallback=self.dual_fallback_resolver.resolve(day)
+                if fallback.get("model_dir"):
+                    route.update(fallback);route.update(model_family="wyckoff",bundle_family="dual",primary_model_dir=None,
+                        probability_source="dual_fallback",status="dual_fallback_shadow",fallback_model=dict(fallback),
+                        reason_codes=["wyckoff_checkpoint_unavailable","dual_fallback_shadow"],applied_to_entry=False)
+                else:
+                    diagnostics["dual_fallback"]=fallback.get("model_availability_diagnostics",{})
+                    route["reason_codes"]=list(dict.fromkeys([*route["reason_codes"],*fallback.get("reason_codes",[])]))
         return route
-    def resolve_dates(self, dates): return [self.resolve(day) for day in dates]
+    def resolve_dates(self, dates): return [self.resolve(pd.Timestamp(day).date().isoformat()) for day in dates]
 
 
 def get_bundle_profile():

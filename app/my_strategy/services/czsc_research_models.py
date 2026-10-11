@@ -13,6 +13,8 @@ from pathlib import Path
 import re
 from typing import Any, Iterable, Sequence
 
+import pandas as pd
+
 from my_strategy.core.paths import ARTIFACT_RUNS_ROOT
 from my_strategy.core.run_context import stable_hash
 from my_strategy.core.tz import LOCAL_TZ
@@ -71,7 +73,8 @@ def verified_checkpoint(directory: Path) -> dict[str, Any]:
     return manifest
 
 
-def checkpoint_catalog(model_run_id: str, *, runs_root: Path | None = None) -> list[dict[str, Any]]:
+def checkpoint_catalog(model_run_id: str, *, runs_root: Path | None = None,
+                       runtime_calendar_dates: Sequence[str] | None = None) -> list[dict[str, Any]]:
     from my_strategy.adapters.czsc_adapter import SOURCE_SHA256
     from my_strategy.services.czsc_research_profiles import recognized_feature_profile
     root = identity_path(runs_root or ARTIFACT_RUNS_ROOT, model_run_id)
@@ -119,6 +122,7 @@ def checkpoint_catalog(model_run_id: str, *, runs_root: Path | None = None) -> l
             "feature_profile": profile["name"],
             "strategy_version": training.get("strategy_version"), "data_version": training.get("data_version"),
             "calendar_run_id": calendar["run_id"], "calendar_hash": calendar["hash"],
+            "calendar_dates_hash": stable_hash(dates),
             "config_hash": metadata.get("config_hash") or stable_hash(training.get("config", {})),
             "source_hash": metadata.get("source_hash") or SOURCE_SHA256, "native_source_sha256": SOURCE_SHA256,
             "source_git_commit": metadata.get("git_commit"),
@@ -127,6 +131,14 @@ def checkpoint_catalog(model_run_id: str, *, runs_root: Path | None = None) -> l
             "actual_training_completed_at": manifest.get("training_completed_at") or metadata.get("training_completed_at"),
             "training_time_provenance": "recorded" if manifest.get("training_completed_at") or metadata.get("training_completed_at") else "not_recorded",
             "manifest": manifest})
+    if runtime_calendar_dates is not None:
+        from my_strategy.services.czsc_research_calendar import calendar_prefix_compatible
+        runtime_dates = list(runtime_calendar_dates)
+        if not calendar_prefix_compatible(dates, runtime_dates):
+            raise ValueError("model frozen calendar is not a prefix of the runtime calendar")
+        for entry in entries:
+            entry.update(runtime_calendar_dates_hash=stable_hash(runtime_dates),
+                         calendar_compatibility="identical_dates" if dates == runtime_dates else "frozen_dates_prefix")
     return entries
 
 
@@ -136,7 +148,8 @@ class ModelResolver:
                  calendar_run_id: str | None = None, store=None, runs_root: Path | None = None,
                  feature_version: str | None = None, feature_schema_hash: str | None = None,
                  feature_columns: Sequence[str] | None = None,
-                 strategy_version: str | None = None) -> None:
+                 strategy_version: str | None = None,
+                 runtime_calendar_dates: Sequence[str] | None = None) -> None:
         from my_strategy.services.czsc_research_profiles import get_feature_profile
         from my_strategy.storage.czsc_model_releases import ModelReleaseStore
         default_profile = get_feature_profile()
@@ -170,15 +183,19 @@ class ModelResolver:
             if not (root / "reports" / "research.json").is_file():
                 continue
             try:
-                entries = checkpoint_catalog(root.name, runs_root=self.runs_root)
+                entries = checkpoint_catalog(root.name, runs_root=self.runs_root,
+                                             runtime_calendar_dates=runtime_calendar_dates)
                 for entry in entries:
                     if (entry["feature_version"] != requested_version
                             or entry["feature_schema_hash"] != requested_hash
                             or (strategy_version is not None and entry["strategy_version"] != strategy_version)
-                            or (calendar_run_id is not None and entry["calendar_run_id"] != calendar_run_id)):
+                            or (runtime_calendar_dates is None and calendar_run_id is not None
+                                and entry["calendar_run_id"] != calendar_run_id)):
                         continue
                     if requested_columns is None or entry["manifest"]["schema"]["columns"] != requested_columns:
                         raise ValueError("checkpoint columns mismatch bound feature schema")
+                    if runtime_calendar_dates is not None:
+                        entry["runtime_calendar_run_id"] = calendar_run_id
                     self.catalog.append(entry)
             except (ValueError, KeyError, OSError, TypeError) as exc:
                 self.catalog_errors.append({"model_run_id": root.name, "reason": str(exc)})
@@ -239,4 +256,6 @@ class ModelResolver:
         return route
 
     def resolve_dates(self, dates: Iterable[Any]) -> list[dict[str, Any]]:
-        return [self.resolve(day) for day in dates]
+        # Daily feature dates may be midnight Timestamp values; route at the
+        # canonical session close while resolve() retains instant semantics.
+        return [self.resolve(pd.Timestamp(day).date().isoformat()) for day in dates]

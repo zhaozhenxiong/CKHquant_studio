@@ -112,8 +112,15 @@ class ModelReleaseStore:
         if not reason.strip():
             raise ValueError("production release requires an explicit reason")
         root = identity_path(self.runs_root, model_run_id)
+        high_path = root / "reports" / "high_return.json"
+        if high_path.is_file():
+            high_report = json.loads(high_path.read_text(encoding="utf-8"))
+            if high_report.get("model_family") == "high_return":
+                raise ValueError("high_return promotion requires its own independent forward certification; current family is shadow only")
         training_path = root / "reports" / "research.json"
         training = json.loads(training_path.read_text(encoding="utf-8"))
+        if training.get("model_family") == "high_return":
+            raise ValueError("high_return cannot use the fixed-ten-session release identity; keep shadow")
         gate, coverage = training.get("model_gate", {}), training.get("coverage", {})
         if (gate.get("passed") is not True or gate.get("full_universe") is not True
                 or gate.get("preparation_failures") != 0 or training.get("failures")

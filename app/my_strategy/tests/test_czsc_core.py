@@ -10,8 +10,8 @@ import pandas as pd
 import pytest
 
 from my_strategy.adapters.czsc_adapter import load_bars, native_runtime, to_raw_bar
-from my_strategy.services.czsc_analysis import analyze_stock, run_session, strategy_config
-from my_strategy.services.czsc_analysis import _next_session_decision
+from my_strategy.services.czsc_analysis import CzscSession, analyze_stock, run_session, strategy_config
+from my_strategy.services.czsc_analysis import _forming_pen, _next_session_decision
 from my_strategy.services.czsc_backtest import execute_decisions
 
 
@@ -109,6 +109,66 @@ def test_forming_bar_payload_cannot_change_decisions_or_confirmed_structures(raw
         if frequency in session.kas:
             assert session.kas[frequency].bars_raw[-1].dt == session.closed[frequency][-1].dt
             assert session.kas[frequency].bars_raw[-1].dt != session.pending[frequency].dt
+            full = session.payload()[frequency]
+            expected = {(pen.fx_a.dt.date().isoformat(), pen.fx_b.dt.date().isoformat(),
+                         float(pen.fx_a.fx), float(pen.fx_b.fx)) for pen in session.kas[frequency].finished_bis}
+            actual = {(pen["start_time"], pen["end_time"], pen["start_price"], pen["end_price"])
+                      for pen in full["pens"] if pen["is_confirmed"]}
+            assert actual == expected
+            assert all(pen["start_time"] < pen["end_time"] <= cutoff for pen in full["pens"])
+            assert all(pen["confirmed_at"] is None and pen["observed_at"][:10] == cutoff
+                       for pen in full["pens"] if not pen["is_confirmed"])
+
+
+@pytest.mark.parametrize("direction, endpoint", [("向下", 52.9), ("向上", 72.56)])
+def test_forming_pen_uses_direction_extreme_after_native_anchor(direction, endpoint):
+    anchor = pd.Timestamp("2026-09-22")
+    unfinished = {"direction": direction, "fx_a": SimpleNamespace(dt=anchor, fx=66.07),
+                  "raw_bars": [SimpleNamespace(dt=anchor - pd.Timedelta(days=1), high=100, low=1),
+                               SimpleNamespace(dt=anchor, high=66.07, low=63),
+                               SimpleNamespace(dt=pd.Timestamp("2026-10-08"), high=68, low=55),
+                               SimpleNamespace(dt=pd.Timestamp("2026-10-09"), high=72.56, low=52.9)]}
+    pen = _forming_pen(SimpleNamespace(ubi=unfinished), "2026-10-09T15:00:00+08:00")
+    assert pen == {"start_time": "2026-09-22", "end_time": "2026-10-09", "start_price": 66.07,
+                   "end_price": endpoint, "is_confirmed": False, "confirmed_at": None,
+                   "observed_at": "2026-10-09T15:00:00+08:00"}
+
+
+def test_forming_monthly_endpoint_uses_observed_day_instead_of_future_bucket():
+    pending = pd.Timestamp("2026-10-31")
+    unfinished = {"direction": "向下", "fx_a": SimpleNamespace(dt=pd.Timestamp("2026-07-31"), fx=84.7),
+                  "raw_bars": [SimpleNamespace(dt=pd.Timestamp("2026-07-31"), high=84.7, low=70),
+                               SimpleNamespace(dt=pending, high=60, low=52.9)]}
+    pen = _forming_pen(SimpleNamespace(ubi=unfinished), "2026-10-09T15:00:00+08:00", pending)
+    assert pen["end_time"] == "2026-10-09" and pen["end_price"] == 52.9
+    assert _forming_pen(SimpleNamespace(ubi=None), "2026-10-09T15:00:00+08:00") is None
+    unfinished["raw_bars"] = unfinished["raw_bars"][:1]
+    assert _forming_pen(SimpleNamespace(ubi=unfinished), "2026-10-09T15:00:00+08:00", pending) is None
+
+
+def test_payload_keeps_unfinished_stroke_when_all_native_bis_are_finished(raw_db):
+    frame, config = load_bars("000001", db_path=raw_db), strategy_config()
+    session = CzscSession("000001.SZ", config, len(frame))
+    for row in frame.itertuples(index=False):
+        session.update(row)
+        analysis = session.kas["日线"]
+        unfinished = analysis.ubi
+        if not unfinished or len(analysis.bi_list) != len(analysis.finished_bis):
+            continue
+        anchor = unfinished["fx_a"]
+        candidates = [bar for bar in unfinished["raw_bars"] if bar.dt >= anchor.dt]
+        endpoint = min(candidates, key=lambda bar: bar.low) if str(unfinished["direction"]) == "向下" else max(
+            candidates, key=lambda bar: bar.high)
+        if endpoint.dt <= anchor.dt:
+            continue
+        pens = session.payload()["日线"]["pens"]
+        assert len(pens) == len(analysis.bi_list) + 1
+        assert all(pen["is_confirmed"] for pen in pens[:-1])
+        assert not pens[-1]["is_confirmed"] and pens[-1]["confirmed_at"] is None
+        assert pens[-1]["start_time"] == anchor.dt.date().isoformat()
+        assert pens[-1]["end_time"] == endpoint.dt.date().isoformat()
+        return
+    pytest.fail("Fixture must contain a native unfinished stroke after all completed BIs")
 
 
 def test_daily_structures_are_native_czsc(raw_db):

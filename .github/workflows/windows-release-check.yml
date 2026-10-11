@@ -3,6 +3,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
 jobs:
   windows:
     runs-on: windows-latest
@@ -25,7 +28,7 @@ jobs:
           '@ | .venv-release/Scripts/python.exe -I -
       - run: .venv-release/Scripts/python.exe -m my_strategy.scripts.ci_guard --skip-docker
       - run: .venv-release/Scripts/python.exe -m pip wheel . --no-deps --no-build-isolation --wheel-dir .scratch/release-wheels
-      - run: .venv-release/Scripts/python.exe -m pip install --no-deps --force-reinstall .scratch/release-wheels/khquant-0.1.1-py3-none-any.whl
+      - run: .venv-release/Scripts/python.exe -m pip install --no-deps --force-reinstall .scratch/release-wheels/khquant-0.1.2-py3-none-any.whl
       - run: |
           @'
           import importlib.metadata, json, subprocess, sys
@@ -33,8 +36,8 @@ jobs:
           import my_strategy
           path = Path(my_strategy.__file__).resolve()
           assert path.is_relative_to(Path(sys.prefix).resolve()) and 'site-packages' in path.parts
-          assert importlib.metadata.version('khquant') == '0.1.1'
-          identity = {'version': '0.1.1', 'package_path': str(path), 'prefix': sys.prefix,
+          assert importlib.metadata.version('khquant') == '0.1.2'
+          identity = {'version': '0.1.2', 'package_path': str(path), 'prefix': sys.prefix,
                       'source_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
                       'application_import': 'installed wheel site-packages'}
           Path('installation-windows-identity.json').write_text(json.dumps(identity, indent=2), encoding='utf-8')

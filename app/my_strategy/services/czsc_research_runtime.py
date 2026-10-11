@@ -53,9 +53,15 @@ def _prepare_stock(symbol, end, market_dates, cache=None, db_path=None, feature_
             ("feature_profile" not in cache or
              cache["feature_profile"] == profile["name"] == saved.attrs.get("feature_profile", profile["name"]))
             and ("feature_schema_hash" not in cache or
-                 cache["feature_schema_hash"] == profile["schema_hash"] == saved.attrs.get("schema_hash")))
+                  cache["feature_schema_hash"] == profile["schema_hash"] == saved.attrs.get("schema_hash")))
+        calendar_vetoed = any("calendar_missing_market_bar_window" in codes
+            for column in ("reason_codes", "model_reason_codes") if column in saved for codes in saved[column])
+        # A later verified schedule can remove an old calendar-coverage veto.
+        # Rebuild those flags from raw bars; never mutate the frozen cache.
+        calendar_quality_matches = (saved.attrs.get("calendar_hash") == stable_hash(market_dates)
+                                    or not calendar_vetoed)
         # Recompute incompatible semantics before bind can stamp a new profile identity.
-        if base_matches and profile_matches and record_matches:
+        if base_matches and profile_matches and record_matches and calendar_quality_matches:
             saved = saved[pd.to_datetime(saved.date) <= pd.Timestamp(end)].reset_index(drop=True)
             columns = ["symbol", "open", "high", "low", "close", "volume", "amount", "source", "has_trade_price"]
             model_columns_present = (profile["name"] != "ma_trend_v1" or "model_input_eligible" in saved)
@@ -125,6 +131,7 @@ class ResearchRuntime:
                  model_fold=None, calendar_run_id=None, device=None, db_path=None,
                  entry_policy="legacy", position_start=None, model_family="ma_trend"):
         from my_strategy.services.czsc_research import _calendar, research_status, run_path
+        from my_strategy.services.czsc_research_calendar import resolve_execution_calendar
         from my_strategy.services.czsc_research_models import ModelResolver
         from my_strategy.services.czsc_research_ml import PredictorSession
         from my_strategy.services.czsc_entry_plan import entry_plan_parameters, PLAN_VERSION
@@ -162,11 +169,14 @@ class ResearchRuntime:
         calendar_run_id = calendar_run_id or status.get("calendar_run_id")
         if not calendar_run_id:
             raise ValueError("组合研究需要已核验交易日历")
-        self.market_dates, self.calendar = _calendar(calendar_run_id)
+        self.market_dates, self.calendar = resolve_execution_calendar(
+            calendar_run_id, requested_calendar=_calendar(calendar_run_id))
+        calendar_run_id = self.calendar["run_id"]
         self.mode, self.policy = usage_mode, model_policy
         self.resolver = None if model_family in {"dual", "wyckoff"} else ModelResolver(usage_mode=usage_mode, model_policy=model_policy,
                                       model_run_id=model_run_id, checkpoint=model_fold,
-                                      calendar_run_id=calendar_run_id, strategy_version=self.profile["strategy_version"],
+                                      calendar_run_id=calendar_run_id, runtime_calendar_dates=self.market_dates,
+                                      strategy_version=self.profile["strategy_version"],
                                       feature_version=self.profile["version"], feature_schema_hash=self.profile["schema_hash"],
                                       feature_columns=self.profile["columns"])
         self.predictor = None if model_family in {"dual", "wyckoff"} else PredictorSession(device=device)
@@ -185,14 +195,9 @@ class ResearchRuntime:
                 from my_strategy.services.czsc_dual_models import DualResolver as ExpertResolver, DualPredictorSession as ExpertPredictor
             self.resolver = ExpertResolver(usage_mode=usage_mode, model_policy=model_policy,
                 model_run_id=model_run_id, checkpoint=model_fold, calendar_run_id=calendar_run_id,
-                expected_calendar_hash=stable_hash(self.market_dates))
+                runtime_calendar_dates=self.market_dates)
             self.predictor = ExpertPredictor(device=device)
             self.cache = self.resolver.cache
-            if self.resolver.market_dates:
-                if (self.market_dates != self.resolver.market_dates
-                        or self.calendar["hash"] != self.resolver.calendar.get("hash")):
-                    raise ValueError("专家包日历与独立核验日历不一致")
-                self.market_dates, self.calendar = self.resolver.market_dates, self.resolver.calendar
             self.profile = dict(get_feature_profile("ma_trend_v1"))
             self.profile["strategy_version"] = "czsc_wyckoff_three_experts_v1" if model_family == "wyckoff" else "czsc_dual_experts_v1"
         self.timings = {"preparation_wall_seconds": 0., "inference_wall_seconds": 0., "decision_wall_seconds": 0.}
@@ -454,6 +459,12 @@ class ResearchRuntime:
                     cpu_preparation_executor="spawn_process_pool" if workers > 1 else "parent_serial",
                     cpu_replay_executor=self.cpu_replay_executor,
                     model_cache_hits=info.get("cache_hits", 0), cache_hits=self.cache_hits, cache_misses=self.cache_misses)
+        info["runtime_execution_calendar"] = dict(self.calendar)
+        info["model_training_calendars"] = list({
+            (entry.get("calendar_run_id"), entry.get("calendar_hash")): {
+                "run_id": entry.get("calendar_run_id"), "hash": entry.get("calendar_hash")}
+            for entry in getattr(self.resolver, "catalog", []) if entry.get("calendar_run_id")
+        }.values())
         if self.model_family in {"dual", "wyckoff"}:
             info["feature_profile"] = "wyckoff_bundle_v1" if self.model_family == "wyckoff" else "dual_bundle_v1"
             info["expert_profiles"] = ["ma_trend_v1", "czsc_structure_v1"]

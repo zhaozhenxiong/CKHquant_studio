@@ -53,6 +53,42 @@ def test_resolver_empty_catalog_stays_rules_and_pin_guard(tmp_path):
     assert WyckoffResolver(runs_root=tmp_path).resolve("2026-10-08")["applied_to_entry"] is False
 
 
+def test_wyckoff_resolver_explains_late_primary_and_dual_fallback(tmp_path):
+    from my_strategy.services.czsc_dual_models import DualResolver
+    resolver=WyckoffResolver(runs_root=tmp_path)
+    resolver.catalog=[{"model_run_id":"wyckoff-fixture","checkpoint":"production","model_dir":"wyckoff-model",
+        "available_at":"2026-09-30","actual_training_completed_at":"2026-10-09T20:10:44+08:00"}]
+    fallback=DualResolver(runs_root=tmp_path)
+    fallback.catalog=[{"model_run_id":"dual-fixture","checkpoint":"production","model_dir":"dual-model",
+        "available_at":"2026-09-30","actual_training_completed_at":"2026-10-09T16:24:21+08:00"}]
+    resolver.dual_fallback_resolver=fallback
+    route=resolver.resolve("2026-10-09")
+    assert route["status"]=="rules_no_model" and route["model_dir"] is None and route["applied_to_entry"] is False
+    assert route["reason_codes"]==["model_unavailable","model_training_after_signal"]
+    diagnostic=route["model_availability_diagnostics"]
+    assert diagnostic["signal_at"]=="2026-10-09T15:00:00+08:00"
+    assert diagnostic["candidates"][0]["actual_training_completed_at"]=="2026-10-09T20:10:44+08:00"
+    assert diagnostic["dual_fallback"]["candidates"][0]["actual_training_completed_at"]=="2026-10-09T16:24:21+08:00"
+    next_route=resolver.resolve("2026-10-12")
+    assert next_route["status"]=="production_shadow" and next_route["model_dir"]=="wyckoff-model"
+    assert next_route["applied_to_entry"] is False
+
+
+def test_wyckoff_resolver_preserves_shadow_fallback_when_primary_is_late(tmp_path):
+    from my_strategy.services.czsc_dual_models import DualResolver
+    resolver=WyckoffResolver(runs_root=tmp_path)
+    resolver.catalog=[{"model_run_id":"wyckoff-fixture","checkpoint":"production","model_dir":"wyckoff-model",
+        "available_at":"2026-09-30","actual_training_completed_at":"2026-10-09T20:10:44+08:00"}]
+    fallback=DualResolver(runs_root=tmp_path)
+    fallback.catalog=[{"model_run_id":"dual-fixture","checkpoint":"production","model_dir":"dual-model",
+        "available_at":"2026-09-30","actual_training_completed_at":"2026-10-08T16:24:21+08:00"}]
+    resolver.dual_fallback_resolver=fallback
+    route=resolver.resolve("2026-10-09")
+    assert route["status"]=="dual_fallback_shadow" and route["model_dir"]=="dual-model"
+    assert route["applied_to_entry"] is False
+    assert route["model_availability_diagnostics"]["candidates"][0]["reason_codes"]==["model_training_after_signal"]
+
+
 def test_real_three_expert_forward_oof_reuse_and_future_guard(sample,tmp_path):
     fold={"train_end":"2024-12-31","validation_start":"2025-01-01","validation_end":"2025-03-31"}
     cfg={"feature_start":"2023-01-01","epochs":1,"batch_size":128,"min_train_rows":20,"min_validation_rows":20,"seed":42,

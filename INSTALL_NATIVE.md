@@ -1,4 +1,4 @@
-# KHQuant 0.1.1 原生安装与验收
+# KHQuant 0.1.2 原生安装与验收
 
 ## 环境和设备
 
@@ -34,7 +34,7 @@ CI 和维护者构建命令：
 
 ~~~bash
 python app/build_czsc_runtime.py --out app/vendor/wheels --no-install
-python app/build_release.py --output-dir dist/releases/0.1.1 --wheel-dir app/vendor/wheels
+python app/build_release.py --output-dir dist/releases/0.1.2-rebuild --wheel-dir app/vendor/wheels
 ~~~
 
 build_release.py 支持重复 --wheel-dir 合并三平台 CI 资产。它验证原生资产并生成源码 ZIP、完整性清单、版本来源及 SHA256SUMS.txt；不会上传远端。工作区未提交内容会包含在包中，并在 release.json 标明。
@@ -90,6 +90,6 @@ latest 从最新运行开始收集模型、日历及发布证据依赖；all 保
 
 目标机器先 package --verify，再运行 install.py 创建自己的环境。导入已有训练候选不会自动晋升；模型资格仍按原日期及证据核验。
 
-0.1.1 新 dual/Wyckoff 嵌套模型尚未完成上述状态导出兼容验收；latest/all 不保证迁移本次全部新模型研究状态。源码发行包只包含程序、配置与冻结原生依赖，不包含本机的行情库或模型权重。
+0.1.2 的 dual/Wyckoff/high_return 嵌套模型尚未完成上述状态导出兼容验收；latest/all 不保证迁移全部新研究状态。源码发行包只包含程序、配置与冻结原生依赖，不包含本机的行情库或模型权重。本机发布附带的模型基线归档用于保存原始身份，未认证为跨机器可直接运行的状态迁移包。后续调参见 app/PARAMETERS.md。
 
 重新训练 Wyckoff 的依赖：先准备核验交易日历和包含完整冻结特征、10 日标签的 MA 源研究运行，再完成使用同一 MA 源与日历的 dual 研究。research-wyckoff-train 的 --source-training-run-id 指定该 MA 源；还需将 configs/czsc_wyckoff_research.json 的 baseline_dual_run_id 设置为匹配的 dual 运行。随包配置里的原本地历史 run ID 不附带对应权重或报告，新机器不能直接复用。各依赖身份必须匹配；新的训练和认证协议须按实际完成时间重新冻结，禁止沿用旧冻结时间取得资格。

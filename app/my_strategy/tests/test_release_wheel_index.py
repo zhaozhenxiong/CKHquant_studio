@@ -110,7 +110,10 @@ def test_existing_frozen_native_wheel_validates_without_rewriting_manifest():
     merged, assets = wheel_index([directory], source)
     name = source["built_wheel_name"]
     assert name in assets
-    assert hashlib.sha256(assets[name].read_bytes()).hexdigest() == source["built_wheel_sha256"]
+    # A locked rebuild has its own physical SHA in wheel-index.json; the
+    # attachment manifest retains the original historical wheel SHA.
+    indexed = next(entry for entry in merged["wheels"] if entry["filename"] == name)
+    assert hashlib.sha256(assets[name].read_bytes()).hexdigest() == indexed["sha256"]
     assert merged["version"] == source["version"]
     assert source_path.read_bytes() == original
 
