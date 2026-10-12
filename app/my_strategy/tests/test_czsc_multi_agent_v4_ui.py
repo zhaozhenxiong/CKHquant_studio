@@ -218,3 +218,39 @@ assert(ui.agentView({kind:'model_probability',probability:null,reason_codes:[]},
 assert(ui.agentView({kind:'rule_evidence',input_eligible:false,reason_codes:[]},'wyckoff').reason.includes('没有可用评分'));
 assert(ui.agentView({kind:'model_probability',probability:.6,reason_codes:['ma_tactical_weakening_is_not_confirmed_long_trend_failure']},'ma').reason.includes('短期转弱'));
 ''')
+
+
+def test_popup_overview_separates_real_scores_missing_scores_weights_and_actual_contributions():
+    run_js(r'''
+const assert=require('node:assert/strict'),path=require('path');
+const ui=require(path.join(process.argv[1],'chart_evidence.js'));
+const row={date:'2026-01-21',agents:{ma:{probability:.4658,status:'scored',target:'actual_complete_fee_net_roundtrip_positive'},
+ structure:{input_eligible:true,current_state:{buy_score:1,sell_score:0}},wyckoff:{input_eligible:true,current_demand:.7,current_supply:.1},
+ high_return:{probability:.12,evaluation_status:'scored_passed'}}};
+const decision={date:row.date,version:'czsc_agent_consensus_v4',action:'BUY',emitted:true,agents:{
+ ma:{judgment:'ABSTAIN',configured_weight:.4,threshold:.55,buy_contribution:0,sell_contribution:0},
+ structure:{judgment:'BUY',configured_weight:.2,buy_contribution:.2,sell_contribution:0},
+ wyckoff:{judgment:'BUY',configured_weight:.3,buy_contribution:.3,sell_contribution:0},
+ high_return:{judgment:'BUY',configured_weight:.1,quality_contribution:.1,buy_contribution:.1,sell_contribution:0}
+}};
+const html=ui.agentOverviewHtml(row,decision);
+const section=key=>html.match(new RegExp(`<tr data-agent-summary-row="${key}">([\\s\\S]*?)</tr>`))[1];
+assert.equal((html.match(/data-agent-summary-row=/g)||[]).length,4);
+assert(section('ma').includes('已评分 46.58%'));assert(section('ma').includes('40%'));assert(section('ma').includes('买 0 / 卖 0 分'));
+assert(section('ma').includes('门槛 55%'));assert(!section('ma').includes('未评分'));
+assert(section('structure').includes('支持买入'));assert(section('structure').includes('规则买 100 / 100 · 卖 0 / 100'));
+assert(section('wyckoff').includes('当日需求 70 / 100 · 当日供给 10 / 100'));
+assert(section('high_return').includes('已评分 · 通过门槛'));assert(section('high_return').includes('买 10 / 卖 0 分'));assert(section('high_return').includes('买入质量加分'));
+assert(html.includes('MA 目标：完整交易费用后获利概率'));assert(!html.includes('趋势入场概率'));
+const missing=ui.agentOverviewHtml({...row,agents:{...row.agents,ma:{probability:null,status:'model_unavailable'},high_return:{probability:null,evaluation_status:'no_candidate'}}},null);
+assert(missing.includes('未评分 · 缺兼容模型'));assert(missing.includes('无候选 · 未评估'));assert(missing.includes('买 — / 卖 — 分'));
+assert(!missing.includes('已评分 0%'));assert(!missing.includes('买 0 / 卖 0 分'));assert(!missing.includes('完整交易费用后获利概率'));
+const zero=ui.agentOverviewHtml({...row,agents:{...row.agents,ma:{probability:0,status:'scored'}}},decision);
+assert(zero.includes('已评分 0%'));
+const out=ui.agentOverviewHtml({...row,agents:{...row.agents,ma:{probability:.6627,status:'scored',in_scope:false}}},decision);
+assert(out.includes('已评分 66.27%'));assert(out.includes('范围外研究分 · 不参与当前投票'));
+const popup=ui.popupHtml({evidence:{rows:[row]},consensus:{rows:[decision]},barDate:row.date,frequency:'月线',selectedDate:row.date});
+assert(popup.indexOf('信号可知日')<popup.indexOf('四路评分总览'));
+assert(popup.indexOf('四路评分总览')<popup.indexOf('仲裁意见'));
+assert(popup.includes('class="agent-evidence-grid"')); // The detailed cards remain.
+''')

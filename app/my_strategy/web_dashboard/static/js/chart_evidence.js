@@ -129,6 +129,35 @@
       return `<section class="agent-evidence"><div class="agent-heading"><strong>${esc(view.label)}</strong><span>${esc(view.kind)} · ${esc(view.evaluationLabel || statusLabel(view.status))}</span></div><p class="agent-score">${esc(view.summary)}</p>${view.secondary ? `<p class="subtle">${esc(view.secondary)}</p>` : ''}${opinion ? opinionHtml(opinion,key,{decision:consensus,config,version}) : ''}<p class="subtle">${esc(view.reason)}</p>${!compact ? `${view.pointTypes ? `<p>${esc(view.pointTypes)}</p>` : ''}${view.exit ? `<p class="subtle">${esc(view.exit)}</p>` : ''}<details><summary>评分目标与模型身份</summary>${view.target ? `<p>目标：${esc(view.target)}</p>` : ''}${finite(view.threshold) ? `<p>冻结门槛 ${esc(probability(view.threshold))}</p>` : ''}${view.reconstructionText ? `<p>${esc(view.reconstructionText)}</p>` : ''}${view.identityText ? `<p>${esc(view.identityText)}</p>` : ''}</details>` : ''}</section>`;
     }).join('')}</div>`;
   }
+  function agentOverviewHtml(row, consensus = null, config = null) {
+    const cellStyle = 'padding:6px;font-size:11px;line-height:1.4;overflow-wrap:anywhere';
+    const body = Object.keys(labels).map((key) => {
+      const item = row?.agents?.[key] || {}, opinion = consensus?.agents?.[key];
+      const view = currentAgentView(row,key,opinion);
+      const contribution = consensus?.contributions?.[key] || opinion || {};
+      const weight = finite(opinion?.configured_weight) ? opinion.configured_weight : key === 'high_return' ? config?.high_return_quality_weight : config?.source_weights?.[key];
+      let score = view.summary, detail = '';
+      if (key === 'ma') {
+        score = validProbability(item.probability) ? `已评分 ${probability(item.probability)}` : `未评分 · ${statusLabel(view.status)}`;
+        detail = item.in_scope === false || opinion?.in_scope === false ? '范围外研究分 · 不参与当前投票' : opinion ? `${judgmentLabel(opinion.judgment)}${finite(opinion.threshold) ? ` · 门槛 ${probability(opinion.threshold)}` : ''}` : '';
+      } else if (key === 'structure') {
+        const state = opinion?.current_state || item.current_state || {};
+        score = judgmentLabel(opinion?.judgment);
+        detail = item.input_eligible === false || opinion?.input_eligible === false ? '规则输入未通过' : `规则买 ${ruleScore(state.buy_score)} · 卖 ${ruleScore(state.sell_score)}`;
+      } else if (key === 'wyckoff') {
+        detail = opinion ? judgmentLabel(opinion.judgment) : statusLabel(view.status);
+      } else if (key === 'high_return') {
+        score = validProbability(item.probability) ? probability(item.probability) : '未评分';
+        detail = view.evaluationLabel;
+      }
+      const buy = key === 'high_return' ? contribution.quality_contribution : contribution.buy_contribution;
+      const actual = `买 ${supportScore(buy)} / 卖 ${supportScore(contribution.sell_contribution)} 分`;
+      return `<tr data-agent-summary-row="${key}"><td style="${cellStyle}">${esc(view.label)}</td><td style="${cellStyle}"><strong>${esc(score)}</strong>${detail ? `<br><span class="subtle">${esc(detail)}</span>` : ''}</td><td style="${cellStyle}">${finite(weight) ? `${supportScore(weight)}%` : '—'}</td><td style="${cellStyle}">${esc(actual)}${key === 'high_return' ? '<br><span class="subtle">买入质量加分</span>' : ''}</td></tr>`;
+    }).join('');
+    const target = row?.agents?.ma?.target || row?.agents?.ma?.model_identity?.target;
+    const targetNote = target === 'actual_complete_fee_net_roundtrip_positive' ? '<p class="subtle" style="margin:6px 0">MA 目标：完整交易费用后获利概率。</p>' : '';
+    return `<section class="agent-score-overview" aria-label="四路评分总览"><strong>四路评分总览</strong><div class="table-wrap" style="margin-top:5px"><table style="table-layout:fixed"><colgroup><col style="width:20%"><col style="width:40%"><col style="width:10%"><col style="width:30%"></colgroup><thead><tr>${['Agent','当前分值 / 状态','权重','买 / 卖实际贡献'].map((label) => `<th style="${cellStyle}">${esc(label)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table></div>${targetNote}</section>`;
+  }
   function referenceHtml(row) {
     if (!row) return '<p class="evidence-unavailable">该日期未取得参考价与评分证据。</p>';
     const ohlc = row.ohlc || {}, priceBasis = {unadjusted:'未复权',mixed_legacy_adjustment_unverified:'旧复权口径未核验'}[row.reference_price_basis] || row.reference_price_basis || '价格口径待核验';
@@ -255,7 +284,7 @@
     const badges = visible.map((group) => `<span class="badge ${group.action === 'BUY' ? 'buy' : 'sell'}">${group.kind === 'wyckoff' ? `W ${esc(group.event_type)}${group.confirmed ? '确认' : '待测试'}` : `${group.kind === 'execution' ? '实际成交 ' : ''}${group.action === 'BUY' ? 'B' : 'S'}`}</span>`).join('');
     const wyckoffEntries = entries.filter((entry) => entry.row?.source === 'wyckoff' && (entry.row?.event || entry.row?.event_type));
     const wyckoffHtml = wyckoffEntries.length ? `<section class="wyckoff-event-details"><strong>原始量价事件 ${wyckoffEntries.length} 条</strong>${wyckoffEntries.map((entry) => `<p>W ${esc(entry.row.event || entry.row.event_type)} · ${entry.row.confirmed === true ? '已确认' : '待测试'}<br>原观察 ${esc(entry.row.origin_observed_at || entry.row.observed_at || entry.original_date)} · 首次可用 ${esc(entry.first_available_at || entry.row.available_at)}${entry.row.reason_codes?.length ? `<br>${esc(entry.row.reason_codes.map(reason).join('；'))}` : ''}</p>`).join('')}<p class="subtle">量价事件与最终 B/S 分别记录；周期内日线证据已可知，形成中周/月线仍按其闭合规则参与原生判断。</p></section>` : '';
-    return `<header class="chart-popup-heading"><div><strong>${esc(frequency)} ${esc(barDate)}</strong><p>${badges || '最终判断'} · 点击查看</p></div><button type="button" data-chart-evidence-close aria-label="关闭图表判断">×</button></header>${dates.length > 1 || dates.length && frequency !== '日线' ? `<div class="evidence-date-list" aria-label="周期内信号与事件可知日期">${dates.map((item) => `<button type="button" data-evidence-date="${esc(item)}" aria-pressed="${item === selected}">${esc(item)}</button>`).join('')}</div><p class="subtle">按首次可知日期查看当日判断；点击日期同步对应日线筹码。</p>` : ''}${frequency !== '日线' && !selectedDate ? `<p class="subtle">筹码按所指周期截至 ${esc(profileAsOf || barDate)}；以下判断保留信号可知日。</p>` : ''}<p class="evidence-original-date">信号可知日 ${esc(selected)}${esc(periodText)}</p>${reference?.available_at ? `<p class="subtle">信号首次可用 ${esc(reference.available_at)}</p>` : ''}${anchors}${wyckoffHtml}${consensusHtml(decision,consensus?.config,consensus?.version)}${referenceHtml(row)}${agentsHtml(row,false,decision,consensus?.config,consensus?.version)}${riskHtml(row?.raw_risk_plan)}<div class="evidence-actions"><button type="button" data-evidence-locate="${esc(selected)}">定位原始证据</button><button type="button" data-evidence-replay="${esc(selected)}">按此日重新判断</button></div>${rawEventsHtml(row,entries,consensus?.version || consensus?.config?.version)}`;
+    return `<header class="chart-popup-heading"><div><strong>${esc(frequency)} ${esc(barDate)}</strong><p>${badges || '最终判断'} · 点击查看</p></div><button type="button" data-chart-evidence-close aria-label="关闭图表判断">×</button></header><p class="evidence-original-date">信号可知日 ${esc(selected)}${esc(periodText)}</p>${agentOverviewHtml(row,decision,consensus?.config)}${dates.length > 1 || dates.length && frequency !== '日线' ? `<div class="evidence-date-list" aria-label="周期内信号与事件可知日期">${dates.map((item) => `<button type="button" data-evidence-date="${esc(item)}" aria-pressed="${item === selected}">${esc(item)}</button>`).join('')}</div><p class="subtle">按首次可知日期查看当日判断；点击日期同步对应日线筹码。</p>` : ''}${frequency !== '日线' && !selectedDate ? `<p class="subtle">筹码按所指周期截至 ${esc(profileAsOf || barDate)}；以下判断保留信号可知日。</p>` : ''}${reference?.available_at ? `<p class="subtle">信号首次可用 ${esc(reference.available_at)}</p>` : ''}${anchors}${wyckoffHtml}${consensusHtml(decision,consensus?.config,consensus?.version)}${referenceHtml(row)}${agentsHtml(row,false,decision,consensus?.config,consensus?.version)}${riskHtml(row?.raw_risk_plan)}<div class="evidence-actions"><button type="button" data-evidence-locate="${esc(selected)}">定位原始证据</button><button type="button" data-evidence-replay="${esc(selected)}">按此日重新判断</button></div>${rawEventsHtml(row,entries,consensus?.version || consensus?.config?.version)}`;
   }
   function historyPage(rows, requestedPage = 0, pageSize = 20) {
     const sorted = [...(rows || [])].sort((a,b) => date(b.date).localeCompare(date(a.date))), pages = Math.max(1,Math.ceil(sorted.length / pageSize));
@@ -295,7 +324,7 @@
     if (action.type === 'date') return {...state,selectedDate:action.date};
     return state;
   }
-  const api = {esc,date,finite,probability,ruleScore,supportScore,consensusVersion,weightedConsensus,currentEvidenceConsensus,rowAt,agentView,currentAgentView,riskDetails,structureFacts,highReturnState,agentsHtml,judgmentLabel,opinionReasons,opinionHtml,consensusAt,mergeEvidenceRows,finalSide,consensusHtml,diagnosticsHtml,popupSelection,referenceSelection,rawEventsHtml,referenceHtml,riskHtml,groupDates,popupHtml,historyPage,historyHtml,statisticsHtml,selectionTransition};
+  const api = {esc,date,finite,probability,ruleScore,supportScore,consensusVersion,weightedConsensus,currentEvidenceConsensus,rowAt,agentView,currentAgentView,riskDetails,structureFacts,highReturnState,agentsHtml,agentOverviewHtml,judgmentLabel,opinionReasons,opinionHtml,consensusAt,mergeEvidenceRows,finalSide,consensusHtml,diagnosticsHtml,popupSelection,referenceSelection,rawEventsHtml,referenceHtml,riskHtml,groupDates,popupHtml,historyPage,historyHtml,statisticsHtml,selectionTransition};
   root.KHQuantChartEvidence = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

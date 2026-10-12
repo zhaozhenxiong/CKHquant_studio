@@ -167,6 +167,30 @@ for(const key of ['ma','wyckoff'])assert.equal(ui.agentView(row.agents[key],key)
 ''', SIDEBAR_FIXTURE)
 
 
+def test_real_popup_top_overview_matches_ma_scores_and_votes_before_long_details():
+    run_js(r'''
+for(const day of ['2026-01-21','2026-06-04','2026-10-09']) {
+ const row=ui.rowAt(response.chart_evidence,day),decision=ui.consensusAt(response.consensus_decisions,day);
+ const html=ui.agentOverviewHtml(row,decision,response.consensus_decisions.config);
+ const ma=html.match(/<tr data-agent-summary-row="ma">([\s\S]*?)<\/tr>/)[1];
+ assert(ma.includes(`买 ${ui.supportScore(decision.agents.ma.buy_contribution)} / 卖 ${ui.supportScore(decision.agents.ma.sell_contribution)} 分`));
+ assert.equal((html.match(/data-agent-summary-row=/g)||[]).length,4);
+ if(row.agents.ma.probability!==null) {
+  assert(ma.includes(`已评分 ${ui.probability(row.agents.ma.probability)}`));assert(!ma.includes('未评分'));
+  if(day==='2026-01-21'){assert(ma.includes('46.58%'));assert(ma.includes('买 0 / 卖 0 分'));}
+  if(day==='2026-06-04'){assert(ma.includes('59.52%'));assert(ma.includes('买 40 / 卖 0 分'));}
+  if(day==='2026-10-09'){assert(ma.includes('66.27%'));assert(ma.includes('范围外研究分'));assert(ma.includes('买 0 / 卖 0 分'));}
+ } else assert(ma.includes('未评分'));
+ const popup=ui.popupHtml({evidence:response.chart_evidence,consensus:response.consensus_decisions,
+  groups:[],barDate:day,frequency:'日线',selectedDate:day});
+ assert(popup.indexOf('信号可知日')<popup.indexOf('四路评分总览'));
+ assert(popup.indexOf('data-agent-summary-row="high_return"')<popup.indexOf('class="consensus-result'));
+ assert(popup.indexOf('四路评分总览')<popup.indexOf('class="agent-evidence-grid"'));
+ if(row.agents.ma.target==='actual_complete_fee_net_roundtrip_positive')assert(popup.includes('MA 目标：完整交易费用后获利概率'));
+}
+''')
+
+
 @pytest.mark.parametrize("frequency", ["日线", "周线", "月线"])
 def test_real_response_workbench_hover_click_and_w_layer_toggle(frequency):
     """Only the browser's DOM/chart surfaces are mocked, not the response."""
