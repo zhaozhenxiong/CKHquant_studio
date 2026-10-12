@@ -28,6 +28,7 @@
   let chartSelection = {hover:null,pinned:null,selectedDate:null,popupOpen:false};
   let popupAnchor = null;
   let selectedReferenceLine = null, selectedReferenceSeries = null, selectedReferenceKey = null;
+  let referenceMutationDepth = 0;
   let historyRows = [];
   let historyPage = 0;
   let analysisLoading = false;
@@ -233,7 +234,7 @@
   function finalGroupsAt(time) { return groupsAt(time).filter((group) => group.visible !== false && group.kind === 'intention' && group.sources?.includes('consensus')); }
   function updateChartSelection(type, time = null, point = null, selectedDate = null) {
     const ui = evidenceUI();
-    if (analysisLoading) return;
+    if (analysisLoading || referenceMutationDepth > 0) return;
     if (!ui) { $('marker-details').textContent = KHQuantMarkers.describe(markerMappings,time,state.frequency); renderIndicatorReadout(time); return; }
     const previous = chartSelection;
     const canOpen = type === 'pin' && finalGroupsAt(time).length > 0;
@@ -249,25 +250,42 @@
     renderChartPopup();
   }
   function clearSelectedReference() {
-    if (selectedReferenceLine && candles?.removePriceLine) candles.removePriceLine(selectedReferenceLine);
-    if (selectedReferenceSeries && chart) chart.removeSeries(selectedReferenceSeries);
+    const line = selectedReferenceLine, series = selectedReferenceSeries;
+    // Chart removal may synchronously emit crosshair callbacks. Detach first
+    // so reentrant cleanup cannot remove the same object a second time.
     selectedReferenceLine = null; selectedReferenceSeries = null; selectedReferenceKey = null;
+    if (!line && !series) return;
+    referenceMutationDepth++;
+    try {
+      if (line && candles?.removePriceLine) candles.removePriceLine(line);
+      if (series && chart) chart.removeSeries(series);
+    } finally {
+      referenceMutationDepth--;
+    }
   }
   function renderSelectedReference(groups, active) {
+    if (referenceMutationDepth > 0) return;
     const selection = evidenceUI()?.referenceSelection({evidence:state.analysis?.chart_evidence,consensus:state.analysis?.consensus_decisions,groups,barDate:active,selectedDate:chartSelection.selectedDate});
     if (!selection || !candles?.createPriceLine || !chart) { clearSelectedReference(); return; }
     const key = [state.frequency,selection.bar_date,selection.signal_date,selection.event_id,selection.price,selection.action].join(':');
     if (key === selectedReferenceKey) return;
     clearSelectedReference();
     const c = colors(), buying = selection.action === 'BUY', color = buying ? c.up : c.down;
-    selectedReferenceLine = candles.createPriceLine({price:selection.price,color,lineWidth:1,lineStyle:LightweightCharts.LineStyle.Dashed,axisLabelVisible:true,title:`${buying ? 'B' : 'S'} 参考 · 非成交`});
-    selectedReferenceSeries = chart.addLineSeries({color,lineVisible:false,pointMarkersVisible:true,pointMarkersRadius:4,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false});
-    selectedReferenceSeries.setData([{time:selection.bar_date,value:selection.price}]);
-    selectedReferenceKey = key;
+    // Creation and setData may emit the same synchronous chart callbacks.
+    // Keep interaction paused until both references and their key are complete.
+    referenceMutationDepth++;
+    try {
+      selectedReferenceLine = candles.createPriceLine({price:selection.price,color,lineWidth:1,lineStyle:LightweightCharts.LineStyle.Dashed,axisLabelVisible:true,title:`${buying ? 'B' : 'S'} 参考 · 非成交`});
+      selectedReferenceSeries = chart.addLineSeries({color,lineVisible:false,pointMarkersVisible:true,pointMarkersRadius:4,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false});
+      selectedReferenceSeries.setData([{time:selection.bar_date,value:selection.price}]);
+      selectedReferenceKey = key;
+    } finally {
+      referenceMutationDepth--;
+    }
   }
   function resetChartSelection() {
-    clearSelectedReference();
     chartSelection = {hover:null,pinned:null,selectedDate:null,popupOpen:false}; popupAnchor = null;
+    clearSelectedReference();
     $('chart-evidence-popup').hidden = true; $('chart-evidence-popup').replaceChildren(); $('chart-evidence-reset').hidden = true;
     $('chart-selection-status').textContent = '悬浮 K 线切换筹码分布；点击固定日期。';
   }

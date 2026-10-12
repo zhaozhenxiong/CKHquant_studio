@@ -132,8 +132,9 @@ assert(ui.consensusHtml({...decision,emitted:false,action:'WAIT',reason_codes:['
 ''')
 
 
-def test_reference_price_line_and_point_only_exist_during_click_window_and_clean_on_all_resets():
-    run_js(r'''
+@pytest.mark.parametrize('synchronous_remove_callback', ['none', 'price_line', 'series', 'creation', 'both'])
+def test_reference_price_line_and_point_only_exist_during_click_window_and_clean_on_all_resets(synchronous_remove_callback):
+    script = r'''
 const fs=require('fs'),vm=require('vm'),path=require('path'),assert=require('node:assert/strict');
 const root=process.argv[1];require(path.join(root,'chart_evidence.js'));
 global.KHQuantMarkers=require(path.join(root,'chart_markers.js'));require(path.join(root,'wyckoff_markers.js'));
@@ -144,16 +145,17 @@ function newElement(tag='div') {return {tag,dataset:{},style:{},checked:false,hi
  replaceChildren(){this.children=[];this.innerHTML='';},append(child){this.children.push(child);},hasAttribute(key){return key in this.attributes;},setAttribute(key,value){this.attributes[key]=value;}};}
 function element(id){if(!elements.has(id))elements.set(id,newElement());return elements.get(id);}
 const weeklyButton=newElement('button');weeklyButton.dataset.frequency='周线';
+const monthlyButton=newElement('button');monthlyButton.dataset.frequency='月线';
 global.document={getElementById:element,documentElement:{},createElementNS:(_,tag)=>newElement(tag),
- querySelectorAll:selector=>selector==='[data-frequency]'?[weeklyButton]:[],addEventListener(key,fn){documentListeners[key]=fn;}};
+ querySelectorAll:selector=>selector==='[data-frequency]'?[weeklyButton,monthlyButton]:[],addEventListener(key,fn){documentListeners[key]=fn;}};
 global.getComputedStyle=()=>({getPropertyValue:()=> '#123456'});global.ResizeObserver=class{observe(){}};
 global.requestAnimationFrame=()=>1;global.window={innerWidth:907,innerHeight:924,addEventListener(key,fn){windowListeners[key]=fn;}};
 global.location={hash:''};global.setTimeout=()=>1;global.clearTimeout=()=>{};
-let range={from:0,to:2},crosshair,click,firstSeries;const lines=new Set(),points=new Set();
+let range={from:0,to:2},crosshair,click,firstSeries;const lines=new Set(),points=new Set(),liveSeries=new Set();
 const scale={subscribeVisibleLogicalRangeChange(){},getVisibleLogicalRange:()=>range,setVisibleLogicalRange(value){range=value;},fitContent(){},height:()=>30,timeToCoordinate:()=>50};
 function series(){return {setData(value){this.data=value;},setMarkers(value){this.markers=value;},applyOptions(){},priceScale:()=>({applyOptions(){}}),priceToCoordinate:price=>350-(price-8)*60};}
-const chart={addCandlestickSeries(){firstSeries=series();firstSeries.createPriceLine=options=>{lines.add(options);return options;};firstSeries.removePriceLine=line=>lines.delete(line);return firstSeries;},
- addHistogramSeries:series,addLineSeries(options){const result=series();if(options.pointMarkersVisible)points.add(result);return result;},removeSeries(item){points.delete(item);},resize(){},
+const chart={addCandlestickSeries(){firstSeries=series();firstSeries.createPriceLine=options=>{lines.add(options);if(['creation','both'].includes(synchronousRemoveCallback))crosshair({seriesData:new Map()});return options;};firstSeries.removePriceLine=line=>{const removed=lines.delete(line);if(['price_line','both'].includes(synchronousRemoveCallback)){assert(removed,'Price line not found');crosshair({seriesData:new Map()});}};return firstSeries;},
+ addHistogramSeries:series,addLineSeries(options){const result=series();liveSeries.add(result);if(options.pointMarkersVisible){points.add(result);result.setData=value=>{result.data=value;if(['creation','both'].includes(synchronousRemoveCallback))crosshair({time:value[0].time,point:{x:50,y:50},seriesData:new Map([[firstSeries,{close:11}]])});};}return result;},removeSeries(item){assert(liveSeries.delete(item),'Series not found');points.delete(item);if(['series','both'].includes(synchronousRemoveCallback))crosshair({seriesData:new Map()});},resize(){},
  subscribeCrosshairMove(fn){crosshair=fn;},subscribeClick(fn){click=fn;},timeScale:()=>scale,priceScale:()=>({width:()=>50})};
 global.LightweightCharts={createChart:()=>chart,LineStyle:{Solid:0,Dashed:2}};window.LightweightCharts=LightweightCharts;
 const code=fs.readFileSync(path.join(root,'workbench.js'),'utf8').replace('init().catch(showError);',
@@ -164,7 +166,7 @@ const bars=dates.map(time=>({time,open:10,high:12,low:9,close:11,volume:100,is_c
 const events=[dates[0],dates[2]].map((date,i)=>({date,time:date,evidence_date:date,first_available_at:date+'T15:00:00+08:00',source_frequency:'日线',source:'consensus',action:i?'SELL':'BUY',symbol,event_id:'final-'+i,reference_price:i?13:10.75,reference_price_date:date}));
 state.analysis={symbol,as_of:dates[2],data_end:dates[2],consensus_decisions:{version,config:{version},rows:events.map(e=>({...e,emitted:true})),events},
  chart_evidence:{rows:dates.map((date,i)=>({date,reference_close:10.75+i,reference_price_date:date,agents:{}}))},
- frequencies:{'日线':{bars},'周线':{bars:[{...bars[2],is_closed:false}]}}};
+ frequencies:{'日线':{bars},'周线':{bars:[{...bars[2],is_closed:false}]},'月线':{bars:[{...bars[2],is_closed:false}]}}};
 state.query={symbol,start:dates[0],end:dates[2]};state.dates=dates;element('layer-signals').checked=true;
 bind();renderAnalysis(false);
 assert(element('marker-summary').textContent.includes('最终 B/S 2 个 · 周期标记 2 个'));
@@ -187,7 +189,16 @@ assert(element('chart-evidence-popup').innerHTML.includes('日线已确认／周
 const dateButton=newElement('button');dateButton.dataset.evidenceDate=dates[2];
 documentListeners.click({target:{closest:()=>dateButton}});assert.equal(lines.size,1);assert.equal([...lines][0].price,13);
 resetChartSelection();assert.equal(lines.size,0);assert.equal(points.size,0);
-''')
+// Real regression: an open weekly popup closes, then monthly click still works.
+weeklyButton.listeners.click[0]();clicked(dates[2]);assert.equal(lines.size,1);
+windowListeners.keydown({key:'Escape'});assert.equal(lines.size,0);assert.equal(points.size,0);
+monthlyButton.listeners.click[0]();clicked(dates[2]);assert.equal(state.frequency,'月线');assert.equal(lines.size,1);
+assert(!element('chart-evidence-popup').hidden);assert.equal([...lines][0].price,13);
+// Switching directly while open must clear safely before the next popup.
+weeklyButton.listeners.click[0]();assert.equal(lines.size,0);assert.equal(points.size,0);clicked(dates[2]);assert.equal(lines.size,1);
+resetChartSelection();assert.equal(lines.size,0);assert.equal(points.size,0);assert.equal(interactions.selection().pinned,null);
+'''
+    run_js("const synchronousRemoveCallback = '"+synchronous_remove_callback+"';\n"+script)
 
 
 def test_v3_structure_panel_counts_direction_facts_before_risk_and_reports_current_opinion():
