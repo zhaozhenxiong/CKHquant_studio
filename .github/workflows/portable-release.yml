@@ -32,6 +32,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: python -m pip install --isolated -r app/requirements-czsc-runtime.lock
       - run: python app/build_czsc_runtime.py --out .scratch/native-wheel --no-install
+      - name: Align checkout native bytes with the verified fresh index
+        shell: python
+        run: |
+          import hashlib, json, shutil
+          from pathlib import Path
+          directory = Path('.scratch/native-wheel')
+          index = json.loads((directory / 'wheel-index.json').read_text(encoding='utf-8'))
+          entries = {entry['filename']: entry for entry in index['wheels']}
+          wheels = list(directory.glob('*.whl'))
+          assert len(wheels) == 1, 'Fresh native output must contain exactly one platform wheel'
+          destination = Path('app/vendor/wheels')
+          for wheel in wheels:
+              entry = entries[wheel.name]
+              digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+              assert digest == entry['sha256'], 'Fresh native wheel checksum mismatch'
+              assert entry['build']['cargo_locked'] is True and entry['build']['source_algorithm_patches'] is False
+              shutil.copy2(wheel, destination / wheel.name)
+              assert hashlib.sha256((destination / wheel.name).read_bytes()).hexdigest() == digest
       - run: python install.py --venv-dir .venv-ci --wheel-dir .scratch/native-wheel --device cpu
       - run: ${{ matrix.python }} -m my_strategy.scripts.ci_guard --skip-docker
       - run: ${{ matrix.python }} -m pip wheel . --no-deps --no-build-isolation --wheel-dir .scratch/application-wheels

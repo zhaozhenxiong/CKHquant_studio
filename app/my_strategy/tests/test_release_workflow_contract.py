@@ -92,6 +92,8 @@ def test_native_upload_uses_fresh_build_directory_and_installer_selects_it():
     install = next(item['run'] for item in actual if 'python install.py' in item.get('run', ''))
     assert '--out .scratch/native-wheel ' in build
     assert '--wheel-dir .scratch/native-wheel ' in install
+    assert next(i for i, item in enumerate(actual) if item.get('name') == 'Align checkout native bytes with the verified fresh index') < next(
+        i for i, item in enumerate(actual) if 'python install.py' in item.get('run', ''))
     upload = next(item['with'] for item in actual if item.get('with', {}).get('name') == 'wheels-${{ matrix.os }}')
     assert upload['path'] == '.scratch/native-wheel/'
     assert upload['include-hidden-files'] is True
@@ -100,6 +102,42 @@ def test_native_upload_uses_fresh_build_directory_and_installer_selects_it():
             for item in job['steps']:
                 if item.get('uses') == 'actions/upload-artifact@v4' and '.scratch/' in item['with']['path']:
                     assert item['with']['include-hidden-files'] is True
+
+
+@pytest.mark.parametrize('corrupt', [False, True])
+def test_ci_native_alignment_copies_verified_new_bytes_without_touching_frozen_source(tmp_path, monkeypatch, corrupt):
+    actual = steps('portable-release.yml', 'wheels')
+    script = next(item['run'] for item in actual if item.get('name') == 'Align checkout native bytes with the verified fresh index')
+    fresh = tmp_path / '.scratch/native-wheel'
+    destination = tmp_path / 'app/vendor/wheels'
+    fresh.mkdir(parents=True)
+    destination.mkdir(parents=True)
+    name = 'czsc-1.0.1-cp310-abi3-macosx_11_0_arm64.whl'
+    new_bytes = b'verified current platform rebuild'
+    old_bytes = b'previous physical native asset'
+    (fresh / name).write_bytes(new_bytes)
+    (destination / name).write_bytes(old_bytes)
+    digest = hashlib.sha256(new_bytes).hexdigest()
+    index = {'wheels': [{'filename': name, 'sha256': '0' * 64 if corrupt else digest,
+                        'build': {'cargo_locked': True, 'source_algorithm_patches': False}}]}
+    index_bytes = json.dumps(index).encode()
+    (fresh / 'wheel-index.json').write_bytes(index_bytes)
+    (destination / 'wheel-index.json').write_bytes(index_bytes)
+    source_manifest = tmp_path / 'app/czsc-source-manifest.json'
+    original_source = b'{"built_wheel_sha256":"original scientific identity", "files": []}\n'
+    source_manifest.write_bytes(original_source)
+    monkeypatch.chdir(tmp_path)
+    if corrupt:
+        with pytest.raises(AssertionError, match='Fresh native wheel checksum mismatch'):
+            exec(compile(script, 'ci-fresh-native-alignment', 'exec'), {})
+        assert (destination / name).read_bytes() == old_bytes
+    else:
+        exec(compile(script, 'ci-fresh-native-alignment', 'exec'), {})
+        assert (destination / name).read_bytes() == new_bytes
+        active = json.loads((destination / 'wheel-index.json').read_text())['wheels'][0]
+        assert hashlib.sha256((destination / name).read_bytes()).hexdigest() == active['sha256']
+    assert source_manifest.read_bytes() == original_source
+    assert (destination / 'wheel-index.json').read_bytes() == index_bytes
 
 
 def test_windows_can_verify_exact_portable_asset_with_authenticated_artifact_download():
