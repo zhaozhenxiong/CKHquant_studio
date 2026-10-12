@@ -30,7 +30,7 @@ def test_architecture_catalog_uses_real_tree_identity_and_rejects_population_dri
                 'target_contract_hash': 'same-real-target', 'target_contract': {'source_snapshot_hash': 'source'},
                 'available_at': '2025-03-31', 'fold': {'name': 'fold'}, 'training_completed_at': '2026-10-12'}
     catalog, coverage = diag.architecture_catalog(root, report, 'tree', loader=loader)
-    assert catalog[0]['heads']['entry']['path'] == 'models/entry/fold/tree'
+    assert Path(catalog[0]['heads']['entry']['path']) == Path('models/entry/fold/tree')
     assert catalog[0]['heads']['entry']['manifest_sha256'] == 'tree-sha'
     assert coverage[0]['architecture'] == 'tree'
     assert report['model_bundles'][0]['heads']['entry']['manifest_sha256'] == 'linear-sha'
