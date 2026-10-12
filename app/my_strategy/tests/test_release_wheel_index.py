@@ -9,6 +9,7 @@ import pytest
 from packaging.utils import parse_wheel_filename
 
 from build_release import release_archive, wheel_index
+from my_strategy.scripts.public_provenance import public_provenance
 
 
 @pytest.fixture
@@ -143,3 +144,76 @@ def test_release_archive_preserves_unix_script_modes_bytes_and_package_layout(tm
             assert info.external_attr >> 16 == expected_mode
             assert zipped.read(name) == content
             assert (package / relative).read_bytes() == content
+
+
+def test_public_build_metadata_redacts_only_host_paths_and_keeps_native_identity():
+    original = {"files": [{"path": "engine.py", "sha256": "immutable-source"}], "built_wheel_sha256": "immutable-wheel",
+        "source_tree_sha256": "immutable-tree", "build": {"cargo_locked": True, "source_algorithm_patches": False,
+            "cargo_target_dir": "C:\\Users\\Private\\target", "rustflags": "-C opt-level=3 -Lnative=C:/Users/Private/lib -C dlltool=C:/Users/Private/bin/dlltool.exe",
+            "release_profile_overrides": {"CARGO_PROFILE_RELEASE_LTO": "false"}},
+        "wheels": [{"filename": "native.whl", "sha256": "immutable-native", "tags": ["cp312-cp312-win_amd64"],
+            "build": {"cargo_target_dir": "/Users/Private/project/target", "rustflags": "-C debuginfo=0"}}]}
+    preserved = deepcopy(original)
+    result = public_provenance(original)
+    assert original == preserved
+    assert result["files"] == original["files"] and result["built_wheel_sha256"] == original["built_wheel_sha256"]
+    assert result["source_tree_sha256"] == original["source_tree_sha256"]
+    assert result["wheels"][0]["sha256"] == original["wheels"][0]["sha256"]
+    assert result["build"]["cargo_locked"] and result["build"]["source_algorithm_patches"] is False
+    assert result["build"]["release_profile_overrides"] == original["build"]["release_profile_overrides"]
+    assert result["build"]["rustflags"] == "-C opt-level=3 -Lnative=<build-local-native-library-dir> -C dlltool=<build-local-dlltool>"
+    assert result["wheels"][0]["build"]["rustflags"] == "-C debuginfo=0"
+    assert "Users" not in json.dumps(result)
+    assert public_provenance(result) == result
+
+
+def test_release_assembly_is_relative_clean_and_retains_validation_document(tmp_path, monkeypatch, manifest):
+    import build_release
+    from my_strategy.scripts.package_project import verify_package
+    repo, assets = tmp_path / "source", tmp_path / "native"
+    app = repo / "app"
+    app.mkdir(parents=True)
+    for name, body in {"install.py": "# fixture installer", "RELEASE_VALIDATION.md": "# Current validation",
+        "pyproject.toml": '[project]\nversion="0.1.3"\n', "runtime-manifest.json": '{"platform_verification": {}}'}.items():
+        (repo / name).write_text(body, encoding="utf-8")
+    (app / "AGENTS.md").write_text("fixture source checkout", encoding="utf-8")
+    paths = app / "my_strategy/core/paths.py"
+    paths.parent.mkdir(parents=True)
+    paths.write_text("# fixture application path boundary", encoding="utf-8")
+    native = app / "vendor/czsc"
+    native.mkdir(parents=True)
+    (native / "engine.py").write_bytes(b"frozen algorithm")
+    manifest = deepcopy(manifest)
+    manifest["build"] = {"cargo_target_dir": "/Users/Private/target", "rustflags": "-Lnative=C:/Users/Private/lib"}
+    manifest_path = app / "czsc-source-manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    original = manifest_path.read_bytes()
+    index, entry = indexed_wheel(assets, manifest)
+    entry["build"].update(cargo_target_dir="C:\\Users\\Private\\target", rustflags="-C dlltool=C:/Users/Private/dlltool.exe")
+    save_index(assets, index)
+    old_assets = app / "vendor/wheels"
+    old_assets.mkdir()
+    (old_assets / "unselected-native.whl").write_bytes(b"not selected for release")
+    for name in ("data/raw/private.db", "artifacts/runs/private/models/model.pt", "knowledge_base_system/evidence/private.json"):
+        private = app / "my_strategy" / name
+        private.parent.mkdir(parents=True, exist_ok=True)
+        private.write_bytes(b"private fixture must be excluded")
+    monkeypatch.setattr(build_release, "ROOT", repo)
+    monkeypatch.setattr(build_release, "APP", app)
+    release = build_release.build_release(tmp_path / "public", [assets])
+    package = Path(release["package"])
+    assert verify_package(package) == []
+    assert (package / "RELEASE_VALIDATION.md").read_text() == "# Current validation"
+    assert json.loads((package / "image-manifest.json").read_text())["source_project_root"] == "app"
+    assert manifest_path.read_bytes() == original
+    assert (package / "app/vendor/czsc/engine.py").read_bytes() == b"frozen algorithm"
+    public_index = json.loads((package / "app/vendor/wheels/wheel-index.json").read_text())
+    assert public_index["source_tree_sha256"] == index["source_tree_sha256"]
+    assert public_index["wheels"][0]["sha256"] == entry["sha256"]
+    assert (package / "app/vendor/wheels" / entry["filename"]).read_bytes() == (assets / entry["filename"]).read_bytes()
+    assert not (package / "app/vendor/wheels/unselected-native.whl").exists()
+    assert not list(package.rglob("*.db")) and not list(package.rglob("*.pt"))
+    assert not (package / "app/my_strategy/knowledge_base_system").exists()
+    for name in ("app/czsc-source-manifest.json", "app/vendor/wheels/wheel-index.json", "image-manifest.json"):
+        assert "Users" not in (package / name).read_text()
+    assert hashlib.sha256(Path(release["archive"]).read_bytes()).hexdigest() == release["archive_sha256"]

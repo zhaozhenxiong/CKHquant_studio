@@ -19,7 +19,7 @@ from my_strategy.services.czsc_research_models import model_hash
 
 
 ROOT_FILES = (".env.example", ".env.native.example", ".gitignore", "README.md", "INSTALL_NATIVE.md", "RELEASE_NOTES.md",
-              ".gitattributes", "pyproject.toml", "setup.py", "MANIFEST.in", "runtime-manifest.json",
+              "RELEASE_VALIDATION.md", ".gitattributes", "pyproject.toml", "setup.py", "MANIFEST.in", "runtime-manifest.json",
               "LICENSE", "install.py", "install.bat", "install.command", "khquant-native.bat", "khquant-native.sh", "khquant.sh")
 EXCLUDED_NAMES = {".git", ".scratch", ".venv", ".venv-win", "venv", "__pycache__", ".pytest_cache",
                   ".ruff_cache", ".mypy_cache", ".claude", ".codex", ".serena", "node_modules", ".env",

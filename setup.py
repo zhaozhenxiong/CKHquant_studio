@@ -2,6 +2,7 @@
 import hashlib
 import json
 from pathlib import Path
+import runpy
 import shutil
 
 from setuptools import setup
@@ -9,6 +10,7 @@ from setuptools.command.build_py import build_py
 
 ROOT = Path(__file__).resolve().parent
 APP = ROOT / "app"
+public_provenance = runpy.run_path(str(APP / "my_strategy/scripts/public_provenance.py"))["public_provenance"]
 
 
 class BuildPy(build_py):
@@ -18,7 +20,8 @@ class BuildPy(build_py):
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         destination = Path(self.build_lib) / "my_strategy" / "_runtime"
         destination.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(manifest_path, destination / manifest_path.name)
+        (destination / manifest_path.name).write_text(
+            json.dumps(public_provenance(manifest), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         for entry in manifest["files"]:
             relative = Path("vendor/czsc") / entry["path"]
             source = APP / relative
@@ -31,7 +34,8 @@ class BuildPy(build_py):
         if index.is_file():
             target = destination / "vendor/wheels/wheel-index.json"
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(index, target)
+            target.write_text(json.dumps(public_provenance(json.loads(index.read_text(encoding="utf-8"))),
+                                         ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 requirements = [line for line in (APP / "requirements-czsc-runtime.lock").read_text(encoding="utf-8").splitlines()

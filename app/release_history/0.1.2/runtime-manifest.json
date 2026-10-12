@@ -1,0 +1,139 @@
+{
+  "schema_version": 2,
+  "application_version": "0.1.2",
+  "method": "CZSC",
+  "version": "1.0.1",
+  "source_manifest": "app/czsc-source-manifest.json",
+  "entrypoints": {
+    "windows": "khquant-native.bat",
+    "unix": "khquant-native.sh"
+  },
+  "views": [
+    "analysis",
+    "scan",
+    "backtest",
+    "watchlist",
+    "holdings",
+    "data"
+  ],
+  "capabilities": [
+    "update-data",
+    "analysis",
+    "scan",
+    "backtest",
+    "research-train",
+    "model-inference",
+    "dated-model-releases",
+    "personal-portfolio",
+    "portable-package",
+    "ma-trend-model",
+    "dual-expert-fusion",
+    "wyckoff-three-expert-shadow",
+    "actual-policy-entry-shadow",
+    "actual-holding-exit-shadow",
+    "independent-signal-points",
+    "actual-trade-episodes",
+    "high-return-two-stage-ml",
+    "signal-pinned-ma-holding-exit"
+  ],
+  "python": "3.12",
+  "devices": [
+    "auto",
+    "cpu",
+    "cuda",
+    "cuda:N",
+    "mps"
+  ],
+  "platform_verification": {
+    "macos_arm64_mps": "verified_0_1_2_github_source_isolated_installed_wheel_real_mps",
+    "macos_arm64_cpu": "verified_0_1_2_github_source_isolated_installed_wheel",
+    "windows_x64_cpu": "requires_0_1_2_github_source_and_asset_verification",
+    "windows_x64_cuda": "requires_0_1_2_github_source_and_asset_verification",
+    "linux_x64_cpu": "requires_0_1_2_github_source_and_asset_verification"
+  },
+  "local_verification_date": "2026-10-11",
+  "input": "stock_daily_normalized",
+  "results": "data/processed/czsc/results.db",
+  "tasks": "data/metadata/czsc_tasks.db",
+  "runs": "artifacts/runs",
+  "legacy_compatibility": false,
+  "previous_release_verification": {
+    "application_version": "0.1.1",
+    "platform_verification": {
+      "windows_x64_cpu": "verified_0_1_1_bundled_native_and_ci_installed_application_wheel",
+      "windows_x64_cuda": "requires_0_1_1_cuda_verification",
+      "macos_arm64_mps": "verified_0_1_1_installed_wheel_real_hardware_smoke",
+      "linux_x64_cpu": "requires_final_source_ci_execution_and_platform_native_asset",
+      "macos_arm64_cpu": "verified_0_1_1_installed_wheel_cpu_smoke"
+    },
+    "local_verification_date": "2026-10-10"
+  },
+  "verification_scope": {
+    "application": "GitHub release source keeps all 29 frozen training-core files; four entry/runtime compatibility fixes retained from upstream",
+    "dependencies": "local checks reuse locked Python 3.12 dependencies; GitHub CI downloads dependencies separately",
+    "input": "synthetic software verification; research performance retained as historical local evidence",
+    "engineering_baseline": {
+      "passed": 1294,
+      "skipped": 9,
+      "warnings": 1,
+      "scope": "original local implementation before GitHub compatibility integration"
+    },
+    "financial_certification": false,
+    "github_source_tests": {
+      "passed": 1296,
+      "skipped": 10,
+      "warnings": 1,
+      "seconds": 69.52
+    },
+    "macos_installed_application": {
+      "application": "independent installed wheel; source imports excluded",
+      "dependencies": "reused existing locked Python 3.12 environment",
+      "devices": [
+        "cpu",
+        "mps"
+      ],
+      "fixture": "synthetic_installation_only",
+      "checks": [
+        "strict_doctor",
+        "synthetic_train_save_reload_inference",
+        "structure_analysis_scan_backtest",
+        "six_pages",
+        "watchlist_holdings_restart_persistence"
+      ],
+      "wheel_runtime_contents_bound": true
+    }
+  },
+  "software_release": {
+    "version": "0.1.2",
+    "status": "official",
+    "authorized_by": "user",
+    "authorization_text": "把这个版本作为正式发布版 后续我自己调参数",
+    "released_at": "2026-10-11T11:58:27+08:00",
+    "parameter_policy": "retain_current_values_user_tunes_separate_profile",
+    "research_version": "czsc_high_return_v2_ma_exit_bound"
+  },
+  "parameter_profiles": {
+    "baseline": "app/parameter_profiles/high-return-0.1.2.json",
+    "editable": "app/parameter_profiles/high-return-custom.json",
+    "guide": "app/PARAMETERS.md",
+    "baseline_sha256": "5852d9e954e1290768a56a388d131ae5d358314535085e43d67b87d823d75bfb"
+  },
+  "model_qualification": {
+    "profitability_improvement_passed": false,
+    "independent_forward_validation_complete": false,
+    "original_native_audit_passed": false,
+    "external_l1_schema_addendum_passed": true,
+    "ordinary_routes": "shadow_scoring",
+    "applied_model_orders": "explicit_offline_high_return_research_arms",
+    "fixed_ten_session_model_alias_updated": false
+  },
+  "github_release": {
+    "repository": "zhaozhenxiong/CZSC_KHquant_studio",
+    "base_commit": "87b8a0ea35b3fb46d1fc3f667ff530d23ce66c9c",
+    "public_asset_policy": "code_native_runtime_parameters_only",
+    "contains_market_data": false,
+    "contains_trained_models": false,
+    "contains_personal_data": false,
+    "local_model_baseline_published": false
+  }
+}
