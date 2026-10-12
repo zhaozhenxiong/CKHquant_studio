@@ -35,14 +35,15 @@ class AnalysisRequest(BaseModel):
     calendar_run_id: str | None = None
     device: str | None = None
     consensus_config: dict[str, Any] | None = None
-    consensus_version: Literal["czsc_agent_consensus_v1", "czsc_agent_consensus_v2", "czsc_agent_consensus_v3"] | None = None
+    consensus_version: Literal["czsc_agent_consensus_v1", "czsc_agent_consensus_v2", "czsc_agent_consensus_v3", "czsc_agent_consensus_v4"] | None = None
     _symbol = field_validator("symbol")(clean_symbol)
 
     @model_validator(mode="after")
     def arbitration_parameters(self):
-        if self.consensus_config is not None or self.consensus_version is not None:
-            from my_strategy.services.czsc_agent_consensus import consensus_config as validate_config
-            self.consensus_config = validate_config(self.consensus_config, version=self.consensus_version)
+        from my_strategy.web_dashboard.high_return_routes_v4 import resolve_analysis_consensus
+        self.consensus_version, self.consensus_config = resolve_analysis_consensus(
+            research=self.research, model_family=self.model_family, model_run_id=self.model_run_id,
+            config=self.consensus_config, version=self.consensus_version)
         return self
 
     @field_validator("model_run_id", "model_fold", "calendar_run_id")
@@ -102,6 +103,15 @@ class TaskSpec(BaseModel):
     batch_size: int | None = Field(default=None, ge=1, le=128, strict=True)
     research: bool = Field(default=False, strict=True)
     model_family: Literal["ma_trend", "dual", "wyckoff", "high_return"] = "ma_trend"
+    consensus_config: dict[str, Any] | None = None
+    consensus_version: Literal["czsc_agent_consensus_v1", "czsc_agent_consensus_v2", "czsc_agent_consensus_v3", "czsc_agent_consensus_v4"] | None = None
+
+    @model_validator(mode="after")
+    def arbitration_parameters(self):
+        if self.consensus_config is not None or self.consensus_version is not None:
+            from my_strategy.services.czsc_agent_consensus import consensus_config as validate_config
+            self.consensus_config = validate_config(self.consensus_config, version=self.consensus_version)
+        return self
     source_training_run_id: str | None = None
     research_config: dict[str, Any] | None = None
     model_run_id: str | None = None
@@ -192,6 +202,10 @@ class TaskRequest(BaseModel):
         if self.kind in {"scan", "backtest", "high_return_backtest"} and self.spec.start is None:
             self.spec.start = date(2026, 1, 1)
             self.spec.dates()
+        if self.kind in {"high_return_points_build", "high_return_episodes_build", "high_return_train", "high_return_backtest"}:
+            from my_strategy.web_dashboard.high_return_routes_v4 import reject_native_legacy_operation
+            reject_native_legacy_operation(self.kind, run_id=self.spec.model_run_id or self.spec.source_training_run_id,
+                consensus_version=self.spec.consensus_version, research_config=self.spec.research_config)
         return self
 
 
@@ -283,12 +297,14 @@ async def wyckoff_status():
 
 @router.get("/research/high-return-status")
 async def high_return_status():
-    from my_strategy.services.czsc_high_return_research import status_high_return
+    from my_strategy.web_dashboard.high_return_routes_v4 import status_high_return
     return await asyncio.to_thread(status_high_return)
 
 
 @router.get("/research/high-return-forward-status")
 async def high_return_forward_status(model_run_id: str = Query(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,179}$")):
+    from my_strategy.web_dashboard.high_return_routes_v4 import reject_native_legacy_operation
+    reject_native_legacy_operation('forward', run_id=model_run_id)
     from my_strategy.services.czsc_high_return_forward import forward_status
     return await asyncio.to_thread(forward_status, model_run_id)
 

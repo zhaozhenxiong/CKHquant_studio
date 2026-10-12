@@ -156,6 +156,9 @@ class TaskManager:
         if kind == "update":
             return self._update(job_id, spec)
         if kind in {"high_return_points_build", "high_return_episodes_build", "high_return_train", "high_return_backtest"}:
+            from my_strategy.web_dashboard.high_return_routes_v4 import reject_native_legacy_operation
+            reject_native_legacy_operation(kind, run_id=spec.get("model_run_id") or spec.get("source_training_run_id"),
+                consensus_version=spec.get("consensus_version"), research_config=spec.get("research_config"))
             from my_strategy.services.czsc_high_return_research import (
                 build_high_return_artifacts, train_high_return_research, backtest_high_return,
             )
@@ -186,7 +189,7 @@ class TaskManager:
                 self._patch(job_id, progress=min(95, current / total * 95) if total else 0,
                             progress_detail={"stage": stage, "current": current, "total": total, "failed": failed})
             return scan_high_return(**{key: spec.get(key) for key in
-                ("symbols", "start", "end", "model_run_id", "model_fold", "usage_mode", "calendar_run_id", "device", "cpu_workers")},
+                ("symbols", "start", "end", "model_run_id", "model_fold", "usage_mode", "calendar_run_id", "device", "cpu_workers", "consensus_version", "consensus_config")},
                 progress=high_return_scan_progress, check_cancel=lambda: self._check(job_id),
                 run_callback=lambda run_id: self._patch(job_id, run_id=run_id))
         if kind == "wyckoff_research_train":

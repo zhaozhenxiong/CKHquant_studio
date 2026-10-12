@@ -1,5 +1,5 @@
 {
-  "version": "czsc_agent_consensus_v3",
+  "version": "czsc_agent_consensus_v4",
   "source_weights": {
     "ma": 0.4,
     "structure": 0.2,

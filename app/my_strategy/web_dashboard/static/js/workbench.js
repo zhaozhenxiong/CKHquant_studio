@@ -88,7 +88,7 @@
       const bar = param.seriesData.get(candles);
       updateChartSelection(bar ? 'hover' : 'leave',bar ? day(param.time) : null,param.point);
     });
-    chart.subscribeClick((param) => { const time = param.time ? day(param.time) : null, groups = finalGroupsAt(time); if (time && groups.length) { const clickedGroup = groups.find((group) => group.id === param.hoveredObjectId); const selectedDate = clickedGroup ? evidenceUI()?.groupDates([clickedGroup]).at(-1) : null; updateChartSelection('pin',time,param.point,selectedDate); highlightEvent(evidenceUI()?.groupDates(groups) || [time]); } else updateChartSelection('clear'); });
+    chart.subscribeClick((param) => { const time = param.time ? day(param.time) : null, groups = popupGroupsAt(time); if (time && groups.length) { const clickedGroup = groups.find((group) => group.id === param.hoveredObjectId); const selectedDate = clickedGroup ? evidenceUI()?.groupDates([clickedGroup]).at(-1) : null; updateChartSelection('pin',time,param.point,selectedDate); highlightEvent(evidenceUI()?.groupDates(groups) || [time]); } else updateChartSelection('clear'); });
     $('analysis-chart').addEventListener('pointerleave',() => updateChartSelection('leave'));
     ['pointermove','pointerup','wheel'].forEach((event) => $('analysis-chart').addEventListener(event,schedulePriceOverlays));
     resizeObserver = new ResizeObserver(resizeCharts);
@@ -201,13 +201,14 @@
       events:$('layer-signals').checked ? state.analysis.consensus_decisions?.events || [] : [], trades:$('layer-trades').checked ? state.backtest?.trades || [] : [],
       symbol,consensusVersion:state.analysis.consensus_decisions?.version || state.analysis.consensus_decisions?.config?.version || '',start:state.query?.start || '',asOf:day(state.query?.as_of || state.analysis.as_of || state.analysis.data_end),up:c.up,down:c.down});
     markers.push(...tradeMarkers.markers);
-    const wyckoffMarkers = KHQuantWyckoffMarkers.build({events:$('layer-wyckoff').checked ? state.analysis.wyckoff_events || [] : [],bars,frequency:state.frequency,asOf:day(state.query?.as_of || state.analysis.as_of || state.analysis.data_end)});
+    const wyckoff = KHQuantWyckoffMarkers.buildDetailed({events:$('layer-wyckoff').checked ? state.analysis.wyckoff_events || [] : [],bars,frequency:state.frequency,symbol,start:state.query?.start || '',asOf:day(state.query?.as_of || state.analysis.as_of || state.analysis.data_end)});
+    const wyckoffMarkers = wyckoff.markers;
     markers.push(...wyckoffMarkers);
 
     markerMappings = tradeMarkers.mappings;
-    markerGroups = tradeMarkers.groups || [];
+    markerGroups = [...(tradeMarkers.groups || []),...wyckoff.groups];
     $('marker-details').textContent = KHQuantMarkers.describe(markerMappings,null,state.frequency);
-    $('marker-summary').textContent = state.analysis.consensus_decisions ? `最终 B/S ${tradeMarkers.intentCount} 个 · 周期标记 ${tradeMarkers.intentMarkerCount} 个${!tradeMarkers.intentCount && !tradeMarkers.deferredCount ? ' · 本区间暂无满足仲裁条件的最终点，可在历史判断查看原因' : ''} · 实际成交 ${tradeMarkers.tradeCount} 条${wyckoffMarkers.length ? ` · 量价参考 ${wyckoffMarkers.length}` : ''} · 点击查看多 Agent 判断${state.frequency === '日线' ? '' : '与原始日期'}${tradeMarkers.formingProjectedCount ? ` · ${tradeMarkers.formingProjectedCount} 个日线最终点投影于形成中周期` : ''}${tradeMarkers.deferredCount ? ` · ${tradeMarkers.deferredCount} 个标记等待所属周期闭合` : ''}` : '该结果没有多 Agent 仲裁，不显示最终买卖点；请重新分析。';
+    $('marker-summary').textContent = state.analysis.consensus_decisions ? `最终 B/S ${tradeMarkers.intentCount} 个 · 周期标记 ${tradeMarkers.intentMarkerCount} 个${!tradeMarkers.intentCount && !tradeMarkers.deferredCount ? ' · 本区间暂无满足仲裁条件的最终点，可在历史判断查看原因' : ''} · 实际成交 ${tradeMarkers.tradeCount} 条${wyckoff.eventCount ? ` · 量价事件 ${wyckoff.eventCount} 条／${wyckoffMarkers.length} 个标记` : ''} · 点击查看多 Agent 判断${state.frequency === '日线' ? '' : '与原始日期'}${tradeMarkers.formingProjectedCount ? ` · ${tradeMarkers.formingProjectedCount} 个日线最终点投影于形成中周期` : ''}${wyckoff.formingProjectedCount ? ` · ${wyckoff.formingProjectedCount} 条已知量价事件位于形成中周期` : ''}${tradeMarkers.deferredCount ? ` · ${tradeMarkers.deferredCount} 个标记等待所属周期闭合` : ''}` : '该结果没有多 Agent 仲裁，不显示最终买卖点；请重新分析。';
     markers.sort((a,b) => a.time.localeCompare(b.time));
     candles.setMarkers(markers);
     if (fit) chart.timeScale().fitContent();
@@ -232,12 +233,13 @@
   }
   function groupsAt(time) { return markerGroups.filter((group) => day(group.time || group.bar_date) === time); }
   function finalGroupsAt(time) { return groupsAt(time).filter((group) => group.visible !== false && group.kind === 'intention' && group.sources?.includes('consensus')); }
+  function popupGroupsAt(time) { return groupsAt(time).filter((group) => group.visible !== false && (group.kind === 'wyckoff' || group.kind === 'intention' && group.sources?.includes('consensus'))); }
   function updateChartSelection(type, time = null, point = null, selectedDate = null) {
     const ui = evidenceUI();
     if (analysisLoading || referenceMutationDepth > 0) return;
     if (!ui) { $('marker-details').textContent = KHQuantMarkers.describe(markerMappings,time,state.frequency); renderIndicatorReadout(time); return; }
     const previous = chartSelection;
-    const canOpen = type === 'pin' && finalGroupsAt(time).length > 0;
+    const canOpen = type === 'pin' && popupGroupsAt(time).length > 0;
     chartSelection = ui.selectionTransition(chartSelection,{type:type === 'locate' ? 'pin' : type,time,date:selectedDate,popupOpen:canOpen});
     if (chartSelection.pinned && (type === 'hover' || type === 'leave')) return;
     if (point) { const rect = $('analysis-chart').getBoundingClientRect(); popupAnchor = {x:rect.left + point.x,y:rect.top + point.y}; }
@@ -248,6 +250,7 @@
     renderIndicatorReadout(active);
     if (previous.hover !== chartSelection.hover || previous.pinned !== chartSelection.pinned || previous.selectedDate !== chartSelection.selectedDate || type === 'clear') { drawChipProfile(); syncChartRange(); }
     renderChartPopup();
+    if (type === 'pin') $('chart-evidence-popup').scrollTop = 0;
   }
   function clearSelectedReference() {
     const line = selectedReferenceLine, series = selectedReferenceSeries;
@@ -291,7 +294,7 @@
   }
   function renderChartPopup() {
     const ui = evidenceUI(), host = $('chart-evidence-popup'), active = chartSelection.pinned;
-    const groups = finalGroupsAt(active);
+    const groups = popupGroupsAt(active);
     if (!ui || !chartSelection.popupOpen || !active || !state.analysis || analysisLoading || !groups.length) { host.hidden = true; clearSelectedReference(); return; }
     renderSelectedReference(groups,active);
     host.dataset.pinned = String(Boolean(chartSelection.pinned));
@@ -414,7 +417,7 @@
   function readableEvent(event) {
     if (event.source && event.event_type) {
       const source = {ma:'均线ML',structure:'CZSC结构',wyckoff:'威科夫量价'}[event.source] || event.source;
-      const kind = {ma_trend_recovery:'趋势恢复',ma_trend_onset:'趋势启动',ma_trend_failure:'趋势失效',ma_independent_exit_evidence:'独立退出证据'}[event.event_type] || event.event_type.replace(/^native_bs[123]_/, '');
+      const kind = {ma_trend_recovery:'趋势恢复',ma_trend_onset:'趋势启动',ma_trend_failure:'趋势失效',ma_independent_exit_evidence:'独立退出证据',pure_first_buy_buy:'纯结构一买',pure_first_sell_sell:'纯结构一卖',pure_second_bs_buy:'纯结构二买',pure_second_bs_sell:'纯结构二卖',pure_third_buy_buy:'纯结构三买',structure_invalidation:'已确认结构支撑失效'}[event.event_type] || event.event_type.replace(/^native_bs[123]_/, '');
       return `${source} · ${kind}`;
     }
     if (event.position_intent) return ({BUY:'组合策略开仓意图',SELL:'组合策略退出意图',HOLD:'理论持仓继续持有',WAIT:'理论空仓等待'})[event.position_intent] || actionLabel(event.position_intent);
@@ -463,6 +466,16 @@
       && resolution?.applied_to_entry === true && modelProbability(resolution,row) != null;
   }
   function ruleQualificationText(row) {
+    if (row.candidate_evidence?.version === 'czsc_candidate_evidence_v4') {
+      const status = row.agents?.high_return?.status || row.agents?.high_return?.evaluation_status;
+      const facts = row.signal_points || row.candidate_evidence.facts || [];
+      const validSell = facts.some((event) => String(event.side || event.action).toUpperCase() === 'SELL' && event.direction_eligible === true);
+      if (['input_ineligible','feature_ineligible'].includes(status)) return '候选资格：输入不足';
+      if (['candidate_risk_ineligible','risk_blocked','risk_blocked_unscored'].includes(status)) return '候选资格：买点触发，冻结风险规则阻止入场；高收益未评估';
+      if (status === 'no_candidate') return validSell ? '候选资格：独立卖出证据触发，本日无新买入候选' : '候选资格：本日无新候选';
+      if (row.source_candidate_eligible === true && row.risk_eligible === true) return '候选资格：三路独立买点并集触发，冻结风险资格通过';
+      return validSell ? '候选资格：独立卖出证据触发，最终方向另行仲裁' : '候选资格：尚无合格的新买入候选';
+    }
     if (isHighReturn(row)) return row.input_eligible === false || row.eligible === false ? '候选资格：输入不足' : row.candidate_action === 'BUY' ? row.risk_eligible === false ? '候选资格：买点触发，冻结风险规则未通过' : row.source_selected_by_reference === false ? '候选资格：原始买点仅作影子评分，第一阶段未选中' : '候选资格：三路独立买点并集触发' : row.candidate_action === 'SELL' ? '候选资格：独立卖出证据触发' : '候选资格：本日未触发新买点';
     if (row.eligible === false || row.input_eligible === false || row.model_resolution?.status === 'rule_input_veto_shadow' || row.entry_plan?.reason_codes?.includes('input_ineligible')) return '规则资格：输入不可用';
     if (row.rule_buy === true || row.raw_rule_buy === true || row.candidate_action === 'BUY') return '规则资格：满足买入组合条件';
@@ -524,7 +537,8 @@
     const names = {ma:'均线ML',ma_ml:'均线ML',structure:'CZSC结构',wyckoff:'威科夫量价'};
     const sourceText = Array.isArray(sources) ? sources.map((item) => names[item] || item).join('、') : String(sources || '');
     const events = Array.isArray(points) ? points.map((point) => `<p>${esc(names[point.source] || point.source || '')} · ${esc(point.event_type || point.signal || '')} · ${esc(point.side || point.action || '')}<br>锚点 ${esc(point.anchor_at || '—')} · 确认可用 ${esc(point.available_at || point.signal_at || '—')}</p>`).join('') : '';
-    return `<section class="research-evidence high-return-evidence" aria-label="高收益区间研究"><strong>三路独立买卖点与第二阶段判断</strong><p>候选来源：${esc(sourceText || '本日无新候选')}。同股同日候选保留各路证据。</p><p>${esc(highReturnResolutionText(row.model_resolution || {model_family:'high_return'},row))}</p>${events}${typeof row.expected_net_return === 'number' ? `<p>辅助预期费用后收益 ${percent(row.expected_net_return)} · 亏损研究概率 ${percent(row.loss_probability)}。</p>` : ''}<p>新入场评分使用冻结初始资金的假设空仓账户；具体成交与资金状态在Broker回放中核验。</p><p>入场模型只判断已产生的候选。完整区间标签由实际成交、费用与冻结退出政策形成；高收益标签不代表未来最高涨幅。退出模型只使用截至当日的兼容真实持仓状态。</p></section>`;
+    const exitNote = row.candidate_evidence?.version === 'czsc_candidate_evidence_v4' ? '新版通过独立 Broker 验收入口核验入场与冻结退出政策；旧版账户回测仍选择旧版模型。' : '退出模型只使用截至当日的兼容真实持仓状态。';
+    return `<section class="research-evidence high-return-evidence" aria-label="高收益区间研究"><strong>三路独立买卖点与第二阶段判断</strong><p>候选来源：${esc(sourceText || '本日无新候选')}。同股同日候选保留各路证据。</p><p>${esc(highReturnResolutionText(row.model_resolution || {model_family:'high_return'},row))}</p>${events}${typeof row.expected_net_return === 'number' ? `<p>辅助预期费用后收益 ${percent(row.expected_net_return)} · 亏损研究概率 ${percent(row.loss_probability)}。</p>` : ''}<p>新入场评分使用冻结初始资金的假设空仓账户；具体成交与资金状态在Broker回放中核验。</p><p>入场模型只判断已产生的候选。完整区间标签由实际成交、费用与冻结退出政策形成；高收益标签不代表未来最高涨幅。${esc(exitNote)}</p></section>`;
   }
   function entryPlanHtml(row) {
     if (isHighReturn(row)) return '';
@@ -625,7 +639,7 @@
     const cutoff = day(state.query?.as_of || state.analysis?.as_of || state.analysis?.data_end);
     const rows = cutoff ? historyRows.filter((item) => item.date <= cutoff) : historyRows;
     historyPage = ui.historyPage(rows,historyPage).page;
-    $('history-evidence-table').innerHTML = ui.historyHtml(rows,historyPage,day(selected));
+    $('history-evidence-table').innerHTML = ui.historyHtml(rows,historyPage,day(selected),evidence?.statistics);
   }
   function updateReplay() {
     const available = Boolean(state.analysis) && state.dates.length > 0 && !analysisLoading;
@@ -717,16 +731,26 @@
   function gateCaption(gate) { return gate?.passed ? '样本外门槛通过' : '影子观察：尚未证实改善'; }
   function researchModels(prefix) {
     const family = $(`${prefix}-model-family`).value;
-    return family === 'high_return' ? state.research?.high_return?.models || [] : family === 'wyckoff' ? state.research?.wyckoff?.models || [] : family === 'dual' ? state.research?.dual?.models || [] : state.research?.models || [];
+    const models = family === 'high_return' ? state.research?.high_return?.models || [] : family === 'wyckoff' ? state.research?.wyckoff?.models || [] : family === 'dual' ? state.research?.dual?.models || [] : state.research?.models || [];
+    const capability = {analysis:'chart',scan:'scan',backtest:'legacy_backtest'}[prefix];
+    const nativeDefault = family === 'high_return' && state.research?.high_return?.default_consensus_version === 'czsc_agent_consensus_v4';
+    const native = (model) => model.schema_family === 'high_return_native_v4' || model.strategy_version === 'czsc_high_return_v4_native';
+    return models.filter((model) => {
+      if (capability && model.capabilities?.[capability] === false) return false;
+      if (!nativeDefault) return true;
+      if (prefix === 'backtest') return !native(model);
+      return !['analysis','scan'].includes(prefix) || native(model);
+    });
   }
   function populateResearchModels(prefix) {
     const select = $(`${prefix}-model`), previous = select.value, models = researchModels(prefix);
     select.innerHTML = '<option value="">请选择固定模型</option>' + models.map((model) => `<option value="${esc(model.run_id)}">${esc(modelName(model))} · ${esc(model.run_id)} · ${esc(gateCaption(model.model_gate))}</option>`).join('');
-    if (models.some((model) => model.run_id === previous)) select.value = previous;
+    select.value = models.some((model) => model.run_id === previous) ? previous : '';
   }
   function updateResearchControls(prefix) {
     const enabled = $(`${prefix}-mode`).value === 'research';
     const highReturn = enabled && $(`${prefix}-model-family`).value === 'high_return';
+    const nativeHighReturn = highReturn && prefix !== 'backtest' && state.research?.high_return?.default_consensus_version === 'czsc_agent_consensus_v4';
     const entrySelect = $(`${prefix}-entry-policy`);
     const entryMemory = entrySelect.dataset || {};
     if (highReturn && entryMemory.highReturnLocked !== 'true') entryMemory.previousEntryPolicy = entrySelect.value || 'fresh';
@@ -767,7 +791,7 @@
     $(`${prefix}-model-family`).disabled = !enabled;
     $(`${prefix}-entry-policy`).disabled = !enabled || highReturn;
     $(`${prefix}-entry-policy-help`).hidden = !enabled;
-    $(`${prefix}-entry-policy-help`).textContent = enabled ? highReturn ? '三路独立候选并集使用自己的冻结风险与退出政策。分析与扫描保持影子；回测须明确模型运行，显式离线应用高收益入场和退出头，尚未取得生产资格。' : entryPolicyCaption($(`${prefix}-entry-policy`).value || 'fresh') + ($(`${prefix}-entry-policy`).value === 'risk' && $(`${prefix}-usage-mode`).value === 'production' ? '当前使用方式不兼容，请选择历史滚动研究。' : '') : '';
+    $(`${prefix}-entry-policy-help`).textContent = enabled ? nativeHighReturn ? '三路原生候选使用冻结风险与退出政策，分析与扫描显示多 Agent 研究判断。新版使用独立 Broker 验收入口；旧版账户回测仍选择旧版模型。尚未取得生产资格。' : highReturn ? '三路独立候选并集使用自己的冻结风险与退出政策。分析与扫描保持影子；回测须明确模型运行，显式离线应用高收益入场和退出头，尚未取得生产资格。' : entryPolicyCaption($(`${prefix}-entry-policy`).value || 'fresh') + ($(`${prefix}-entry-policy`).value === 'risk' && $(`${prefix}-usage-mode`).value === 'production' ? '当前使用方式不兼容，请选择历史滚动研究。' : '') : '';
     $(`${prefix}-model`).disabled = !enabled || (!pinned && !(highReturn && prefix === 'backtest')); select.disabled = !enabled || !pinned || !model;
     renderCheckpointHelp(prefix);
   }

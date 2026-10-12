@@ -152,11 +152,23 @@ def analyze_high_return(*, symbol, start="2026-01-01", end=None, as_of=None, res
     result = analyze_stock(symbol, start=start, end=end, as_of=as_of, db_path=db_path, config=config, research=False)
     dates, calendar_id = _calendar(calendar_run_id)
     item = _prepare(symbol, result["data_end"], dates, db_path)
-    overlay = _overlay(item, dates, model_run_id=model_run_id, model_fold=model_fold,
-                       usage_mode=usage_mode, device=device, as_of=as_of or result["data_end"])
     from my_strategy.services.czsc_agent_consensus import consensus_config as resolve_consensus_config
     from my_strategy.services.czsc_candidate_evidence import V3_VERSION, recover_daily_evidence
     effective_consensus = resolve_consensus_config(consensus_config, version=consensus_version)
+    if effective_consensus.get("version") == "czsc_agent_consensus_v4":
+        from my_strategy.services.czsc_high_return_runtime_v4 import runtime_overlay as native_overlay
+        from my_strategy.web_dashboard.chart_evidence_v4 import decorate_analysis as decorate_native
+        overlay = native_overlay(item["features"], dates, model_run_id=model_run_id, model_fold=model_fold,
+                                 model_mode=usage_mode, device=device or "cpu", as_of=as_of or result["data_end"])
+        result = _analysis_overlay_result(result, overlay, item, start=start, usage_mode=usage_mode,
+                                         model_policy=model_policy, calendar_id=calendar_id)
+        result["strategy_version"] = overlay["strategy_version"]
+        result["research_version"] = overlay["strategy_version"]
+        result = decorate_native(result, raw=item["raw"], features=overlay["features"], overlay=overlay,
+                                 consensus_config=effective_consensus)
+        return _json(result)
+    overlay = _overlay(item, dates, model_run_id=model_run_id, model_fold=model_fold,
+                       usage_mode=usage_mode, device=device, as_of=as_of or result["data_end"])
     if effective_consensus.get("version") == V3_VERSION:
         # Recover the exact selected frozen daily routes only for the new chart
         # policy. Fixed-fold routing and all original trading facts remain bound.
@@ -221,7 +233,14 @@ def compare_high_return_chart_windows(*, symbol, start="2026-01-01", end=None, a
 
 def scan_high_return(*, symbols=None, start="2026-01-01", end=None, model_run_id=None, model_fold=None,
                      usage_mode="historical", calendar_run_id=None, device="cpu", cpu_workers=4,
-                     progress=None, check_cancel=None, run_callback=None):
+                     progress=None, check_cancel=None, run_callback=None,
+                     consensus_version=None, consensus_config=None):
+    from my_strategy.web_dashboard.high_return_routes_v4 import native_scan_requested, scan_native_high_return
+    if native_scan_requested(model_run_id=model_run_id, consensus_version=consensus_version, consensus_config=consensus_config):
+        return scan_native_high_return(symbols=symbols, start=start, end=end, model_run_id=model_run_id,
+            model_fold=model_fold, usage_mode=usage_mode, calendar_run_id=calendar_run_id, device=device,
+            cpu_workers=cpu_workers, consensus_config=consensus_config, progress=progress,
+            check_cancel=check_cancel, run_callback=run_callback)
     from my_strategy.services.czsc_research import _json
     target = latest_market_date(end)
     if not target:

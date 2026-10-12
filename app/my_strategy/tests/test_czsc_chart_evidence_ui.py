@@ -127,6 +127,19 @@ updateChartSelection('clear');assert.equal(selectedChipProfile().as_of,dates[2])
 hover(dates[1]);assert.equal(selectedChipProfile().status,'unavailable');
 assert(!element('chip-profile-caption').textContent.includes(dates[2]));
 assert(!element('indicator-chips').textContent.includes('截至 '+dates[2]));
+// Full Wyckoff events use the same real workbench click path. Hover only
+// changes indicators; clicking a pending event opens its original evidence.
+state.analysis.wyckoff_events=[{event_id:'pending-SOS',event:'SOS',symbol:'600027.SH',confirmed:false,status:'pending_test',observed_at:dates[1]+'T15:00:00+08:00',available_at:dates[1]+'T15:00:00+08:00'}];
+renderAnalysis(false);hover(dates[1]);assert(element('chart-evidence-popup').hidden);
+assert(firstSeries.markers.some(marker=>marker.text==='W SOS待测试'));
+click({time:dates[1],point:{x:400,y:300}});
+assert(!element('chart-evidence-popup').hidden);assert(element('chart-evidence-popup').innerHTML.includes('W SOS待测试'));
+assert(element('chart-evidence-popup').innerHTML.includes('原观察 '+dates[1]+'T15:00:00+08:00'));
+assert(!element('chart-evidence-popup').innerHTML.includes('>B</span>'));
+updateChartSelection('clear');element('layer-wyckoff').checked=false;renderAnalysis(false);
+assert(!firstSeries.markers.some(marker=>marker.text.startsWith('W ')));
+click({time:dates[1],point:{x:400,y:300}});assert(element('chart-evidence-popup').hidden);
+updateChartSelection('clear');element('layer-wyckoff').checked=true;state.analysis.wyckoff_events=[];
 // A higher-period selection can explicitly select its original daily snapshot.
 state.analysis.frequencies['日线'].bars=[...bars,{...bars[2],time:'2026-07-06'}];state.query.as_of='2026-07-06';
 state.frequency='周线';state.analysis.frequencies['周线']={bars:[bars[2]],indicators:{rows:[bars[2]],chip_profile:latest,chip_profiles:{[dates[2]]:latest}}};

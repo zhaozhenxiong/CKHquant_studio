@@ -60,11 +60,12 @@ def _v3_row(index=0, specs=(), *, ma_side="BUY", origins=None, p=.8, l2=.2, risk
 
 
 def _build(rows, **kwargs):
+    kwargs.setdefault("version", V3)
     return build_consensus(rows, symbol=SYMBOL, **kwargs)
 
 
 def test_v3_default_fixed_weights_and_window():
-    config = consensus_config()
+    config = consensus_config(version=V3)
     assert config["version"] == V3
     assert config["evidence_valid_bars"] == 3
     assert config["source_weights"] == {"ma": .4, "structure": .2, "wyckoff": .3}
@@ -235,7 +236,7 @@ def test_v1_v2_replay_unversioned_v2_defaults_and_input_immutability():
     config = czsc_agent_consensus_v2.consensus_config()
     assert _build(rows, version="czsc_agent_consensus_v2") == czsc_agent_consensus_v2.build_consensus(rows, symbol=SYMBOL)
     unversioned = {key: value for key, value in config.items() if key != "version"}
-    assert _build(rows, config=unversioned) == _build(rows, version="czsc_agent_consensus_v2")
+    assert build_consensus(rows, symbol=SYMBOL, config=unversioned) == _build(rows, version="czsc_agent_consensus_v2")
     v3rows = [_v3_row(specs=[("wyckoff", "BUY")])]
     snapshot = copy.deepcopy(v3rows)
     result = _build(v3rows)

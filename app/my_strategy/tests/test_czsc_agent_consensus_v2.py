@@ -269,7 +269,7 @@ def test_complete_legacy_configuration_automatically_replays_v1_without_new_hash
     assert explicit["rows"][0]["buy_support"] == 2
     assert explicit["config_hash"] == hashlib.sha256(json.dumps(legacy, sort_keys=True, ensure_ascii=False,
         separators=(",", ":"), allow_nan=False).encode()).hexdigest()
-    assert _versioned_config({"ma_entry_threshold": .9})["version"] == "czsc_agent_consensus_v3"
+    assert _versioned_config({"ma_entry_threshold": .9}, version="czsc_agent_consensus_v3")["version"] == "czsc_agent_consensus_v3"
 
 
 def test_legacy_replay_does_not_depend_on_current_configuration_file(monkeypatch):
