@@ -15,6 +15,7 @@ from packaging.version import Version
 
 from my_strategy.scripts.migration_manifest import write_integrity_manifest
 from my_strategy.scripts.package_project import build_package, verify_package
+from my_strategy.scripts.public_provenance import public_provenance
 
 
 APP = Path(__file__).resolve().parent
@@ -96,19 +97,30 @@ def build_release(output: Path, wheel_directories: list[Path]) -> dict:
     payload = build_package(source=APP, target=package, include_data=False, include_artifacts="none")
     destination = package / "app" / "vendor" / "wheels"
     destination.mkdir(parents=True, exist_ok=True)
+    # The selected, verified index is the complete native asset set. Do not
+    # retain unrelated checkout wheels when assembling fresh CI platforms.
+    for existing in destination.glob("*.whl"):
+        existing.unlink()
     for name, wheel in wheels.items():
         shutil.copy2(wheel, destination / name)
-    (destination / "wheel-index.json").write_text(json.dumps(index, indent=2), encoding="utf-8")
+    (destination / "wheel-index.json").write_text(json.dumps(public_provenance(index), indent=2) + "\n", encoding="utf-8")
+    (package / "app/czsc-source-manifest.json").write_text(
+        json.dumps(public_provenance(source), indent=2) + "\n", encoding="utf-8")
     revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, capture_output=True, check=False)
     state = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, text=True, capture_output=True, check=False)
     release = {"version": version, "git_revision": revision.stdout.strip() or None,
                "workspace_changes_included": bool(state.stdout.strip()), "native_wheels": sorted(wheels),
-               "contains_market_data": False, "contains_personal_data": False,
+               "contains_market_data": False, "contains_personal_data": False, "contains_trained_models": False,
+               "public_build_paths_redacted": True,
                "platform_verification": json.loads((ROOT / "runtime-manifest.json").read_text(encoding="utf-8")).get("platform_verification", {})}
     (package / "release.json").write_text(json.dumps(release, ensure_ascii=False, indent=2), encoding="utf-8")
-    write_integrity_manifest(package, source_project_root=APP, filename="image-manifest.json",
+    integrity = write_integrity_manifest(package, source_project_root=APP, filename="image-manifest.json",
                              reject_external_symlinks=True, metadata={key: payload[key] for key in
                                  ("architecture", "include_data", "include_artifacts", "include_personal", "run_ids", "artifact_selection", "release_event_count") if key in payload})
+    # Public provenance names the portable source root; the local build record
+    # remains in the caller's audit evidence and never enters the archive.
+    integrity["source_project_root"] = "app"
+    (package / "image-manifest.json").write_text(json.dumps(integrity, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     issues = verify_package(package)
     if issues:
         raise RuntimeError("Release verification failed: " + "; ".join(issues))

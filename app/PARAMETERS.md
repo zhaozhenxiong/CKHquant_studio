@@ -1,3 +1,33 @@
+# KHQuant 0.1.3 参数与模型选择
+
+当前策略名称为“趋势共识策略”。均线、结构、威科夫、高收益质量的权重为40%／20%／30%／10%；最后一项仅过滤已有买入候选。当前协议基线是 `my_strategy/configs/czsc_trend_strategy.json`，完整说明见 [趋势共识策略](my_strategy/docs/trend_consensus.md)。
+
+公开的 `my_strategy/configs/current_strategy.json` 默认 `model_run_id: null`，按本地模型资格自动选择。新安装不包含开发机器的权重或运行 ID；无模型明确显示未训练／不可用。已有研究模型可复制该文件到自己的状态目录，填写自己的 `model_run_id`，通过 `.env` 的 `KHQUANT_CURRENT_STRATEGY_CONFIG` 指定该文件。使用合法历史检查点仍属于历史重建研究，不自动取得生产资格。
+
+## 哪些参数可直接研究
+
+新分析请求的 `consensus_config.high_return_threshold` 与 `buy_total_threshold` 可覆盖质量过滤及买方总分门槛，其余参数继承所选模型已经保存的政策；请求会生成独立账户身份。`require_high_return=false` 仅是显式E1对照。标签中的最低扣费收益8%、最低2R，和概率质量门槛10%是不同参数。
+
+权重、买方基础和卖方门槛、方向差额、证据有效期、候选规则、风险、资金、趋势周期或持仓出口改变，需要新来源、标签与模型；接口拒绝把改变后的协议套在旧模型上。复制协议到自己的JSON中修改，不改已经发行的基线或覆盖历史模型。
+
+## 重新训练
+
+先生成与本机行情、核验日历及原生来源依赖匹配的运行，再执行：
+
+```sh
+PYTHONPATH=app .venv/bin/python -m my_strategy.scripts.train_trend_consensus \
+  --source-native-run-id YOUR_COMPLETE_NATIVE_SOURCE_RUN \
+  --end YYYY-MM-DD --config /绝对路径/trend-custom.json --cpu-workers 6 --device cpu
+```
+
+`YOUR_COMPLETE_NATIVE_SOURCE_RUN` 是自己的完整原生来源运行。脚本历史默认ID来自开发机，公开程序不带该产物；新机器始终显式传入。训练每次产生新目录，核验来源与校准资格后再选用返回的运行ID。完整新趋势模型跨机器状态迁移尚未认证，不能只复制权重文件。
+
+软件0.1.3发行不代表收益认证：原始行情、本机模型、历史账本与已冻结九项生成模块保留；独立未来收益与生产资格继续pending。
+
+---
+
+下面完整保留0.1.2的旧高收益族参数指南，供历史运行对照；它不是当前趋势策略的训练入口。
+
 # KHQuant 0.1.2 参数使用说明
 
 当前实现已作为正式软件版封存。后续修改自己的参数副本即可，原始发布包、默认协议和训练运行可用于对照。

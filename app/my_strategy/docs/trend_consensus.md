@@ -42,7 +42,7 @@
 
 配置位于 `configs/czsc_trend_strategy.json`。当前模型使用自身保存的配置，直接改这个文件不会篡改已训练模型的契约。
 
-`configs/current_strategy.json` 的 `model_run_id` 固定当前完整模型运行；运行内部仍按日期匹配合法先验检查点。重训后核验新运行，再更换此字段。当前180股运行有两个合格历史高收益入场检查点；最近校准段无高收益正例，未生成新的最新入场头。该限制不伪装为自动资格通过，也不把旧预测改名为新头。
+0.1.3公开的 `configs/current_strategy.json` 不绑定开发机运行，`model_run_id` 默认为null，自动查询本地合格模型。没有模型时明确不可用，不回退到旧模型族或补概率。已有研究模型可以用自己的独立选择JSON并通过 `KHQUANT_CURRENT_STRATEGY_CONFIG` 指定；填写自己的运行ID后，运行内部仍按日期匹配合法先验检查点。开发机180股运行保留原选择，有两个合格历史高收益入场检查点；最近校准段无正例，未生成新的最新入场头，自动资格仍false。
 
 显示层的时间区间、日周月切换和图层不要求重训。高收益质量门槛及最终买方总分门槛可在新研究请求的 `consensus_config` 调整，保留新请求配置和独立账户身份。权重、买方基础门槛、卖方门槛、方向差额、证据有效期、候选规则、风险、资金、趋势周期或续持出口改变，需要重新生成相关标签与模型；接口会拒绝不兼容模型混用。
 
@@ -51,7 +51,7 @@
 源代码环境训练命令：
 
 ```sh
-PYTHONPATH=app .venv/bin/python -m my_strategy.scripts.train_trend_consensus --cpu-workers 6 --device cpu
+PYTHONPATH=app .venv/bin/python -m my_strategy.scripts.train_trend_consensus --source-native-run-id YOUR_COMPLETE_NATIVE_SOURCE_RUN --end YYYY-MM-DD --cpu-workers 6 --device cpu
 ```
 
-提供新的参数 JSON 时添加 `--config /绝对路径/参数.json`。每次生成独立运行目录，旧模型不覆盖。模型状态、校准、来源、实际账户账本及冻结协议保存在对应 `artifacts/runs/运行ID/`；当前入口选择仅代表功能交付，不替代独立收益认证。
+新机器显式提供自己的完整原生来源运行和核验截止日，脚本中的历史默认ID不是可下载的模型。提供新的参数 JSON 时添加 `--config /绝对路径/参数.json`。每次生成独立运行目录，旧模型不覆盖。模型状态、校准、来源、实际账户账本及冻结协议保存在对应 `artifacts/runs/运行ID/`；当前入口选择仅代表功能交付，不替代独立收益认证。

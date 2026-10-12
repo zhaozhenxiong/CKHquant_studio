@@ -1,16 +1,16 @@
 {
   "strategy": "czsc_trend_consensus",
   "display_name": "趋势共识策略",
-  "model_run_id": "20261012-150341-213295-20261008-czsc-trend-consensus-train-NO_GIT",
-  "model_selection": "configured_run_auto_prior_heads",
-  "deployment_scope": "current_research_account_functional_delivery",
+  "model_run_id": null,
+  "model_selection": "automatic_qualified_runs",
+  "deployment_scope": "portable_research_application",
   "publication_allowed": false,
   "independent_validation": "pending",
-  "recent_entry_head_status": "calibration_has_no_positive_class_use_qualified_prior_checkpoints",
+  "recent_entry_head_status": "checked_per_registered_run",
   "pricing_assumptions": {
     "broker_fill": "continuous_cost_model_simulated_average_after_slippage",
     "initial_R": "frozen_stop_reference_half_up_cent_then_sell_fees",
     "initial_R_is_actual_stop_loss": false
   },
-  "notes": "已选完整模型运行内按判断日匹配合法先验检查点；不修改自动模型资格、历史模型或正式发布别名。"
+  "notes": "公开程序不绑定本机训练运行；自动选择具备资格的本地模型。新机器无模型时明确未训练；已有模型可用独立配置或显式请求选择，仍按判断日核验历史检查点。"
 }

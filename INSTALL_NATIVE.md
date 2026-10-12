@@ -1,4 +1,4 @@
-# KHQuant 0.1.2 原生安装与验收
+# KHQuant 0.1.3 原生安装与验收
 
 ## 环境和设备
 
@@ -34,7 +34,7 @@ CI 和维护者构建命令：
 
 ~~~bash
 python app/build_czsc_runtime.py --out app/vendor/wheels --no-install
-python app/build_release.py --output-dir dist/releases/0.1.2-rebuild --wheel-dir app/vendor/wheels
+python app/build_release.py --output-dir dist/releases/0.1.3-rebuild --wheel-dir app/vendor/wheels
 ~~~
 
 build_release.py 支持重复 --wheel-dir 合并三平台 CI 资产。它验证原生资产并生成源码 ZIP、完整性清单、版本来源及 SHA256SUMS.txt；不会上传远端。工作区未提交内容会包含在包中，并在 release.json 标明。
@@ -59,7 +59,7 @@ python app/verify_installation.py --device cpu --output installation-cpu.json
 python app/verify_installation.py --device mps --output installation-mps.json
 ~~~
 
-该检查涵盖严格 doctor、模型训练/保存/重新加载、分析、扫描和回测、行情更新模块入口导入、六个网页 HTTP 入口、关注与持仓跨服务重启保存。源码单元测试另检验设备失败、时点资格、CPU/MPS 数值边界、源哈希及打包依赖。runtime-manifest.json 分别记录本版各平台实际验证状态，旧版本验证仅作历史记录。
+该检查涵盖严格 doctor、模型训练/保存/重新加载、分析、扫描和回测、行情更新模块入口导入、六个网页 HTTP 入口、关注与持仓跨服务重启保存，并单独检查默认趋势策略在空模型目录下明确不可用。源码单元测试另检验设备失败、时点资格、CPU/MPS 数值边界、源哈希及打包依赖。runtime-manifest.json 分别记录本版各平台实际验证状态，旧版本验证仅作历史记录。
 
 正式 wheel 的运行状态默认写入 ~/.khquant；可通过 KHQUANT_HOME、KHQUANT_DATA_ROOT、KHQUANT_ARTIFACT_ROOT 指定位置。源码/Release 安装保留仓库 .env 路径契约。网页默认绑定 127.0.0.1:8124；非本机绑定需要 KHQUANT_API_TOKEN。
 
@@ -90,6 +90,12 @@ latest 从最新运行开始收集模型、日历及发布证据依赖；all 保
 
 目标机器先 package --verify，再运行 install.py 创建自己的环境。导入已有训练候选不会自动晋升；模型资格仍按原日期及证据核验。
 
-0.1.2 的 dual/Wyckoff/high_return 嵌套模型尚未完成上述状态导出兼容验收；latest/all 不保证迁移全部新研究状态。源码发行包只包含程序、配置与冻结原生依赖，不包含本机的行情库或模型权重。本机发布附带的模型基线归档用于保存原始身份，未认证为跨机器可直接运行的状态迁移包。后续调参见 app/PARAMETERS.md。
+当前趋势共识以及历史dual/Wyckoff/high_return嵌套模型尚未完成上述状态导出完整迁移验收；latest/all 不保证迁移全部新研究状态。源码发行包只包含程序、配置与冻结原生依赖，不包含本机的行情库或模型权重。本机发布附带的模型基线归档用于保存原始身份，未认证为跨机器可直接运行的状态迁移包。后续调参见 app/PARAMETERS.md。
 
 重新训练 Wyckoff 的依赖：先准备核验交易日历和包含完整冻结特征、10 日标签的 MA 源研究运行，再完成使用同一 MA 源与日历的 dual 研究。research-wyckoff-train 的 --source-training-run-id 指定该 MA 源；还需将 configs/czsc_wyckoff_research.json 的 baseline_dual_run_id 设置为匹配的 dual 运行。随包配置里的原本地历史 run ID 不附带对应权重或报告，新机器不能直接复用。各依赖身份必须匹配；新的训练和认证协议须按实际完成时间重新冻结，禁止沿用旧冻结时间取得资格。
+
+## 当前趋势模型与本机选择
+
+公开程序中的 `app/my_strategy/configs/current_strategy.json` 不绑定开发机器的训练运行；自动查询本地合格模型。无模型安装可以使用原生结构基线，默认趋势界面会标记未训练／模型不可用，不补零或套用旧族概率。训练新趋势模型时显式提供自己生成的 `--source-native-run-id` 与正确截止日；详细契约见 `app/my_strategy/docs/trend_consensus.md`。
+
+已有合法历史模型可以复制当前选择配置到自己的状态目录，填写该运行 ID，再在自己的 `.env` 设置 `KHQUANT_CURRENT_STRATEGY_CONFIG=/绝对路径/current-strategy-local.json`。这个路径不会进入公开源码；选择运行后仍按判断日期核验每个检查点。升级前保留自己的配置、行情、日历及完整模型依赖，软件升级不会提升其收益资格。
