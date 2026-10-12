@@ -131,6 +131,7 @@ jobs:
         with:
           name: Windows-bundled-release-verification
           if-no-files-found: error
+          include-hidden-files: true
           path: |
             installation-windows.json
             installation-windows-identity.json

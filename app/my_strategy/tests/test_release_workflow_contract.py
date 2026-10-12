@@ -94,6 +94,12 @@ def test_native_upload_uses_fresh_build_directory_and_installer_selects_it():
     assert '--wheel-dir .scratch/native-wheel ' in install
     upload = next(item['with'] for item in actual if item.get('with', {}).get('name') == 'wheels-${{ matrix.os }}')
     assert upload['path'] == '.scratch/native-wheel/'
+    assert upload['include-hidden-files'] is True
+    for name in ('windows-release-check.yml', 'portable-release.yml'):
+        for job in workflow(name)['jobs'].values():
+            for item in job['steps']:
+                if item.get('uses') == 'actions/upload-artifact@v4' and '.scratch/' in item['with']['path']:
+                    assert item['with']['include-hidden-files'] is True
 
 
 def test_windows_can_verify_exact_portable_asset_with_authenticated_artifact_download():
@@ -142,7 +148,7 @@ def test_selected_portable_windows_assets_bind_app_sha_zip_and_matching_native_b
     assert (tmp_path / '.scratch/release-wheels' / wheel.name).read_bytes() == wheel.read_bytes()
     assert len(installs) == 1
     selected = installs[0]
-    assert selected[1].endswith(f'extracted/KHQuant-{version}/install.py')
+    assert Path(selected[1]).parts[-3:] == ('extracted', f'KHQuant-{version}', 'install.py')
     assert Path(selected[selected.index('--wheel-dir') + 1]) == assets / f'extracted/KHQuant-{version}/app/vendor/wheels'
     assert Path(selected[selected.index('--venv-dir') + 1]) == tmp_path / '.venv-release'
 
