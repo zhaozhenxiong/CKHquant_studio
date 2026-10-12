@@ -71,7 +71,7 @@ assert(evidence.includes('74项'));assert(evidence.includes('32项输入'));asse
     assert result.returncode == 0, result.stderr
 
 
-def test_wyckoff_markers_use_confirmation_and_hide_future_and_unclosed_week():
+def test_wyckoff_markers_use_first_visibility_and_project_known_daily_events():
     node = shutil.which("node")
     if not node:
         pytest.skip("Node unavailable")
@@ -80,8 +80,8 @@ def test_wyckoff_markers_use_confirmation_and_hide_future_and_unclosed_week():
 const assert=require('node:assert/strict');require(process.argv[1]);
 const event={event:'Test',anchor_at:'2026-01-01',observed_at:'2026-01-05T15:00:00+08:00',available_at:'2026-01-05T15:00:00+08:00',buy_candidate:true};
 const args={events:[event,{...event,available_at:'2026-01-06T15:00:00+08:00'}],bars:[{time:'2026-01-01'},{time:'2026-01-05'},{time:'2026-01-06'}],frequency:'日线',asOf:'2026-01-05'};
-const markers=KHQuantWyckoffMarkers.build(args);assert.equal(markers.length,1);assert.equal(markers[0].time,'2026-01-05');assert.equal(markers[0].shape,'square');assert(markers[0].text.includes('候选'));
-assert.equal(KHQuantWyckoffMarkers.build({...args,frequency:'周线'}).length,0);
+const markers=KHQuantWyckoffMarkers.build(args);assert.equal(markers.length,1);assert.equal(markers[0].time,'2026-01-05');assert.equal(markers[0].shape,'square');assert(markers[0].text.includes('确认'));
+const weekly=KHQuantWyckoffMarkers.buildDetailed({...args,frequency:'周线',bars:[{time:'2026-01-05',is_closed:false}]});assert.equal(weekly.markers.length,1);assert.equal(weekly.groups[0].period_status,'forming');assert.equal(weekly.groups[0].entries[0].event_date,'2026-01-05');
 assert.equal(KHQuantWyckoffMarkers.build({...args,events:[{...event,observed_at:null}]}).length,0);
 """
     result = subprocess.run([node, "-e", script, str(source)], capture_output=True, text=True)

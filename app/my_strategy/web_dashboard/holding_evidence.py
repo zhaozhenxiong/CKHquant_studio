@@ -207,6 +207,8 @@ def holding_exit_research(*, replay_run_id, window, arm, symbol, as_of, usage_mo
         if not re.fullmatch(r'\d{6}\.(SH|SZ|BJ)', symbol) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', str(as_of)):
             raise ValueError('股票或观察日期不合法')
         pd.Timestamp(as_of)
+        from my_strategy.web_dashboard.high_return_routes_v4 import reject_native_legacy_operation
+        reject_native_legacy_operation('holding', run_id=replay_run_id, runs_root=runs_root)
         features, calendar, root, model, replay, snapshot, identity = _load_reference(
             replay_run_id, window, arm, symbol, str(as_of), Path(runs_root or ARTIFACT_RUNS_ROOT))
         result['account_reference'] = identity
@@ -266,5 +268,6 @@ def holding_exit_research(*, replay_run_id, window, arm, symbol, as_of, usage_mo
             no_action_margin=model['config']['high_return']['exit_advantage_margin'])
         return result
     except (ValueError, KeyError, OSError, StopIteration, TypeError) as exc:
-        return {**result,'status':'incompatible','reason':str(exc) or '缺少完整真实回放持仓资料',
+        from my_strategy.web_dashboard.high_return_routes_v4 import NativeVersionUnsupported
+        return {**result,'status':'unsupported_version' if isinstance(exc, NativeVersionUnsupported) else 'incompatible','reason':str(exc) or '缺少完整真实回放持仓资料',
             'exit_probability':None,'exit_advantage':None,'holding_contract_compatible':False}
