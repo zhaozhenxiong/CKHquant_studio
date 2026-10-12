@@ -35,15 +35,19 @@ class AnalysisRequest(BaseModel):
     calendar_run_id: str | None = None
     device: str | None = None
     consensus_config: dict[str, Any] | None = None
-    consensus_version: Literal["czsc_agent_consensus_v1", "czsc_agent_consensus_v2", "czsc_agent_consensus_v3", "czsc_agent_consensus_v4"] | None = None
+    consensus_version: Literal["czsc_agent_consensus_v1", "czsc_agent_consensus_v2", "czsc_agent_consensus_v3", "czsc_agent_consensus_v4", "czsc_trend_consensus"] | None = None
+    account_start: date | None = None
+    account_initial_cash: float | None = Field(default=None, gt=0, le=1e12, allow_inf_nan=False)
     _symbol = field_validator("symbol")(clean_symbol)
 
     @model_validator(mode="after")
     def arbitration_parameters(self):
-        from my_strategy.web_dashboard.high_return_routes_v4 import resolve_analysis_consensus
+        from my_strategy.web_dashboard.trend_routes import resolve_analysis_consensus
         self.consensus_version, self.consensus_config = resolve_analysis_consensus(
             research=self.research, model_family=self.model_family, model_run_id=self.model_run_id,
             config=self.consensus_config, version=self.consensus_version)
+        if self.consensus_version == "czsc_trend_consensus":
+            self.entry_policy = "risk"
         return self
 
     @field_validator("model_run_id", "model_fold", "calendar_run_id")
@@ -63,6 +67,8 @@ class AnalysisRequest(BaseModel):
 
     @model_validator(mode="after")
     def dates(self):
+        if (self.account_start is not None or self.account_initial_cash is not None) and self.consensus_version != "czsc_trend_consensus":
+            raise ValueError("账户研究参数需要趋势共识策略入口")
         if self.start and self.end and self.start > self.end:
             raise ValueError("开始日期不得晚于结束日期")
         if self.research and self.model_family == "high_return" and self.usage_mode == "retrospective":
@@ -104,13 +110,14 @@ class TaskSpec(BaseModel):
     research: bool = Field(default=False, strict=True)
     model_family: Literal["ma_trend", "dual", "wyckoff", "high_return"] = "ma_trend"
     consensus_config: dict[str, Any] | None = None
-    consensus_version: Literal["czsc_agent_consensus_v1", "czsc_agent_consensus_v2", "czsc_agent_consensus_v3", "czsc_agent_consensus_v4"] | None = None
+    consensus_version: Literal["czsc_agent_consensus_v1", "czsc_agent_consensus_v2", "czsc_agent_consensus_v3", "czsc_agent_consensus_v4", "czsc_trend_consensus"] | None = None
 
     @model_validator(mode="after")
     def arbitration_parameters(self):
         if self.consensus_config is not None or self.consensus_version is not None:
-            from my_strategy.services.czsc_agent_consensus import consensus_config as validate_config
-            self.consensus_config = validate_config(self.consensus_config, version=self.consensus_version)
+            from my_strategy.web_dashboard.trend_routes import validate_consensus_config as validate_config
+            self.consensus_config = validate_config(self.consensus_config, version=self.consensus_version,
+                model_run_id=self.model_run_id, model_family=self.model_family)
         return self
     source_training_run_id: str | None = None
     research_config: dict[str, Any] | None = None
@@ -203,7 +210,7 @@ class TaskRequest(BaseModel):
             self.spec.start = date(2026, 1, 1)
             self.spec.dates()
         if self.kind in {"high_return_points_build", "high_return_episodes_build", "high_return_train", "high_return_backtest"}:
-            from my_strategy.web_dashboard.high_return_routes_v4 import reject_native_legacy_operation
+            from my_strategy.web_dashboard.trend_routes import reject_legacy_operation as reject_native_legacy_operation
             reject_native_legacy_operation(self.kind, run_id=self.spec.model_run_id or self.spec.source_training_run_id,
                 consensus_version=self.spec.consensus_version, research_config=self.spec.research_config)
         return self
@@ -297,13 +304,13 @@ async def wyckoff_status():
 
 @router.get("/research/high-return-status")
 async def high_return_status():
-    from my_strategy.web_dashboard.high_return_routes_v4 import status_high_return
+    from my_strategy.web_dashboard.trend_routes import status_high_return
     return await asyncio.to_thread(status_high_return)
 
 
 @router.get("/research/high-return-forward-status")
 async def high_return_forward_status(model_run_id: str = Query(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,179}$")):
-    from my_strategy.web_dashboard.high_return_routes_v4 import reject_native_legacy_operation
+    from my_strategy.web_dashboard.trend_routes import reject_legacy_operation as reject_native_legacy_operation
     reject_native_legacy_operation('forward', run_id=model_run_id)
     from my_strategy.services.czsc_high_return_forward import forward_status
     return await asyncio.to_thread(forward_status, model_run_id)
@@ -370,13 +377,25 @@ async def analysis(spec: AnalysisRequest, request: Request):
         if consensus.get("config"):
             query["consensus_config"] = consensus["config"]
             query["consensus_version"] = consensus["version"]
+        if result.get("strategy_version") == "czsc_trend_consensus":
+            research_context = result.get("research", {})
+            selected_model = research_context.get("model_run_id")
+            if selected_model:
+                query["model_run_id"] = selected_model
+            if research_context.get("calendar_run_id"):
+                query["calendar_run_id"] = research_context["calendar_run_id"]
+            account_context = result.get("account_actions", {}).get("context", {})
+            if account_context.get("account_start"):
+                query["account_start"] = account_context["account_start"]
+            if account_context.get("initial_cash") is not None:
+                query["account_initial_cash"] = account_context["initial_cash"]
         run_config = {"request": query, "strategy": settings}
         if consensus.get("config_hash"):
             run_config["consensus_config_hash"] = consensus["config_hash"]
             run_config["consensus_version"] = consensus["version"]
         if spec.entry_policy != "legacy" and result.get("research", {}).get("entry_plan_config_hash"):
             run_config["entry_plan_config_hash"] = result["research"]["entry_plan_config_hash"]
-        context = create_run_context(task="czsc-analysis", as_of_date=result["data_end"],
+        context = create_run_context(task="czsc-analysis", as_of_date=result.get("decision_date", result["data_end"]),
                                      config=run_config,
                                      data_version=result["data_version"], scope="single", source="web",
                                      stocks=[spec.symbol], start_date=spec.start, end_date=result["data_end"])

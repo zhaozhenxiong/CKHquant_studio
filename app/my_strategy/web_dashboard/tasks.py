@@ -156,9 +156,21 @@ class TaskManager:
         if kind == "update":
             return self._update(job_id, spec)
         if kind in {"high_return_points_build", "high_return_episodes_build", "high_return_train", "high_return_backtest"}:
-            from my_strategy.web_dashboard.high_return_routes_v4 import reject_native_legacy_operation
+            from my_strategy.web_dashboard.trend_routes import reject_legacy_operation as reject_native_legacy_operation
             reject_native_legacy_operation(kind, run_id=spec.get("model_run_id") or spec.get("source_training_run_id"),
                 consensus_version=spec.get("consensus_version"), research_config=spec.get("research_config"))
+            from my_strategy.web_dashboard.trend_routes import is_trend_run
+            if kind == "high_return_backtest" and is_trend_run(spec.get("model_run_id")):
+                from my_strategy.web_dashboard.trend_strategy import backtest_trend_consensus
+                def trend_progress(stage, current, total):
+                    self._check(job_id)
+                    self._patch(job_id, progress_detail={"stage": stage, "current": current, "total": total})
+                return backtest_trend_consensus(model_run_id=spec["model_run_id"], symbols=spec.get("symbols") or None,
+                    start=spec.get("start") or "2026-01-01", end=spec.get("end"), initial_cash=spec.get("initial_cash", 100000),
+                    device=spec.get("device") or "cpu", cpu_workers=spec.get("cpu_workers") or 4,
+                    consensus_config=spec.get("consensus_config"), calendar_run_id=spec.get("calendar_run_id"),
+                    progress=trend_progress, check_cancel=lambda: self._check(job_id),
+                    run_callback=lambda run_id: self._patch(job_id, run_id=run_id))
             from my_strategy.services.czsc_high_return_research import (
                 build_high_return_artifacts, train_high_return_research, backtest_high_return,
             )

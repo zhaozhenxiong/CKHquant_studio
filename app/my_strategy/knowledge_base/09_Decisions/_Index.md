@@ -15,3 +15,7 @@ updated_at: 2026-10-09T22:37:56+08:00
 - [[09_Decisions/20261009_Full_Market_Bootstrap_Completed|全市场原始行情库初始化验收]]
 - [[09_Decisions/20261008_Free_Unadjusted_History|免费未复权历史行情下载契约]]
 - [[09_Decisions/20261009_Data_Quality_Persistence|数据质量报告保存]]
+
+- [[09_Decisions/20261012_Trend_Consensus_Delivery_Acceptance|趋势共识策略落地验收]]
+- [[09_Decisions/20261012_Trend_Scoring_And_Unified_Exit_Repair_Plan|趋势概率连续评分与买卖退出流程完整修复计划]]
+- [[09_Decisions/20261012_Trend_Training_And_Broker_Validation_Runbook|趋势共识策略：训练和实际账本验证操作说明]]

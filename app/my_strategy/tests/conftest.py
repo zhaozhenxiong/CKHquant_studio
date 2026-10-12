@@ -19,6 +19,7 @@ from pathlib import Path
 _TEST_ROOT = Path(tempfile.mkdtemp(prefix="khquant-pytest-"))
 os.environ["KHQUANT_DATA_ROOT"] = str(_TEST_ROOT / "data")
 os.environ["KHQUANT_ARTIFACT_ROOT"] = str(_TEST_ROOT / "artifacts")
+os.environ["KHQUANT_CURRENT_STRATEGY_CONFIG"] = str(_TEST_ROOT / "test-current-strategy.json")
 _TEST_DATA = Path(os.environ["KHQUANT_DATA_ROOT"])
 for _key, _path in {
     "KHQUANT_OUTPUT_ROOT": _TEST_DATA / "processed" / "ai_agent_screen",
@@ -34,6 +35,16 @@ LEAKAGE_ONLY_TESTS = {
     "test_leakage_acceptance_passes_project_features",
     "test_leakage_acceptance_blocks_future_named_features",
 }
+
+
+@pytest.fixture(autouse=True)
+def isolated_delivered_strategy_selection(monkeypatch):
+    """Never let a workstation's current model pointer enter test routing."""
+    from my_strategy.web_dashboard import trend_routes
+    from my_strategy.services import czsc_trend_runtime
+    current = _TEST_ROOT / 'test-current-strategy.json'
+    monkeypatch.setattr(trend_routes, 'CURRENT_PATH', current)
+    monkeypatch.setattr(czsc_trend_runtime, 'CURRENT_MODEL_PATH', current)
 
 
 def pytest_configure(config: pytest.Config) -> None:

@@ -146,7 +146,15 @@ def _analysis_overlay_result(result, overlay, item, *, start, usage_mode, model_
 def analyze_high_return(*, symbol, start="2026-01-01", end=None, as_of=None, research=True,
                         model_family="high_return", usage_mode="historical", model_policy="auto",
                         model_run_id=None, model_fold=None, calendar_run_id=None, device=None,
-                        entry_policy="legacy", config=None, db_path=None, consensus_config=None, consensus_version=None):
+                        entry_policy="legacy", config=None, db_path=None, consensus_config=None, consensus_version=None,
+                        account_start=None, account_initial_cash=None):
+    from my_strategy.web_dashboard.trend_routes import trend_requested
+    if trend_requested(model_run_id=model_run_id, consensus_version=consensus_version, consensus_config=consensus_config):
+        from my_strategy.web_dashboard.trend_strategy import analyze_trend_consensus
+        return analyze_trend_consensus(symbol=symbol, start=start, end=end, as_of=as_of,
+            model_run_id=model_run_id, model_fold=model_fold, usage_mode=usage_mode,
+            calendar_run_id=calendar_run_id, device=device, config=config, db_path=db_path,
+            consensus_config=consensus_config, account_start=account_start, account_initial_cash=account_initial_cash)
     from my_strategy.services.czsc_analysis import analyze_stock
     from my_strategy.services.czsc_research import _json
     result = analyze_stock(symbol, start=start, end=end, as_of=as_of, db_path=db_path, config=config, research=False)
@@ -235,6 +243,13 @@ def scan_high_return(*, symbols=None, start="2026-01-01", end=None, model_run_id
                      usage_mode="historical", calendar_run_id=None, device="cpu", cpu_workers=4,
                      progress=None, check_cancel=None, run_callback=None,
                      consensus_version=None, consensus_config=None):
+    from my_strategy.web_dashboard.trend_routes import trend_requested
+    if trend_requested(model_run_id=model_run_id, consensus_version=consensus_version, consensus_config=consensus_config):
+        from my_strategy.web_dashboard.trend_strategy import scan_trend_consensus
+        return scan_trend_consensus(symbols=symbols, start=start, end=end, model_run_id=model_run_id,
+            model_fold=model_fold, usage_mode=usage_mode, calendar_run_id=calendar_run_id,
+            device=device, cpu_workers=cpu_workers, consensus_config=consensus_config,
+            progress=progress, check_cancel=check_cancel, run_callback=run_callback)
     from my_strategy.web_dashboard.high_return_routes_v4 import native_scan_requested, scan_native_high_return
     if native_scan_requested(model_run_id=model_run_id, consensus_version=consensus_version, consensus_config=consensus_config):
         return scan_native_high_return(symbols=symbols, start=start, end=end, model_run_id=model_run_id,
