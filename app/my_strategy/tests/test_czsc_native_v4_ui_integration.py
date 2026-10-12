@@ -228,7 +228,7 @@ state.analysis=response;state.frequency=frequency;state.query={symbol:response.s
 state.dates=response.chart_evidence.rows.map(r=>r.date);state.replayIndex=state.dates.length-1;
 element('layer-signals').checked=true;element('view-analysis').hidden=false;element('analysis-chart').clientWidth=640;
 bind();renderAnalysis(false);
-assert(!candles.markers.some(m=>m.text.startsWith('W ')));
+assert(!candles.markers.some(m=>m.id?.startsWith('khq-wyckoff:')));
 const hover=time=>crosshair({time,point:{x:350,y:180},seriesData:new Map([[candles,{close:11}]])});
 const available=wyckoff.buildDetailed({events:response.wyckoff_events,bars:response.frequencies[frequency].bars,
  frequency,asOf:response.as_of,symbol:response.symbol,start:state.query.start});
@@ -236,8 +236,9 @@ assert(available.groups.length>0);
 const group=available.groups[0],selectedDate=ui.groupDates([group]).at(-1);
 hover(group.time);assert(element('chart-evidence-popup').hidden);assert.equal(liveInteraction.selection().popupOpen,false);
 element('layer-wyckoff').checked=true;element('layer-wyckoff').listeners.change[0]();
-const drawn=candles.markers.filter(m=>m.text.startsWith('W '));
+const drawn=candles.markers.filter(m=>m.id?.startsWith('khq-wyckoff:'));
 assert.equal(drawn.length,available.markers.length);
+assert(drawn.every(m=>m.text==='' || /^\d+$/.test(m.text)));
 assert(element('marker-summary').textContent.includes(`量价事件 ${available.eventCount} 条／${drawn.length} 个标记`));
 hover(group.time);assert(element('chart-evidence-popup').hidden);
 element('chart-evidence-popup').scrollTop=777;
@@ -261,6 +262,6 @@ hover(group.time);assert(element('chart-evidence-popup').hidden);
 click({time:group.time,hoveredObjectId:group.id,point:{x:350,y:180}});assert(!element('chart-evidence-popup').hidden);
 element('layer-wyckoff').checked=false;element('layer-wyckoff').listeners.change[0]();
 assert(element('chart-evidence-popup').hidden);assert.equal(liveInteraction.selection().pinned,null);
-assert(!candles.markers.some(m=>m.text.startsWith('W ')));
+assert(!candles.markers.some(m=>m.id?.startsWith('khq-wyckoff:')));
 hover(group.time);assert(element('chart-evidence-popup').hidden);
 ''')

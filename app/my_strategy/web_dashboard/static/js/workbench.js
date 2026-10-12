@@ -23,6 +23,10 @@
   let personalReady;
   let computeLoaded = false;
   let latestDefaultEnd;
+  const dateModes = {analysis:'latest',scan:'latest',backtest:'latest'};
+  let latestDateSequence = 0;
+  let latestCoverage = null;
+  let popupRenderedHtml = null, popupRenderedContext = null;
   let markerMappings = [];
   let markerGroups = [];
   let chartSelection = {hover:null,pinned:null,selectedDate:null,popupOpen:false};
@@ -314,6 +318,7 @@
     }
   }
   function resetChartSelection() {
+    popupRenderedHtml = null; popupRenderedContext = null;
     chartSelection = {hover:null,pinned:null,selectedDate:null,popupOpen:false}; popupAnchor = null;
     clearSelectedReference();
     $('chart-evidence-popup').hidden = true; $('chart-evidence-popup').replaceChildren(); $('chart-evidence-reset').hidden = true;
@@ -325,7 +330,20 @@
     if (!ui || !chartSelection.popupOpen || !active || !state.analysis || analysisLoading || !groups.length) { host.hidden = true; clearSelectedReference(); return; }
     renderSelectedReference(groups,active);
     host.dataset.pinned = String(Boolean(chartSelection.pinned));
-    host.innerHTML = ui.popupHtml({evidence:displayedEvidence(),consensus:displayedConsensus(),groups,barDate:active,frequency:state.frequency,selectedDate:chartSelection.selectedDate,pinned:Boolean(chartSelection.pinned),profileAsOf:selectedChipProfile()?.as_of});
+    const context = `${state.analysisSequence}|${active}|${state.frequency}|${chartSelection.selectedDate || ''}`;
+    const html = ui.popupHtml({evidence:displayedEvidence(),consensus:displayedConsensus(),groups,barDate:active,frequency:state.frequency,selectedDate:chartSelection.selectedDate,pinned:Boolean(chartSelection.pinned),profileAsOf:selectedChipProfile()?.as_of});
+    if (html !== popupRenderedHtml) {
+      const keep = context === popupRenderedContext;
+      const expanded = keep ? [...(host.querySelectorAll?.('details[data-agent-details]') || [])].map((node) => [node.dataset.agentDetails,node.open]) : [];
+      const scroll = keep ? host.scrollTop : 0;
+      host.innerHTML = html;
+      for (const [key,open] of expanded) {
+        const node = host.querySelector?.(`details[data-agent-details="${key}"]`);
+        if (node) node.open = open;
+      }
+      host.scrollTop = scroll;
+      popupRenderedHtml = html; popupRenderedContext = context;
+    }
     host.hidden = false;
     const anchor = popupAnchor || {x:Math.min(window.innerWidth - 24,160),y:Math.min(window.innerHeight - 24,180)};
     const width = host.offsetWidth, height = host.offsetHeight;
@@ -725,7 +743,38 @@
     $('data-stocks').textContent = number(data.stocks ?? data.symbols); $('data-rows').textContent = number(data.rows); $('data-source').textContent = display(data.source || (data.available ? '本地 SQLite 行情' : '尚未连接'));
     $('data-detail').textContent = latest ? `基础行情与合成周期：${(data.frequencies || []).join('、') || '以分析结果为准'}。${basisLabel(data.price_basis)}。更新后重新核对覆盖。` : data.reason || '没有可用行情。请先更新数据，再运行分析或回测。';
     $('connection-state').textContent = latest ? '数据已连接' : '尚无数据'; $('connection-state').className = `status-dot ${latest ? 'ready' : ''}`;
-    if (latest) { const next = day(latest); ['analysis-end','scan-end','backtest-end'].forEach((id) => { if (!$(id).value || $(id).value === latestDefaultEnd) $(id).value = next; }); latestDefaultEnd = next; }
+    if (latestCoverage?.market_latest_date) {
+      $('latest-date').textContent = latestCoverage.market_latest_date;
+      $('connection-state').textContent = latestCoverage.partial_coverage ? '最新日部分覆盖' : '数据已连接';
+      $('coverage-label').textContent = `最新日 ${number(latestCoverage.latest_symbols)} / ${number(latestCoverage.total_symbols)} 只股票有行情`;
+    }
+    if (latest && !latestCoverage) { const next = day(latest); ['analysis','scan','backtest'].forEach((prefix) => { if (dateModes[prefix] === 'latest') $(`${prefix}-end`).value = next; }); latestDefaultEnd = next; }
+    if (data.latest_symbols != null) $('data-detail').textContent += ` 最新日覆盖 ${number(data.latest_symbols)} / ${number(data.stocks ?? data.symbols)} 只；缺行情股票不沿用前日评分。`;
+    if (latest && (!latestCoverage || latestCoverage.market_latest_date !== day(latest) || latestCoverage.latest_symbols !== data.latest_symbols)) await refreshLatestDates();
+    return data;
+  }
+  function setDateMode(prefix, mode) {
+    dateModes[prefix] = mode;
+    const caption = $(`${prefix}-date-mode`);
+    if (caption) caption.textContent = mode === 'latest' ? '自动最新可用行情' : '历史截止日';
+  }
+  async function refreshLatestDates() {
+    const sequence = ++latestDateSequence;
+    let symbol;
+    try { symbol = getSymbol($('analysis-symbol').value); } catch (_) { symbol = null; }
+    const data = await request(`/api/data/latest${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''}`);
+    let currentSymbol;
+    try { currentSymbol = getSymbol($('analysis-symbol').value); } catch (_) { currentSymbol = null; }
+    if (sequence !== latestDateSequence || currentSymbol !== symbol) return data;
+    latestCoverage = data; latestDefaultEnd = data.market_latest_date || data.latest_date;
+    ['scan','backtest'].forEach((prefix) => { if (dateModes[prefix] === 'latest' && latestDefaultEnd) $(`${prefix}-end`).value = latestDefaultEnd; });
+    if (dateModes.analysis === 'latest') $('analysis-end').value = data.latest_date || '';
+    if (data.market_latest_date) {
+      $('latest-date').textContent = data.market_latest_date;
+      $('connection-state').textContent = data.partial_coverage ? '最新日部分覆盖' : '数据已连接';
+      $('connection-state').className = 'status-dot ready';
+      $('coverage-label').textContent = `最新日 ${number(data.latest_symbols)} / ${number(data.total_symbols)} 只股票有行情`;
+    }
     return data;
   }
   function computeCaption(info, capability = false) {
@@ -1003,6 +1052,7 @@
   }
   function renderDiagnostics(id, rows) { const list = Array.isArray(rows) ? rows : rows ? [rows] : []; $(id).hidden = !list.length; $(id).querySelector('.diagnostics').innerHTML = list.map((row) => `<div>${esc(diagnostic(row))}</div>`).join(''); }
   function renderScan() {
+    globalThis.KHMarketHistory?.render($('scan-market-history'),state.scan?.market_history,{runId:state.scan?.run_id,request,onAnalyze:({symbol,date}) => analyzeSymbol(symbol,date,state.scan).catch(showError)});
     const query = $('scan-search').value.trim().toLowerCase(), filter = $('scan-filter').value;
     const all = state.scan?.rows || [];
     renderComputeResult('scan',state.scan?.compute_info);
@@ -1380,6 +1430,7 @@
     state.query = {...(result.request || {symbol:result.symbol,start:null,end:result.data_end,as_of:result.as_of}),...resultResearchContext(result),...consensusRequestContext(result)};
     applyResearchContext('analysis',state.query);
     $('analysis-symbol').value = state.query.symbol || result.symbol; $('analysis-start').value = state.query.start || ''; $('analysis-end').value = state.query.end || result.data_end;
+    setDateMode('analysis','historical');
     state.dates = (result.frequencies?.['日线']?.bars || []).map((bar) => day(bar.time)); state.replayIndex = Math.max(0,state.dates.length - 1);
     location.hash = 'analysis'; showView('analysis'); renderAnalysis(); renderEvents(); updateReplay();
   }
@@ -1388,18 +1439,28 @@
     location.hash = 'analysis';
     const context = source ? resultResearchContext(source) : researchSpec('analysis');
     if (source) { applyResearchContext('analysis',context); if (source.request?.start) $('analysis-start').value = source.request.start; }
-    if (end) { $('analysis-end').value = end; if ($('analysis-start').value > end) $('analysis-start').value = source?.data_range?.start || end; }
+    if (end) {
+      setDateMode('analysis','historical'); $('analysis-end').value = end;
+      if ($('analysis-start').value > end) {
+        const starts = [source?.data_range?.start,source?.market_history?.window_start,end].filter((value) => value && value <= end).sort();
+        $('analysis-start').value = starts[0] || end;
+      }
+    }
+    else if (dateModes.analysis === 'latest') await refreshLatestDates();
     await analyze({symbol,...dateSpec('analysis'),...context,...(end ? {as_of:end} : {})},false,end || null);
   }
   function bind() {
+    ['analysis','scan','backtest'].forEach((prefix) => $(`${prefix}-end`).addEventListener('change',() => setDateMode(prefix,$(`${prefix}-end`).value ? 'historical' : 'latest')));
+    $('analysis-latest')?.addEventListener('click',async () => { setDateMode('analysis','latest'); updateChartSelection('clear'); try { await refreshLatestDates(); } catch (error) { showError(error); } });
+    $('analysis-symbol').addEventListener('change',() => { if (dateModes.analysis === 'latest') refreshLatestDates().catch(showError); });
     window.addEventListener('hashchange',route);
     window.addEventListener('keydown',(event) => { if (event.key === 'Escape') updateChartSelection('clear'); });
     $('chart-evidence-reset').addEventListener('click',() => updateChartSelection('clear'));
     $('theme-toggle').addEventListener('click',() => setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
     $('page-error').querySelector('button').addEventListener('click',() => { $('page-error').hidden = true; });
     $('analysis-symbol').addEventListener('input',() => { updateChartSelection('clear'); clearTimeout(searchTimer); searchTimer = setTimeout(() => searchSymbols($('analysis-symbol').value).catch(showError),250); });
-    $('analysis-form').addEventListener('submit',(event) => { event.preventDefault(); try { analyze({symbol:getSymbol($('analysis-symbol').value),...dateSpec('analysis'),...researchSpec('analysis')}); } catch (error) { showError(error); } });
-    $('send-backtest').addEventListener('click',() => { try { const symbol = getSymbol($('analysis-symbol').value); if (!symbol) { notice('请先选择股票'); return; } const context = researchSpec('analysis'); if (context.usage_mode === 'retrospective') throw new Error('事后研究历史图不能转为可执行回测，请先切换历史滚动研究或当前生产判断。'); $('backtest-symbols').value = symbol; ['start','end'].forEach((key) => { $(`backtest-${key}`).value = $(`analysis-${key}`).value; }); applyResearchContext('backtest',context); location.hash = 'backtest'; } catch (error) { showError(error); } });
+    $('analysis-form').addEventListener('submit',async (event) => { event.preventDefault(); try { if (dateModes.analysis === 'latest') await refreshLatestDates(); await analyze({symbol:getSymbol($('analysis-symbol').value),...dateSpec('analysis'),...researchSpec('analysis')}); } catch (error) { showError(error); } });
+    $('send-backtest').addEventListener('click',() => { try { const symbol = getSymbol($('analysis-symbol').value); if (!symbol) { notice('请先选择股票'); return; } const context = researchSpec('analysis'); if (context.usage_mode === 'retrospective') throw new Error('事后研究历史图不能转为可执行回测，请先切换历史滚动研究或当前生产判断。'); $('backtest-symbols').value = symbol; ['start','end'].forEach((key) => { $(`backtest-${key}`).value = $(`analysis-${key}`).value; }); setDateMode('backtest','historical'); applyResearchContext('backtest',context); location.hash = 'backtest'; } catch (error) { showError(error); } });
     document.querySelectorAll('[data-frequency]').forEach((button) => button.addEventListener('click',() => { resetChartSelection(); state.frequency = button.dataset.frequency; document.querySelectorAll('[data-frequency]').forEach((item) => item.setAttribute('aria-pressed',String(item === button))); renderAnalysis(); }));
     ['ma','boll','chips','fractals','pens','zones','divergences','signals','directions','wyckoff','trades','volume'].forEach((name) => $(`layer-${name}`).addEventListener('change',() => { resetChartSelection(); renderAnalysis(false); }));
     ['start','end','mode','model-family','entry-policy','usage-mode','model-policy','model','checkpoint','device'].forEach((name) => $(`analysis-${name}`).addEventListener('change',() => updateChartSelection('clear')));
@@ -1484,10 +1545,11 @@
   async function init() {
     const theme = localStorage.getItem('khquant_czsc_theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); setTheme(theme);
     bind(); route();
+    refreshLatestDates().catch(showError);
     const results = await Promise.allSettled([refreshData(),searchSymbols(),refreshTasks(),refreshRuns(),ensurePersonal(),refreshCompute(),refreshResearch()]);
     results.forEach((result) => { if (result.status === 'rejected') showError(result.reason); });
     if (results[0].status === 'rejected') { $('connection-state').textContent = '数据检查失败'; $('connection-state').className = 'status-dot failed'; $('data-detail').textContent = '数据状态请求失败，请检查服务后刷新。'; }
-    if (results[1].status === 'fulfilled' && results[1].value.length && !$('analysis-symbol').value) $('analysis-symbol').value = results[1].value[0].symbol;
+    if (results[1].status === 'fulfilled' && results[1].value.length && !$('analysis-symbol').value) { $('analysis-symbol').value = results[1].value[0].symbol; refreshLatestDates().catch(showError); }
   }
   init().catch(showError);
 })();

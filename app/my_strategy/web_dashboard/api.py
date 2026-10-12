@@ -6,7 +6,7 @@ from datetime import date
 import re
 from typing import Any, Literal
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 router = APIRouter(prefix="/api")
@@ -278,6 +278,15 @@ async def status():
     return await asyncio.to_thread(data_status)
 
 
+@router.get("/data/latest")
+async def latest_dates(symbol: str | None = Query(default=None, max_length=20)):
+    from my_strategy.web_dashboard.display_dates import latest_display_dates
+    try:
+        return await asyncio.to_thread(latest_display_dates, clean_symbol(symbol) if symbol else None)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.get("/compute/status")
 async def compute(device: str | None = None):
     from my_strategy.services.czsc_compute import compute_status
@@ -432,3 +441,37 @@ def runs(request: Request, kind: str | None = None, limit: int = Query(default=3
 @router.get("/runs/{run_id}")
 def run(run_id: str, request: Request):
     return request.app.state.tasks.results.get(run_id)
+
+
+@router.get("/runs/{run_id}/market-history")
+def market_history(run_id: str, request: Request,
+                   date: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+                   sector: str | None = Query(default=None, max_length=120),
+                   event_type: str | None = Query(default=None, max_length=120),
+                   state: str | None = Query(default=None, max_length=40),
+                   page: int = Query(default=1, ge=1),
+                   page_size: int = Query(default=25, ge=1, le=100)):
+    from contextlib import closing
+    from pathlib import Path
+    import sqlite3
+    from my_strategy.storage.czsc_market_history import market_history_facts, STATES
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,179}", run_id) or state is not None and state not in STATES:
+        raise HTTPException(status_code=422, detail="统计运行或状态筛选无效")
+    try:
+        # A full-market report contains thousands of detailed decisions. Only
+        # verify the small indexed run identity before reading bounded facts.
+        path = Path(request.app.state.tasks.results.db_path).resolve()
+        if not path.is_file():
+            raise KeyError(run_id)
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=30)) as conn:
+            conn.execute("PRAGMA query_only=ON")
+            saved = conn.execute("SELECT kind FROM czsc_runs WHERE run_id=?", (run_id,)).fetchone()
+        if saved is None or saved[0] != "scan":
+            raise KeyError(run_id)
+        return market_history_facts(run_id, date=date, sector=sector, event_type=event_type,
+                                    state=state, page=page, page_size=page_size,
+                                    db_path=request.app.state.tasks.results.db_path)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="统计运行不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc

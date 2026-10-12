@@ -36,13 +36,16 @@
       const supply = direction === 'SELL' || direction === 'SUPPLY' || ['Upthrust','SOW','LPSY'].includes(name);
       const confirmed = event.confirmed === true || event.is_confirmed === true
         || event.confirmed == null && event.is_confirmed == null && !/pending|await|test_required/i.test(event.status || '') && name !== 'SOS';
-      const side = supply ? 'SELL' : 'BUY', status = confirmed ? 'confirmed' : 'pending';
-      const id = ['khq-wyckoff',event.symbol || symbol,frequency,periodKey(available,frequency),name,side,status].map(encodeURIComponent).join(':');
-      if (!grouped.has(id)) grouped.set(id,{id,group_id:id,time,bar_date:time,kind:'wyckoff',action:side,side,event_type:name,
-        confirmed,status,sources:['wyckoff'],visible:true,daily_confirmed:frequency !== '日线',
+      const side = supply ? 'SELL' : 'BUY';
+      // One symbol per direction and displayed candle. Original event identity,
+      // type and confirmation remain on every entry, including weekly/monthly
+      // projections; aggregation never changes eligibility or visibility.
+      const id = ['khq-wyckoff',event.symbol || symbol,frequency,periodKey(available,frequency),side].map(encodeURIComponent).join(':');
+      if (!grouped.has(id)) grouped.set(id,{id,group_id:id,time,bar_date:time,kind:'wyckoff',action:side,side,
+        sources:['wyckoff'],visible:true,daily_confirmed:frequency !== '日线',
         period_status:bar.is_closed === false ? 'forming' : 'closed',closed_at:bar.is_closed === false ? null : time,entries:[]});
       const group = grouped.get(id);
-      const row = {...event,source:'wyckoff',event:name,event_type:name,evidence_date:available,first_available_at:firstAvailableAt,
+      const row = {...event,source:'wyckoff',side,event:name,event_type:name,evidence_date:available,first_available_at:firstAvailableAt,
         origin_observed_at:observedAt,original_event_date:observed,confirmed};
       group.entries.push({row,event_id:event.event_id || null,event_date:available,original_date:observed,
         first_available_at:firstAvailableAt,bar_date:time,source:'wyckoff',displayed:true,excluded:false});
@@ -54,11 +57,17 @@
       group.entries.sort((a,b) => a.event_date.localeCompare(b.event_date) || String(a.event_id).localeCompare(String(b.event_id)));
       group.event_count = group.entries.length;
       group.events = group.entries.map((entry) => entry.row);
+      group.event_types = [...new Set(group.events.map((event) => event.event_type))];
+      group.event_type = group.event_types.length === 1 ? group.event_types[0] : '量价事件';
+      group.confirmed_count = group.events.filter((event) => event.confirmed === true).length;
+      group.pending_count = group.event_count - group.confirmed_count;
+      group.confirmed = group.pending_count === 0;
+      group.status = group.confirmed ? 'confirmed' : group.confirmed_count ? 'mixed' : 'pending';
       group.first_available_at = group.entries.map((entry) => entry.first_available_at).sort()[0];
     }
     const markers = groups.map((group) => ({id:group.id,time:group.time,position:group.action === 'SELL' ? 'aboveBar' : 'belowBar',
-      color:group.action === 'SELL' ? '#3b82f6' : '#d97706',shape:'square',size:.55,
-      text:`W ${group.event_type}${group.confirmed ? '确认' : '待测试'}${group.event_count > 1 ? ` ×${group.event_count}` : ''}`}));
+      color:group.action === 'SELL' ? '#3b82f6' : '#d97706',shape:group.action === 'SELL' ? 'square' : 'circle',size:.55,
+      text:group.event_count > 1 ? String(group.event_count) : ''}));
     return {markers,groups,eventCount,formingProjectedCount};
   }
   const build = (options) => buildDetailed(options).markers;

@@ -127,12 +127,15 @@ def scan_trend_consensus(*, symbols=None, start="2026-01-01", end=None, model_ru
     from my_strategy.storage.czsc_results import ResultStore
     from my_strategy.web_dashboard.high_return import _calendar
     from my_strategy.services.czsc_trend_runtime import load_model_run
+    from my_strategy.services.czsc_market_history import MarketHistoryBuilder, load_classification
+    from my_strategy.storage.czsc_market_history import MarketHistoryStore
     target = latest_market_date(end)
     if not target:
         raise ValueError("截止日之前没有本地行情")
     dates, calendar_id = _calendar(calendar_run_id)
     root, report = load_model_run(model_run_id)
-    selected = list(dict.fromkeys(symbols or [r["symbol"] for r in list_symbols()]))
+    catalog = list_symbols()
+    selected = list(dict.fromkeys(symbols or [r["symbol"] for r in catalog]))
     params = {"model_run_id": root.name if root else None, "model_fold": model_fold, "model_mode": usage_mode,
               "device": device or "cpu", "consensus_config": consensus_config}
     context = create_run_context(task="czsc-trend-consensus-scan", as_of_date=target, stocks=selected,
@@ -141,12 +144,33 @@ def scan_trend_consensus(*, symbols=None, start="2026-01-01", end=None, model_ru
         source="web", start_date=start, end_date=target)
     if run_callback:
         run_callback(context.run_id)
+    result_store = ResultStore()
+    history_store = MarketHistoryStore(result_store.db_path)
+    classifications, classification = load_classification(selected)
+    history = MarketHistoryBuilder(selected, dates, target, run_id=context.run_id,
+        classifications=classifications, classification=classification,
+        names={row["symbol"]: row.get("name", "") for row in catalog},
+        contract={"strategy_version": STRATEGY_ID, "model_run_id": params["model_run_id"],
+            "usage_mode": usage_mode, "model_fold": model_fold, "calendar_run_id": calendar_id,
+            "config_hash": stable_hash(params), "account_scope": "one_explicit_research_account_per_stock",
+            "source_policy": "existing_causal_runtime_overlay"})
+    history_store.begin(context.run_id, {"dates": history.dates, "symbols": selected,
+        "classification": classification, "contract": history.contract})
     rows, failed = [], []
+    effective_consensus = None
     for value, failure in _batch(selected, target, dates, params, cpu_workers, progress=progress, check_cancel=check_cancel):
         if failure:
             failed.append(failure)
+            history_store.save_stock(context.run_id, history.add_stock(failure["symbol"], failure=failure))
             continue
         symbol, item, overlay = value
+        if effective_consensus is None:
+            effective_consensus = dict(overlay.get("trend_consensus", {}).get("config", {}))
+        facts = history.add_stock(symbol, overlay=overlay)
+        for fact in facts:
+            fact.update(data_version=item["data_version"], raw_vintage_end=item["data_end"],
+                model_run_id=params["model_run_id"], calendar_run_id=calendar_id)
+        history_store.save_stock(context.run_id, facts)
         row = dict(overlay["latest_decision"])
         observed_end = str(overlay["features"].iloc[-1].date)[:10]
         row.update(symbol=symbol, data_end=observed_end, data_version=item["data_version"],
@@ -165,8 +189,12 @@ def scan_trend_consensus(*, symbols=None, start="2026-01-01", end=None, model_ru
         "account_scope": "one_explicit_research_account_per_stock", "usage_mode": usage_mode})
     out["pricing_assumptions"] = dict(PRICING_ASSUMPTIONS)
     out["high_return_target"] = dict((report or {}).get("config", {}).get("high_return", {}))
+    out["consensus_config"] = effective_consensus or consensus_config
+    out["calendar_run_id"] = calendar_id
+    out["market_history"] = history.finish()
+    history_store.finish(context.run_id, out["market_history"])
     _save(context.subdir("reports") / "trend_scan.json", out)
-    return ResultStore().save("scan", out)
+    return result_store.save("scan", out)
 
 
 def backtest_trend_consensus(*, model_run_id, symbols=None, start="2026-01-01", end=None,
