@@ -241,7 +241,10 @@ def main(argv: list[str] | None = None) -> int:
                 from my_strategy.web_dashboard.high_return import analyze_high_return
                 result = analyze_high_return(**spec)
             else:
-                result = analyze_stock(**spec)
+                # Consensus belongs to chart/high-return routing, not native analysis.
+                calculation_spec = {key: value for key, value in spec.items()
+                                    if key not in {"consensus_config", "consensus_version"}}
+                result = analyze_stock(**calculation_spec)
             context = create_run_context(task="czsc-analysis", as_of_date=result["data_end"], config=spec, data_version=str(result.get("data_version", result["data_end"])), stocks=[args.symbol], source="cli", start_date=args.start, end_date=result["data_end"])
             result.update(run_id=context.run_id, run_context=context.to_dict())
             ResultStore().save("analysis", result)
