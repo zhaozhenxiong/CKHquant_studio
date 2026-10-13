@@ -49,13 +49,13 @@
       if (excluded) ignoredCount++;
       const version = consensusVersion || row.version || row.consensus_version;
       const sourceFrequency = row.source_frequency || row.signal_frequency || row.frequency || '日线';
-      const nativePeriodSignal = !execution && ['consensus','account_action'].includes(row.source) && ['czsc_agent_consensus_v3','czsc_agent_consensus_v4','czsc_trend_consensus'].includes(version)
+      const nativePeriodSignal = !execution && ['consensus','account_action'].includes(row.source) && ['czsc_agent_consensus_v3','czsc_agent_consensus_v4','czsc_trend_consensus','czsc_trend_consensus_v2'].includes(version)
         && sourceFrequency !== '日线' && sourceFrequency === frequency;
       const bucketDate = nativePeriodSignal ? day(row.source_period_date || row.period_end || row.time || row.date) : original;
       const key = periodKey(bucketDate,frequency), bar = periodBars.get(key);
       // Daily final decisions are already known facts. A forming weekly/monthly
       // display bucket must not defer them as if they were native period signals.
-      const dailyProjection = !execution && ['consensus','account_action'].includes(row.source) && ['czsc_agent_consensus_v3','czsc_agent_consensus_v4','czsc_trend_consensus'].includes(version)
+      const dailyProjection = !execution && ['consensus','account_action'].includes(row.source) && ['czsc_agent_consensus_v3','czsc_agent_consensus_v4','czsc_trend_consensus','czsc_trend_consensus_v2'].includes(version)
         && sourceFrequency === '日线' && frequency !== '日线';
       const time = dailyProjection && bar ? day(bar.time) : byPeriod.get(key);
       const closedAt = frequency === '日线' ? time : observedDaily.find((date) => periodKey(date,frequency) > key);
@@ -68,7 +68,7 @@
       }
       const kind = execution ? 'execution' : 'intention', side = buying ? 'BUY' : 'SELL';
       const periodId = `${frequency}:${key}`;
-      const id = groupId(rowSymbol,frequency,['czsc_agent_consensus_v3','czsc_agent_consensus_v4','czsc_trend_consensus'].includes(version) ? periodId : time,kind,side);
+      const id = groupId(rowSymbol,frequency,['czsc_agent_consensus_v3','czsc_agent_consensus_v4','czsc_trend_consensus','czsc_trend_consensus_v2'].includes(version) ? periodId : time,kind,side);
       const entryId = [id,row.event_id || '',firstAvailableAt || ''].map(encodeURIComponent).join(':');
       const source = row.source || (execution ? 'broker' : null);
       const mapping = {...row, row, group_id:id, kind, symbol:rowSymbol, action:side, side,

@@ -184,11 +184,11 @@ ui.state.research={calendar_run_id:'calendar',high_return:{default_consensus_ver
 element('scan-mode').value='research';element('scan-model-family').value='high_return';element('scan-model-policy').value='auto';element('scan-usage-mode').value='historical';element('scan-end').value='2026-10-09';element('high-return-source').value='legacy-source';
 ui.updateResearchControls('scan');ui.renderTasks();
 for(const id of ['high-return-source-label','build-research-points','build-research-episodes','start-research_train'])assert(element(id).hidden);
-assert(element('start-research_train').disabled);assert(element('scan-research-target-help').textContent.includes('train_trend_consensus CLI'));
+assert(element('start-research_train').disabled);assert(element('scan-research-target-help').textContent.includes('对应版本的独立重训入口'));
 assert(element('scan-research-target-help').textContent.includes('完整交易费用后收益至少8%，且≥2倍冻结止损参考风险'));assert(element('scan-research-target-help').textContent.includes('成交采用滑点模拟均价；R按冻结止损参考假设估计'));
 let network=0;global.sessionStorage={getItem:()=>null};global.fetch=()=>{network++;throw new Error('Legacy submission is forbidden');};
 ui.bind();for(const id of ['start-research_train','build-research-points','build-research-episodes'])element(id).listeners.click();
-assert.equal(network,0);assert(element('page-error-child').textContent.includes('train_trend_consensus CLI'));
+assert.equal(network,0);assert(element('page-error-child').textContent.includes('train_trend_consensus'));
 const scored=ui.scanActionCell({strategy_version:'czsc_trend_consensus',category:'watch',account_action:{emitted:false,action:'HOLD'},agents:{ma:{p_up:.65,p_down:.15,p_neutral:.2},high_return:{probability:null,evaluation_status:'model_unavailable'}}});
 assert(scored.includes('上涨 65%'));assert(scored.includes('下跌 15%'));assert(scored.includes('中性 20%'));assert(scored.includes('缺兼容模型 · 未评估'));assert(!scored.includes('模型概率不可用'));assert(scored.includes('账户观察'));
 element('scan-model').value='old';ui.updateResearchControls('scan');assert(element('start-research_train').hidden); // A stale disabled selection cannot override the current automatic strategy.
@@ -226,7 +226,7 @@ assert.equal(ui.state.pendingResearchContexts.analysis.consensus_version,'czsc_a
 ui.applyResearchContext('analysis',{research:true,model_family:'high_return',model_policy:'auto',usage_mode:'historical',consensus_version:'czsc_trend_consensus'});
 assert.equal(element('analysis-model').value,'');assert.deepEqual(ui.researchModels('analysis').map(x=>x.run_id),['new-main']);
 assert.equal(element('analysis-model-family').options[0].textContent,'趋势共识策略');assert(!ui.researchSpec('analysis').model_run_id);
-assert(!ui.researchSpec('analysis').consensus_version);assert(!ui.researchSpec('analysis').consensus_config);
+assert.equal(ui.researchSpec('analysis').consensus_version,'czsc_trend_consensus');assert(!ui.researchSpec('analysis').consensus_config);
 ui.applyResearchContext('analysis',{research:true,model_family:'high_return',model_run_id:'new-main',model_policy:'auto',usage_mode:'historical',consensus_version:'czsc_trend_consensus'});
 assert.equal(element('analysis-checkpoint').value,'');assert(element('analysis-checkpoint').disabled);
 assert(element('analysis-checkpoint').innerHTML.includes('自动按日期匹配'));assert(!element('analysis-checkpoint').innerHTML.includes('2025Q2'));

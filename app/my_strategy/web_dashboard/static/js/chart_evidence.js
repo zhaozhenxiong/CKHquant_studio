@@ -10,9 +10,9 @@
   const ruleScore = (value) => finite(value) && Number(value) >= 0 && Number(value) <= 1 ? `${num(Number(value) * 100)} / 100` : '不可用';
   const supportScore = (value) => finite(value) ? num(Number(value) * 100) : '—';
   const consensusVersion = (row, config = null, version = '') => version || row?.version || config?.version || '';
-  const weightedConsensus = (row, config = null, version = '') => ['czsc_agent_consensus_v2','czsc_agent_consensus_v3','czsc_agent_consensus_v4','czsc_trend_consensus'].includes(consensusVersion(row,config,version));
-  const currentEvidenceConsensus = (row, config = null, version = '') => ['czsc_agent_consensus_v3','czsc_agent_consensus_v4','czsc_trend_consensus'].includes(consensusVersion(row,config,version));
-  const isTrendConsensus = (row, config = null, version = '') => consensusVersion(row,config,version) === 'czsc_trend_consensus';
+  const weightedConsensus = (row, config = null, version = '') => ['czsc_agent_consensus_v2','czsc_agent_consensus_v3','czsc_agent_consensus_v4','czsc_trend_consensus','czsc_trend_consensus_v2'].includes(consensusVersion(row,config,version));
+  const currentEvidenceConsensus = (row, config = null, version = '') => ['czsc_agent_consensus_v3','czsc_agent_consensus_v4','czsc_trend_consensus','czsc_trend_consensus_v2'].includes(consensusVersion(row,config,version));
+  const isTrendConsensus = (row, config = null, version = '') => ['czsc_trend_consensus','czsc_trend_consensus_v2'].includes(consensusVersion(row,config,version));
   function trendProbabilities(item = {}) {
     const present = item.kind === 'trend_probability' || ['p_up','p_down','p_neutral'].some((key) => Object.hasOwn(item,key));
     const available = present && ['p_up','p_down','p_neutral'].every((key) => validProbability(item[key])) && Math.abs(Number(item.p_up)+Number(item.p_down)+Number(item.p_neutral)-1)<1e-5;
@@ -124,7 +124,7 @@
   }
   const evaluationLabels = {no_candidate:'无候选 · 未评估',risk_blocked:'风险阻止 · 未评估',input_ineligible:'输入不合格 · 未评估',model_unavailable:'缺兼容模型 · 未评估',scored_rejected:'已评分 · 未过门槛',scored_passed:'已评分 · 通过门槛',identity_error:'评分身份核验失败',actual_existing_position:'持仓中 · 入场不适用',entry_quality_gate_disabled:'质量过滤已关闭，本次未评分'};
   const evaluationExplanations = {
-    no_candidate:'高收益入场评分只评估该研究账户新的合格候选；本日没有待评估候选，未评分不代表0%概率。',
+    no_candidate:'高收益入场评分只评估该研究账户当日合格的候选；本日没有待评估候选，未评分不代表0%概率。',
     risk_blocked:'候选先被冻结风险检查阻止，因此未进行高收益入场评分；风险原因保留在当日入场计划中。',
     input_ineligible:'候选或评分输入未通过资格检查，本日没有可用于入场质量判断的概率。',
     model_unavailable:'该信号时点没有兼容且可用的高收益检查点；需要质量过滤时不会自动放行。',
@@ -233,11 +233,12 @@
       if (finite(view.threshold)) paragraphs.push(`冻结门槛 ${probability(view.threshold)}`);
       if (view.reconstructionText) paragraphs.push(view.reconstructionText);
       const identity = item.model_identity || opinion?.model_identity || {};
+      const noHead = identity.verified_frozen_contract === false && !identity.checkpoint && !identity.manifest_sha256 && !identity.model_head && !identity.head;
       const fields = [['model_run_id','运行'],['checkpoint','检查点'],['model_head','评分头'],['available_at','可用'],
         ['train_label_end','训练标签截止'],['actual_training_completed_at','训练完成'],
         ['target_contract_hash','目标契约 SHA256'],['manifest_sha256','模型清单 SHA256'],
         ['feature_schema_hash','输入 schema SHA256'],['source_snapshot_hash','来源快照 SHA256']];
-      const values = fields.map(([field,label]) => [label,field === 'model_head' ? identity.model_head || identity.head : identity[field]]);
+      const values = fields.map(([field,label]) => [label,field === 'model_run_id' && noHead ? null : field === 'model_head' ? identity.model_head || identity.head : identity[field]]);
       const supplied = values.filter(([,value]) => value != null && value !== '');
       paragraphs.push(...supplied.map(([label,value]) => `${label}：${savedText(value)}`));
       const missing = values.filter(([,value]) => value == null || value === '').map(([label]) => label);

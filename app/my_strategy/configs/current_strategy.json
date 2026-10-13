@@ -1,6 +1,6 @@
 {
-  "strategy": "czsc_trend_consensus",
-  "display_name": "趋势共识策略",
+  "strategy": "czsc_trend_consensus_v2",
+  "display_name": "趋势共识策略 · 有效机会重评",
   "model_run_id": null,
   "model_selection": "automatic_qualified_runs",
   "deployment_scope": "portable_research_application",
@@ -12,5 +12,5 @@
     "initial_R": "frozen_stop_reference_half_up_cent_then_sell_fees",
     "initial_R_is_actual_stop_loss": false
   },
-  "notes": "公开程序不绑定本机训练运行；自动选择具备资格的本地模型。新机器无模型时明确未训练；已有模型可用独立配置或显式请求选择，仍按判断日核验历史检查点。"
+  "notes": "公开程序使用有效机会逐日重评契约，不绑定本机训练运行；自动选择具备资格的同族本地模型。无合格模型时明确未评分；已有模型可用独立配置或显式请求选择，仍按判断日核验历史检查点。旧族保存的运行保持对应模型、策略与账户身份。"
 }

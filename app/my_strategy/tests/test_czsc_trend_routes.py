@@ -13,7 +13,7 @@ def routing_root(monkeypatch, tmp_path):
         (path / report).write_text("{}")
     monkeypatch.setattr(routes, "ARTIFACT_RUNS_ROOT", tmp_path)
     monkeypatch.setattr(routes, "CURRENT_PATH", tmp_path / "current.json")
-    monkeypatch.setattr(routes, "_saved_consensus", lambda model_run_id=None: None)
+    monkeypatch.setattr(routes, "_saved_consensus", lambda model_run_id=None, family=STRATEGY_ID: None)
     import my_strategy.web_dashboard.high_return_routes_v4 as old
     monkeypatch.setattr(old, "ARTIFACT_RUNS_ROOT", tmp_path)
     return tmp_path
@@ -50,7 +50,7 @@ def test_default_resolves_frozen_selected_policy_instead_of_provisional_config(r
     routes.CURRENT_PATH.write_text('{"strategy":"czsc_trend_consensus"}')
     saved = strategy_config()["consensus"]
     saved["sell_threshold"] = .45
-    monkeypatch.setattr(routes, "_saved_consensus", lambda model_run_id=None: saved)
+    monkeypatch.setattr(routes, "_saved_consensus", lambda model_run_id=None, family=STRATEGY_ID: saved)
     version, actual = routes.resolve_analysis_consensus(research=True, model_family="high_return")
     assert version == STRATEGY_ID
     assert actual["sell_threshold"] == .45
@@ -61,7 +61,7 @@ def test_partial_live_quality_request_inherits_model_policy_before_runtime(
         routing_root, monkeypatch, model_run_id, version):
     saved = strategy_config()["consensus"]
     saved.update(buy_base_threshold=.4, sell_threshold=.35, margin=.1)
-    monkeypatch.setattr(routes, '_saved_consensus', lambda model_run_id=None: saved)
+    monkeypatch.setattr(routes, '_saved_consensus', lambda model_run_id=None, family=STRATEGY_ID: saved)
     actual_version, cfg = routes.resolve_analysis_consensus(research=True, model_family='high_return',
         model_run_id=model_run_id, version=version, config={'high_return_threshold': .07})
     assert actual_version == STRATEGY_ID

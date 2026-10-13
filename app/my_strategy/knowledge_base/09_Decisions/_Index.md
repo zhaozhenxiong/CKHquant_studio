@@ -19,3 +19,4 @@ updated_at: 2026-10-09T22:37:56+08:00
 - [[09_Decisions/20261012_Trend_Consensus_Delivery_Acceptance|趋势共识策略落地验收]]
 - [[09_Decisions/20261012_Trend_Scoring_And_Unified_Exit_Repair_Plan|趋势概率连续评分与买卖退出流程完整修复计划]]
 - [[09_Decisions/20261012_Trend_Training_And_Broker_Validation_Runbook|趋势共识策略：训练和实际账本验证操作说明]]
+- [[09_Decisions/ADR_20261012_Valid_Opportunity_Reassessment_V2|有效原机会逐日重评与真实持仓持续卖方退出]]

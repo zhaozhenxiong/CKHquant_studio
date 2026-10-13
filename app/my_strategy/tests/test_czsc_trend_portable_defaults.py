@@ -33,8 +33,8 @@ faulthandler.dump_traceback_later(90)
 import pandas as pd
 from fastapi.testclient import TestClient
 
-from my_strategy.services.czsc_trend_contracts import STRATEGY_ID
-from my_strategy.services.czsc_trend_runtime import load_model_run
+from my_strategy.services.czsc_trend_v2_contracts import STRATEGY_ID
+from my_strategy.services.czsc_trend_v2_runtime import load_model_run
 from my_strategy.storage.czsc_results import ResultStore
 from my_strategy.web_dashboard.app import create_app
 from my_strategy.web_dashboard.tasks import TaskManager
@@ -134,7 +134,7 @@ with TestClient(create_app(task_manager=manager)) as client:
 def portable_defaults_probe(tmp_path_factory):
     """Fresh interpreter avoids conftest's deliberate workstation-config veto."""
     current = json.loads(_PUBLIC_CURRENT.read_text(encoding="utf-8"))
-    assert current["strategy"] == "czsc_trend_consensus"
+    assert current["strategy"] == "czsc_trend_consensus_v2"
     assert current["model_run_id"] is None
     assert current["model_selection"] == "automatic_qualified_runs"
     state = tmp_path_factory.mktemp("portable-trend-defaults")
@@ -168,13 +168,13 @@ def _assert_untrained_probabilities(row):
 def test_public_default_analysis_preserves_real_rules_without_fake_model_scores(portable_defaults_probe):
     probe = portable_defaults_probe
     status = probe["status"]
-    assert status["default_consensus_version"] == "czsc_trend_consensus"
+    assert status["default_consensus_version"] == "czsc_trend_consensus_v2"
     assert status["models"] == [] and status["current_model_run_id"] is None
     assert status["model_selection"] == "automatic_qualified_runs"
     result = probe["analysis"]
-    assert result["strategy_version"] == "czsc_trend_consensus"
+    assert result["strategy_version"] == "czsc_trend_consensus_v2"
     assert result["research"]["model_run_id"] is None
-    assert result["request"]["consensus_version"] == "czsc_trend_consensus"
+    assert result["request"]["consensus_version"] == "czsc_trend_consensus_v2"
     assert result["request"]["entry_policy"] == "risk"
     assert result["publication_allowed"] is False
     rows = result["chart_evidence"]["rows"]
@@ -193,7 +193,7 @@ def test_public_default_scan_worker_uses_same_untrained_trend_contract(portable_
     job = portable_defaults_probe["scan"]
     assert job["status"] == "succeeded", job["error"]
     result = job["result"]
-    assert result["strategy_version"] == "czsc_trend_consensus"
+    assert result["strategy_version"] == "czsc_trend_consensus_v2"
     assert result["model_run_id"] is None
     assert result["coverage"] == {"requested": 1, "successful": 1, "success": 1, "failed": 0}
     assert result["publication_allowed"] is False

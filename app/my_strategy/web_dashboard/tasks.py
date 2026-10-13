@@ -161,11 +161,13 @@ class TaskManager:
                 consensus_version=spec.get("consensus_version"), research_config=spec.get("research_config"))
             from my_strategy.web_dashboard.trend_routes import is_trend_run
             if kind == "high_return_backtest" and is_trend_run(spec.get("model_run_id")):
-                from my_strategy.web_dashboard.trend_strategy import backtest_trend_consensus
+                from my_strategy.web_dashboard.trend_routes import strategy_adapter
+                adapter = strategy_adapter(model_run_id=spec.get("model_run_id"),
+                    consensus_version=spec.get("consensus_version"),consensus_config=spec.get("consensus_config"))
                 def trend_progress(stage, current, total):
                     self._check(job_id)
                     self._patch(job_id, progress_detail={"stage": stage, "current": current, "total": total})
-                return backtest_trend_consensus(model_run_id=spec["model_run_id"], symbols=spec.get("symbols") or None,
+                return adapter.backtest_trend_consensus(model_run_id=spec["model_run_id"], symbols=spec.get("symbols") or None,
                     start=spec.get("start") or "2026-01-01", end=spec.get("end"), initial_cash=spec.get("initial_cash", 100000),
                     device=spec.get("device") or "cpu", cpu_workers=spec.get("cpu_workers") or 4,
                     consensus_config=spec.get("consensus_config"), calendar_run_id=spec.get("calendar_run_id"),

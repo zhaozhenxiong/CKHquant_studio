@@ -7,6 +7,7 @@ recursive-include app/my_strategy/configs *.json *.yaml
 recursive-include app/my_strategy/web_dashboard/static *
 recursive-include app/my_strategy/scripts/templates *
 recursive-include app/my_strategy/agent_prompts *
+recursive-include app/my_strategy/docs *.md
 prune app/vendor/czsc/target
 prune app/my_strategy/data
 prune app/my_strategy/artifacts

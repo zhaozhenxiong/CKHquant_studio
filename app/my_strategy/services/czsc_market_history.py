@@ -326,7 +326,8 @@ class MarketHistoryBuilder:
     def finish(self):
         if set(self.symbols) != self.processed:
             raise ValueError("市场历史未覆盖固定股票池的全部成功及失败标的")
-        return {"version": VERSION, "run_id": self.run_id, "strategy_version": STRATEGY_ID,
+        return {"version": VERSION, "run_id": self.run_id,
+            "strategy_version": self.contract.get("strategy_version") or STRATEGY_ID,
             "dates": self.dates, "window_sessions": self.window_sessions, "available_sessions": len(self.dates),
             "window_start": self.dates[0], "window_end": self.dates[-1], "requested_end": self.end,
             "universe_size": len(self.symbols), "classification": self.classification, "contract": self.contract,

@@ -88,6 +88,11 @@ assert(html.includes('历史重建评分'));assert(html.includes('冻结交易�
 assert(html.includes('structure&lt;saved&gt;'));assert(!html.includes('structure<saved>'));
 assert(html.includes('native-structure-v4'));assert(html.includes('行情依赖区间：2026-06-01～2026-09-15'));
 assert(html.includes('规则版本未保存'));assert(html.includes('本日未提供模型身份'));
+const unavailable=ui.agentsHtml({date:row.date,agents:{ma:{kind:'model_probability',status:'unavailable',
+ model_available:false,p_up:null,p_down:null,p_neutral:null,reason_codes:['no_prior_trend_head'],
+ model_identity:{model_run_id:'runs',model_head:null,verified_frozen_contract:false}}}});
+assert(!unavailable.includes('运行：runs'),'an artifact directory is not an available model identity');
+assert(unavailable.includes('本日未提供模型身份'));assert(unavailable.includes('该时点没有更早可用的趋势模型'));
 assert(html.includes('当时有效的事件强度两侧均为0'));assert(html.includes('由价量单独计算'));
 assert(html.includes('最终有效需求 11.87 / 100'));assert(html.includes('最终有效供给 21.22 / 100'));
 assert(html.includes('未评分不代表0%概率')===false);assert(html.includes('因此未进行高收益入场评分'));
