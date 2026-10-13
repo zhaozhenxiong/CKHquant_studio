@@ -150,8 +150,9 @@ def analyze_high_return(*, symbol, start="2026-01-01", end=None, as_of=None, res
                         account_start=None, account_initial_cash=None):
     from my_strategy.web_dashboard.trend_routes import trend_requested
     if trend_requested(model_run_id=model_run_id, consensus_version=consensus_version, consensus_config=consensus_config):
-        from my_strategy.web_dashboard.trend_strategy import analyze_trend_consensus
-        return analyze_trend_consensus(symbol=symbol, start=start, end=end, as_of=as_of,
+        from my_strategy.web_dashboard.trend_routes import strategy_adapter
+        adapter = strategy_adapter(model_run_id=model_run_id, consensus_version=consensus_version, consensus_config=consensus_config)
+        return adapter.analyze_trend_consensus(symbol=symbol, start=start, end=end, as_of=as_of,
             model_run_id=model_run_id, model_fold=model_fold, usage_mode=usage_mode,
             calendar_run_id=calendar_run_id, device=device, config=config, db_path=db_path,
             consensus_config=consensus_config, account_start=account_start, account_initial_cash=account_initial_cash)
@@ -245,8 +246,9 @@ def scan_high_return(*, symbols=None, start="2026-01-01", end=None, model_run_id
                      consensus_version=None, consensus_config=None):
     from my_strategy.web_dashboard.trend_routes import trend_requested
     if trend_requested(model_run_id=model_run_id, consensus_version=consensus_version, consensus_config=consensus_config):
-        from my_strategy.web_dashboard.trend_strategy import scan_trend_consensus
-        return scan_trend_consensus(symbols=symbols, start=start, end=end, model_run_id=model_run_id,
+        from my_strategy.web_dashboard.trend_routes import strategy_adapter
+        adapter = strategy_adapter(model_run_id=model_run_id, consensus_version=consensus_version, consensus_config=consensus_config)
+        return adapter.scan_trend_consensus(symbols=symbols, start=start, end=end, model_run_id=model_run_id,
             model_fold=model_fold, usage_mode=usage_mode, calendar_run_id=calendar_run_id,
             device=device, cpu_workers=cpu_workers, consensus_config=consensus_config,
             progress=progress, check_cancel=check_cancel, run_callback=run_callback)

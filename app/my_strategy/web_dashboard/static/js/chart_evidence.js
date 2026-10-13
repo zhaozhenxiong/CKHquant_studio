@@ -10,9 +10,9 @@
   const ruleScore = (value) => finite(value) && Number(value) >= 0 && Number(value) <= 1 ? `${num(Number(value) * 100)} / 100` : '不可用';
   const supportScore = (value) => finite(value) ? num(Number(value) * 100) : '—';
   const consensusVersion = (row, config = null, version = '') => version || row?.version || config?.version || '';
-  const weightedConsensus = (row, config = null, version = '') => ['czsc_agent_consensus_v2','czsc_agent_consensus_v3','czsc_agent_consensus_v4','czsc_trend_consensus'].includes(consensusVersion(row,config,version));
-  const currentEvidenceConsensus = (row, config = null, version = '') => ['czsc_agent_consensus_v3','czsc_agent_consensus_v4','czsc_trend_consensus'].includes(consensusVersion(row,config,version));
-  const isTrendConsensus = (row, config = null, version = '') => consensusVersion(row,config,version) === 'czsc_trend_consensus';
+  const weightedConsensus = (row, config = null, version = '') => ['czsc_agent_consensus_v2','czsc_agent_consensus_v3','czsc_agent_consensus_v4','czsc_trend_consensus','czsc_trend_consensus_v2'].includes(consensusVersion(row,config,version));
+  const currentEvidenceConsensus = (row, config = null, version = '') => ['czsc_agent_consensus_v3','czsc_agent_consensus_v4','czsc_trend_consensus','czsc_trend_consensus_v2'].includes(consensusVersion(row,config,version));
+  const isTrendConsensus = (row, config = null, version = '') => ['czsc_trend_consensus','czsc_trend_consensus_v2'].includes(consensusVersion(row,config,version));
   function trendProbabilities(item = {}) {
     const present = item.kind === 'trend_probability' || ['p_up','p_down','p_neutral'].some((key) => Object.hasOwn(item,key));
     const available = present && ['p_up','p_down','p_neutral'].every((key) => validProbability(item[key])) && Math.abs(Number(item.p_up)+Number(item.p_down)+Number(item.p_neutral)-1)<1e-5;
@@ -71,6 +71,7 @@
   Object.assign(reasonLabels,{actual_account_stop:'研究账户冻结止损',ordinary_consensus_sell:'连续卖方共识退出',signal_pinned_ma_exit:'入场时固定的持仓退出模型触发',protective_gap_stop:'开盘跳空触发冻结保护退出',forced_next_open_exit_branch:'冻结研究分支强制下一开盘退出',actual_existing_position:'已有持仓，入场质量不适用',no_qualified_direction_candidate:'本日没有合格方向候选',missing_target_market_session:'缺少应有核验交易日行情'});
   Object.assign(reasonLabels,{no_prior_trend_head:'该时点没有更早可用的趋势模型',no_prior_high_return_head:'该时点没有更早可用的高收益模型',high_return_below_threshold:'高收益评分未达到冻结门槛',E0_E1_do_not_read_high_return:'方向判断不读取二阶段高收益评分',high_return_filter_disabled:'质量过滤已关闭，本次未评分'});
   Object.assign(reasonLabels,{holding_confirmed_boundary:'入场计划冻结的确认边界失效',risk_plan_identity_or_time_mismatch:'入场风险计划身份或时点不匹配',risk_plan_unavailable_at_signal:'信号时点没有可用风险计划',risk_plan_frozen_fields_missing:'风险计划缺少冻结字段',risk_plan_outside_frozen_contract:'风险计划参数超出冻结契约'});
+  Object.assign(reasonLabels,{risk_stop_distance_outside_contract:'止损距离不符合冻结风险契约'});
   const reason = (value) => String(value || '该时点没有可用评分').split(/[；;]/).map((part) => reasonLabels[part] || part).join('；');
   const statusLabel = (value) => ({available:'可用',unavailable:'不可用',shadow:'影子观察',no_candidate:'没有候选',candidate:'候选',qualified:'资格通过',rules_only:'规则判断',rule_evidence:'规则证据',input_veto:'输入未通过',actual_holding_required:'需要真实持仓',scored:'已评分',score_unavailable:'评分不可用',rule_triggered:'规则触发',rule_fallback:'规则回退',no_signal:'未触发',input_unavailable:'输入未通过',blocked:'已阻止',active:'已生成',current_supported:'当日复核支持',current_conflict:'当日方向冲突',not_supported:'当日未支持',supported:'当日支持',model_unavailable:'缺兼容模型',input_ineligible:'输入不合格',out_of_scope:'范围外研究',identity_error:'评分身份核验失败',risk_blocked_unscored:'风险阻止 · 未评估'})[value] || String(value || '不可用');
   function rowAt(evidence, day) { return (evidence?.rows || []).find((row) => date(row.date) === date(day)) || null; }
@@ -122,13 +123,25 @@
       riskRejected:own.filter((event) => side(event) === 'BUY' && risk.get(event.event_id)?.risk_reason_codes?.length).length};
   }
   const evaluationLabels = {no_candidate:'无候选 · 未评估',risk_blocked:'风险阻止 · 未评估',input_ineligible:'输入不合格 · 未评估',model_unavailable:'缺兼容模型 · 未评估',scored_rejected:'已评分 · 未过门槛',scored_passed:'已评分 · 通过门槛',identity_error:'评分身份核验失败',actual_existing_position:'持仓中 · 入场不适用',entry_quality_gate_disabled:'质量过滤已关闭，本次未评分'};
+  const evaluationExplanations = {
+    no_candidate:'高收益入场评分只评估该研究账户当日合格的候选；本日没有待评估候选，未评分不代表0%概率。',
+    risk_blocked:'候选先被冻结风险检查阻止，因此未进行高收益入场评分；风险原因保留在当日入场计划中。',
+    input_ineligible:'候选或评分输入未通过资格检查，本日没有可用于入场质量判断的概率。',
+    model_unavailable:'该信号时点没有兼容且可用的高收益检查点；需要质量过滤时不会自动放行。',
+    scored_rejected:'本日已有高收益评分，但未达到当日冻结门槛。',
+    scored_passed:'高收益评分达到冻结门槛；最终账户操作仍由方向、风险与账户约束共同决定。',
+    identity_error:'评分身份或时点核验未通过，已有原始分数不能作为有效入场概率。',
+    actual_existing_position:'该研究账户已持仓，高收益入场评分不适用；持仓退出按该账户独立退出证据判断。',
+    entry_quality_gate_disabled:'本次关闭了高收益质量过滤，因此未进行这项评分。'
+  };
   function highReturnState(item = {}, opinion = null) {
     const explicit = item.evaluation_status || opinion?.evaluation_status;
     if (Object.hasOwn(evaluationLabels,explicit)) return ['scored_passed','scored_rejected'].includes(explicit) && !validProbability(item.probability) ? 'identity_error' : explicit;
     const codes = [item.status,item.reason,...(item.reason_codes || [])].filter(Boolean).join(';');
     if (/entry_quality_gate_disabled|high_return_filter_disabled/.test(codes)) return 'entry_quality_gate_disabled';
+    if (/actual_existing_position/.test(codes)) return 'actual_existing_position';
     if (/candidate_risk_ineligible|risk_blocked|entry_risk_gate_rejected/.test(codes)) return 'risk_blocked';
-    if (/no_candidate/.test(codes)) return 'no_candidate';
+    if (/no_candidate|no_qualified_direction_candidate|no_live_unconsumed_opportunity/.test(codes)) return 'no_candidate';
     if (/input_ineligible|input_veto|feature_ineligible/.test(codes)) return 'input_ineligible';
     if (/identity_error|contract_mismatch|contract_unverified|score_date_mismatch/.test(codes)) return 'identity_error';
     if (/model_unavailable|model_not_available|model_incompatible|no_prior_high_return_head/.test(codes)) return 'model_unavailable';
@@ -167,12 +180,20 @@
         const basis = {confirmed_event:'有效已确认事件',continuous:'当日连续支持',current_snapshot:'当日连续支持',mixed:'连续与事件支持',conflict:'同源冲突弃权'};
         view.reason = `${view.reason}${view.reason ? '；' : ''}贡献依据：${basis[item.support_basis] || item.support_basis || '已保存的最终有效支持'}`;
       }
+      const eventDemand = Object.hasOwn(item,'event_demand') ? item.event_demand : opinion?.event_demand;
+      const eventSupply = Object.hasOwn(item,'event_supply') ? item.event_supply : opinion?.event_supply;
+      view.explanation = item.input_eligible === false || opinion?.status === 'input_ineligible'
+        ? '量价输入未通过核验，缺失或无效的评分保持不可用。'
+        : finite(eventDemand) && finite(eventSupply) && Number(eventDemand) === 0 && Number(eventSupply) === 0
+          ? '当时有效的事件强度两侧均为0；当日连续需求与供给由价量单独计算，仍可为非零。待测试、强度到期或失效的事件不等于有效已确认支持，具体状态可在原始事件明细核对。'
+          : '事件强度反映当时可知且仍有效的量价事件；连续支持由当日价量单独计算。最终有效支持与实际加权贡献以已保存判断为准，规则分不是盈利概率。';
     } else if (key === 'high_return') {
       const status = highReturnState(item,opinion);
       view.evaluationStatus = status;
       view.evaluationLabel = evaluationLabels[status] || statusLabel(item.status);
       view.status = status || view.status;
       view.summary = validProbability(item.probability) ? `高收益区间概率 ${probability(item.probability)} · ${view.evaluationLabel}` : view.evaluationLabel;
+      view.explanation = evaluationExplanations[status] || '该日未提供完整高收益评估状态；概率不可用与0%概率分别展示。';
       if (trendProbabilities(row?.agents?.ma).present || isTrendConsensus(row?.consensus)) {
         if (view.target === 'actual_complete_fee_net_roundtrip_high_return_and_initial_risk') view.target = highReturnTargetText(item.label_target);
         view.pricingNote = '成交采用滑点模拟均价；R按冻结止损参考假设估计。';
@@ -197,6 +218,50 @@
     }
     return view;
   }
+  function agentDetailsHtml(row, key, view, opinion = null) {
+    const item = row?.agents?.[key] || {}, state = opinion?.current_state || item.current_state || {};
+    const model = !['structure','wyckoff'].includes(key) || view.kind === '模型概率';
+    const savedText = (value) => value && typeof value === 'object' ? JSON.stringify(value) : String(value ?? '');
+    let paragraphs = [];
+    if (model) {
+      const targetLabels = {
+        next_verified_open_horizon_direction:'从下一核验开盘起，冻结交易日窗口内的上涨／下跌／中性方向',
+        actual_complete_fee_net_roundtrip_positive:'完整交易费用后获利概率',
+        actual_complete_fee_net_roundtrip_high_return_and_initial_risk:highReturnTargetText(item.label_target)
+      };
+      paragraphs.push(view.target ? `目标：${Object.hasOwn(targetLabels,view.target) ? targetLabels[view.target] : savedText(view.target)}` : '评分目标未保存，无法核对该分数的预测对象。');
+      if (finite(view.threshold)) paragraphs.push(`冻结门槛 ${probability(view.threshold)}`);
+      if (view.reconstructionText) paragraphs.push(view.reconstructionText);
+      const identity = item.model_identity || opinion?.model_identity || {};
+      const noHead = identity.verified_frozen_contract === false && !identity.checkpoint && !identity.manifest_sha256 && !identity.model_head && !identity.head;
+      const fields = [['model_run_id','运行'],['checkpoint','检查点'],['model_head','评分头'],['available_at','可用'],
+        ['train_label_end','训练标签截止'],['actual_training_completed_at','训练完成'],
+        ['target_contract_hash','目标契约 SHA256'],['manifest_sha256','模型清单 SHA256'],
+        ['feature_schema_hash','输入 schema SHA256'],['source_snapshot_hash','来源快照 SHA256']];
+      const values = fields.map(([field,label]) => [label,field === 'model_run_id' && noHead ? null : field === 'model_head' ? identity.model_head || identity.head : identity[field]]);
+      const supplied = values.filter(([,value]) => value != null && value !== '');
+      paragraphs.push(...supplied.map(([label,value]) => `${label}：${savedText(value)}`));
+      const missing = values.filter(([,value]) => value == null || value === '').map(([label]) => label);
+      if (missing.length) paragraphs.push(supplied.length ? `未提供：${missing.join('、')}；这些身份字段不能从概率反推。` : `本日未提供模型身份；${view.reason || view.evaluationLabel || '该日期未保存模型评分及谱系'}。`);
+    } else {
+      paragraphs.push(`规则口径：${key === 'structure' ? '当时已确认结构的支撑、阻力与买卖方向事实；入场风险资格另行核验。' : '当时因果量价事件与当日连续需求／供给强度；规则分不是盈利概率。'}`);
+      const ruleIdentity = item.rule_identity || {};
+      const ruleVersion = ruleIdentity.version || item.version;
+      const snapshot = ruleIdentity.snapshot_id || item.snapshot_id || item.source_id;
+      const observedAt = ruleIdentity.available_at || item.available_at || state.snapshot_at || item.snapshot_at;
+      paragraphs.push(`评分日期：${date(item.date || row?.date) || '未提供'}`);
+      paragraphs.push(ruleVersion ? `规则版本：${savedText(ruleVersion)}` : '规则版本未保存，无法核对该规则快照的完整版本。');
+      paragraphs.push(snapshot ? `证据快照标识：${savedText(snapshot)}` : '证据快照标识未保存，不能补造模型身份。');
+      paragraphs.push(observedAt ? `快照可用：${savedText(observedAt)}` : '快照可用时间未提供。');
+      const start = ruleIdentity.dependency_start || item.dependency_start || state.dependency_start;
+      const end = ruleIdentity.dependency_end || item.dependency_end || state.dependency_end;
+      paragraphs.push(start && end ? `行情依赖区间：${date(start)}～${date(end)}` : '行情依赖区间未随本日规则证据提供。');
+      if (item.input_eligible === true) paragraphs.push('本日规则输入核验：通过。');
+      else if (item.input_eligible === false) paragraphs.push(`本日规则输入核验：未通过；${view.reason || '具体资格原因未提供'}。`);
+      else paragraphs.push('本日规则输入核验状态未提供。');
+    }
+    return `<details open data-agent-details="${esc(key)}"><summary>${model ? '评分目标与模型身份' : '规则口径与数据身份'}</summary>${paragraphs.map((text) => `<p>${esc(text)}</p>`).join('')}</details>`;
+  }
   function agentsHtml(row, compact = false, consensus = null, config = null, version = '') {
     return `<div class="agent-evidence-grid">${Object.keys(labels).map((key) => {
       const opinion = consensus?.agents?.[key];
@@ -208,7 +273,7 @@
         view.status = ['BUY','SELL'].includes(judgment) ? 'current_supported' : judgment === 'CONFLICT' ? 'current_conflict' : !judgment && opinion?.status === 'scored' ? 'scored' : opinion?.status === 'unavailable' ? 'unavailable' : 'not_supported';
         view.reason = `${facts.riskRejected ? `当日方向事实含 ${facts.riskRejected} 条风险未通过的买入候选；` : '方向事实与原始入场资格分别展示；'}当日结构意见 ${sourceOpinionText(opinion)} · 已按当日状态复核 ${opinion?.origin_event_ids?.length || 0} 条原始来源（含有效历史证据）。新入场仍需通过风险与高收益闸门。`;
       }
-      return `<section class="agent-evidence"><div class="agent-heading"><strong>${esc(view.label)}</strong><span>${esc(view.kind)} · ${esc(view.evaluationLabel || statusLabel(view.status))}</span></div><p class="agent-score">${esc(view.summary)}</p>${view.secondary ? `<p class="subtle">${esc(view.secondary)}</p>` : ''}${opinion ? opinionHtml(opinion,key,{decision:consensus,config,version}) : ''}<p class="subtle">${esc(view.reason)}</p>${view.pricingNote ? `<p class="subtle">${esc(view.pricingNote)}</p>` : ''}${!compact ? `${view.pointTypes ? `<p>${esc(view.pointTypes)}</p>` : ''}${view.exit ? `<p class="subtle">${esc(view.exit)}</p>` : ''}<details><summary>评分目标与模型身份</summary>${view.target ? `<p>目标：${esc(view.target)}</p>` : ''}${finite(view.threshold) ? `<p>冻结门槛 ${esc(probability(view.threshold))}</p>` : ''}${view.reconstructionText ? `<p>${esc(view.reconstructionText)}</p>` : ''}${view.identityText ? `<p>${esc(view.identityText)}</p>` : ''}</details>` : ''}</section>`;
+      return `<section class="agent-evidence"><div class="agent-heading"><strong>${esc(view.label)}</strong><span>${esc(view.kind)} · ${esc(view.evaluationLabel || statusLabel(view.status))}</span></div><p class="agent-score">${esc(view.summary)}</p>${view.secondary ? `<p class="subtle">${esc(view.secondary)}</p>` : ''}${opinion ? opinionHtml(opinion,key,{decision:consensus,config,version}) : ''}<p class="subtle">${esc(view.reason)}</p>${view.explanation ? `<p class="subtle">${esc(view.explanation)}</p>` : ''}${view.pricingNote ? `<p class="subtle">${esc(view.pricingNote)}</p>` : ''}${!compact ? `${view.pointTypes ? `<p>${esc(view.pointTypes)}</p>` : ''}${view.exit ? `<p class="subtle">${esc(view.exit)}</p>` : ''}${agentDetailsHtml(row,key,view,opinion)}` : ''}</section>`;
     }).join('')}</div>`;
   }
   function agentOverviewHtml(row, consensus = null, config = null) {
@@ -391,9 +456,18 @@
     const dailyLabel = selectedGroup?.kind === 'wyckoff' ? '日线事件已可知' : '日线已确认';
     const periodText = formingProjection ? ` · ${dailyLabel}／周期形成中` : frequency !== '日线' && selectedGroup?.daily_confirmed ? ` · ${dailyLabel}／周期闭合 ${selectedGroup.closed_at || '时间待核验'}` : groups.some((group) => group.closed_at) ? ` · 周期闭合 ${groups.find((group) => group.closed_at)?.closed_at}` : '';
     const anchors = reference?.anchor_dates?.length ? `<p class="subtle">原始结构／事件锚点 ${esc(reference.anchor_dates.join('、'))} · 锚点不替代信号可知日</p>` : '';
-    const badges = visible.map((group) => `<span class="badge ${group.action === 'BUY' ? 'buy' : 'sell'}">${group.kind === 'wyckoff' ? `W ${esc(group.event_type)}${group.confirmed ? '确认' : '待测试'}` : `${group.kind === 'execution' ? '实际成交 ' : group.diagnostic ? '方向诊断 ' : ''}${group.action === 'BUY' ? 'B' : 'S'}`}</span>`).join('');
-    const wyckoffEntries = entries.filter((entry) => entry.row?.source === 'wyckoff' && (entry.row?.event || entry.row?.event_type));
-    const wyckoffHtml = wyckoffEntries.length ? `<section class="wyckoff-event-details"><strong>原始量价事件 ${wyckoffEntries.length} 条</strong>${wyckoffEntries.map((entry) => `<p>W ${esc(entry.row.event || entry.row.event_type)} · ${entry.row.confirmed === true ? '已确认' : '待测试'}<br>原观察 ${esc(entry.row.origin_observed_at || entry.row.observed_at || entry.original_date)} · 首次可用 ${esc(entry.first_available_at || entry.row.available_at)}${entry.row.reason_codes?.length ? `<br>${esc(entry.row.reason_codes.map(reason).join('；'))}` : ''}</p>`).join('')}<p class="subtle">量价事件与最终 B/S 分别记录；周期内日线证据已可知，形成中周/月线仍按其闭合规则参与原生判断。</p></section>` : '';
+    const badges = visible.map((group) => {
+      const amount = group.event_count || group.entries?.length || 1;
+      const wyckoff = amount === 1 ? `W ${esc(group.event_type)}${group.confirmed ? '确认' : '待测试'}`
+        : `量价${group.action === 'BUY' ? '需求' : '供给'} ×${amount} · 已确认 ${group.confirmed_count ?? group.entries?.filter((entry) => entry.row?.confirmed === true).length ?? 0}／待测试 ${group.pending_count ?? group.entries?.filter((entry) => entry.row?.confirmed !== true).length ?? 0}`;
+      return `<span class="badge ${group.action === 'BUY' ? 'buy' : 'sell'}">${group.kind === 'wyckoff' ? wyckoff : `${group.kind === 'execution' ? '实际成交 ' : group.diagnostic ? '方向诊断 ' : ''}${group.action === 'BUY' ? 'B' : 'S'}`}</span>`;
+    }).join('');
+    // Show every constituent event of the displayed candle. The date selector
+    // above still controls the independent daily score/account snapshot.
+    const wyckoffEntries = visible.flatMap((group) => group.kind === 'wyckoff' ? group.entries || [] : [])
+      .filter((entry) => entry.row?.source === 'wyckoff' && (entry.row?.event || entry.row?.event_type))
+      .sort((a,b) => String(a.first_available_at || a.event_date).localeCompare(String(b.first_available_at || b.event_date)) || String(a.event_id).localeCompare(String(b.event_id)));
+    const wyckoffHtml = wyckoffEntries.length ? `<section class="wyckoff-event-details"><strong>本根K线原始量价事件 ${wyckoffEntries.length} 条</strong>${wyckoffEntries.map((entry) => `<p>W ${esc(entry.row.event || entry.row.event_type)} · ${entry.row.side === 'SELL' ? '供给' : '需求'} · ${entry.row.confirmed === true ? '已确认' : '待测试'}<br>原观察 ${esc(entry.row.origin_observed_at || entry.row.observed_at || entry.original_date)} · 首次可用 ${esc(entry.first_available_at || entry.row.available_at)}${entry.row.event_id ? `<br>事件标识 ${esc(entry.row.event_id)}` : ''}${finite(entry.row.invalidation_price) ? `<br>原冻结失效边界 ${esc(num(entry.row.invalidation_price))} 元` : ''}${entry.row.reason_codes?.length ? `<br>${esc(entry.row.reason_codes.map(reason).join('；'))}` : ''}</p>`).join('')}<p class="subtle">● 需求事件 · ■ 供给事件；主图数字为同方向事件数量，包含已确认和待测试。量价事件与最终 B/S 分别记录；周期内日线证据已可知，形成中周/月线仍按其闭合规则参与原生判断。上方日期选择只切换当日评分与账户状态。</p></section>` : '';
     return `<header class="chart-popup-heading"><div><strong>${esc(frequency)} ${esc(barDate)}</strong><p>${badges || (inspection ? 'K线评分查看' : '最终判断')} · 点击查看</p></div><button type="button" data-chart-evidence-close aria-label="关闭图表判断">×</button></header><p class="evidence-original-date">${inspection ? '评分日期' : '信号可知日'} ${esc(selected)}${esc(periodText)}</p>${agentOverviewHtml(row,decision,consensus?.config)}${accountActionHtml(row)}${dates.length > 1 || dates.length && frequency !== '日线' ? `<div class="evidence-date-list" aria-label="${inspection ? '周期内评分日期' : '周期内信号与事件可知日期'}">${dates.map((item) => `<button type="button" data-evidence-date="${esc(item)}" aria-pressed="${item === selected}">${esc(item)}</button>`).join('')}</div><p class="subtle">${inspection ? '按核验交易日查看当日评分' : '按首次可知日期查看当日判断'}；点击日期同步对应日线筹码。</p>` : ''}${frequency !== '日线' && !selectedDate ? `<p class="subtle">筹码按所指周期截至 ${esc(profileAsOf || barDate)}；以下判断保留信号可知日。</p>` : ''}${reference?.available_at ? `<p class="subtle">信号首次可用 ${esc(reference.available_at)}</p>` : ''}${anchors}${wyckoffHtml}${consensusHtml(decision,consensus?.config,consensus?.version)}${referenceHtml(row)}${agentsHtml(row,false,decision,consensus?.config,consensus?.version)}${riskHtml(row?.raw_risk_plan)}<div class="evidence-actions"><button type="button" data-evidence-locate="${esc(selected)}">定位原始证据</button><button type="button" data-evidence-replay="${esc(selected)}">按此日重新判断</button></div>${rawEventsHtml(row,entries,consensus?.version || consensus?.config?.version)}`;
   }
   function historyPage(rows, requestedPage = 0, pageSize = 20) {

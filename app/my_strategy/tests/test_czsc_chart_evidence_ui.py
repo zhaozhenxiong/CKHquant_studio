@@ -131,13 +131,13 @@ assert(!element('indicator-chips').textContent.includes('截至 '+dates[2]));
 // changes indicators; clicking a pending event opens its original evidence.
 state.analysis.wyckoff_events=[{event_id:'pending-SOS',event:'SOS',symbol:'600027.SH',confirmed:false,status:'pending_test',observed_at:dates[1]+'T15:00:00+08:00',available_at:dates[1]+'T15:00:00+08:00'}];
 renderAnalysis(false);hover(dates[1]);assert(element('chart-evidence-popup').hidden);
-assert(firstSeries.markers.some(marker=>marker.text==='W SOS待测试'));
+assert(firstSeries.markers.some(marker=>marker.id.startsWith('khq-wyckoff:') && marker.text==='' && marker.shape==='circle'));
 click({time:dates[1],point:{x:400,y:300}});
 assert(!element('chart-evidence-popup').hidden);assert(element('chart-evidence-popup').innerHTML.includes('W SOS待测试'));
 assert(element('chart-evidence-popup').innerHTML.includes('原观察 '+dates[1]+'T15:00:00+08:00'));
 assert(!element('chart-evidence-popup').innerHTML.includes('>B</span>'));
 updateChartSelection('clear');element('layer-wyckoff').checked=false;renderAnalysis(false);
-assert(!firstSeries.markers.some(marker=>marker.text.startsWith('W ')));
+assert(!firstSeries.markers.some(marker=>marker.id?.startsWith('khq-wyckoff:')));
 click({time:dates[1],point:{x:400,y:300}});assert(element('chart-evidence-popup').hidden);
 updateChartSelection('clear');element('layer-wyckoff').checked=true;state.analysis.wyckoff_events=[];
 // A higher-period selection can explicitly select its original daily snapshot.

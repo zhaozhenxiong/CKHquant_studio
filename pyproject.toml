@@ -19,4 +19,4 @@ include-package-data = false
 packages = ["my_strategy", "my_strategy.adapters", "my_strategy.core", "my_strategy.data_manager", "my_strategy.execution", "my_strategy.scripts", "my_strategy.services", "my_strategy.storage", "my_strategy.validation", "my_strategy.web_dashboard", "my_strategy.web_dashboard.scripts"]
 
 [tool.setuptools.package-data]
-my_strategy = ["configs/*.json", "configs/*.yaml", "configs/cost/*.yaml", "web_dashboard/static/*", "web_dashboard/static/**/*", "scripts/templates/*", "agent_prompts/*"]
+my_strategy = ["configs/*.json", "configs/*.yaml", "configs/cost/*.yaml", "web_dashboard/static/*", "web_dashboard/static/**/*", "scripts/templates/*", "agent_prompts/*", "docs/*.md"]

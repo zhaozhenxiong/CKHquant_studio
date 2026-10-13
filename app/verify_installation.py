@@ -142,13 +142,13 @@ def fixture_calendar(state: Path, dates: list[str]) -> str:
 
 def verify_no_model_trend(base: str, calendar_id: str, end: str) -> dict:
     status = request(base, "/api/research/high-return-status")
-    if (status.get("default_consensus_version") != "czsc_trend_consensus" or status.get("current_model_run_id") is not None
+    if (status.get("default_consensus_version") != "czsc_trend_consensus_v2" or status.get("current_model_run_id") is not None
             or status.get("models") or status.get("model_selection") != "automatic_qualified_runs"):
         raise RuntimeError("Public defaults must select trend consensus without a workstation model")
     result = request(base, "/api/analysis", "POST", {"symbol": "000001.SZ", "start": "2024-01-01", "end": end,
         "research": True, "model_family": "high_return", "calendar_run_id": calendar_id, "device": "cpu"})
     rows = result.get("chart_evidence", {}).get("rows", [])
-    if not rows or result.get("strategy_version") != "czsc_trend_consensus" or result.get("research", {}).get("model_run_id") is not None:
+    if not rows or result.get("strategy_version") != "czsc_trend_consensus_v2" or result.get("research", {}).get("model_run_id") is not None:
         raise RuntimeError("Untrained installation failed its actual default trend analysis")
     for row in rows:
         agent = row["agents"]["ma"]

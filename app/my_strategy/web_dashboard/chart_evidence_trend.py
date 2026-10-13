@@ -8,6 +8,11 @@ from my_strategy.services.czsc_trend_contracts import STRATEGY_ID, DISPLAY_NAME
 
 
 def decorate_analysis(result, *, raw, overlay, start=None):
+    from my_strategy.web_dashboard.trend_routes import TREND_FAMILIES, family_module
+    family = overlay.get("strategy_version", STRATEGY_ID)
+    if family not in TREND_FAMILIES:
+        raise ValueError("图表账户版本未登记")
+    display_name = family_module(family, "contracts").DISPLAY_NAME
     out = copy.deepcopy(result)
     visible = {str(b.get("date") or b.get("time"))[:10] for b in result["frequencies"]["日线"]["bars"]}
     observed = {str(r["date"])[:10]: r for r in raw.to_dict("records")}
@@ -68,7 +73,7 @@ def decorate_analysis(result, *, raw, overlay, start=None):
         day = str(event.get("first_available_at") or event.get("available_at"))[:10]
         event.update(reference_price=float(observed[day]["close"]), reference_price_date=day,
             reference_price_source="signal_day_close", reference_price_basis=basis)
-    out.update(display_name=DISPLAY_NAME, strategy_version=STRATEGY_ID, research_version=STRATEGY_ID,
+    out.update(display_name=display_name, strategy_version=family, research_version=family,
         model_family="high_return", trend_consensus=direction, consensus_decisions=direction,
         account_actions=account, wyckoff_events=wvisible, publication_allowed=False,
         model_gate=overlay.get("model_gate", {"passed": False}), compute_info=overlay.get("compute_info", {}),
@@ -77,14 +82,14 @@ def decorate_analysis(result, *, raw, overlay, start=None):
         "action": str(e.get("side", "")).lower(), "signal": e.get("event_type", "来源候选"),
         "reason": "原始方向证据；账户B/S由趋势共识策略和持仓退出政策生成"}
         for row in rows for e in row.get("events", [])]
-    out["chart_evidence"] = {"version": "czsc_trend_chart_evidence", "display_name": DISPLAY_NAME,
+    out["chart_evidence"] = {"version": "czsc_trend_chart_evidence", "display_name": display_name,
         "rows": rows, "statistics": {"visible_window": {"bars": len(rows), "source_events": len(out["events"]),
             "wyckoff_events": len(wvisible), "final_points": len(visible_points),
             "direction_points": len(direction["events"]), "broker_fills": len(account.get("ledger", []))},
             "full_prefix": {"bars": len(overlay["rows"]), "source_events": sum(len(r.get("events", [])) for r in overlay["rows"]),
                 "wyckoff_events": len(wfull), "final_points": len(all_points)}}}
-    out["research"] = {**out.get("research", {}), "model_family": "high_return", "display_name": DISPLAY_NAME,
-        "strategy_version": STRATEGY_ID, "account_context": copy.deepcopy(account["context"]),
+    out["research"] = {**out.get("research", {}), "model_family": "high_return", "display_name": display_name,
+        "strategy_version": family, "account_context": copy.deepcopy(account["context"]),
         "usage_mode": overlay.get("usage_mode", "historical"), "publication_allowed": False,
         "pricing_assumptions": copy.deepcopy(overlay.get("pricing_assumptions", {})),
         "high_return_target": copy.deepcopy(overlay.get("high_return_target", {}))}

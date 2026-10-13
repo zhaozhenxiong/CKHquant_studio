@@ -30,8 +30,10 @@ const events=[
 const args={events,bars:['2026-06-02','2026-06-04','2026-06-05'].map(time=>({time})),asOf:'2026-06-04'};
 const out=w.buildDetailed(args);
 assert.equal(out.eventCount,2);assert.equal(out.markers.length,2);
-assert(out.markers.find(item=>item.time==='2026-06-02').text.includes('SOS待测试'));
-assert(out.markers.find(item=>item.time==='2026-06-04').text.includes('LPS确认'));
+assert.equal(out.markers.find(item=>item.time==='2026-06-02').shape,'circle');
+assert.equal(out.groups.find(item=>item.bar_date==='2026-06-02').pending_count,1);
+assert.equal(out.markers.find(item=>item.time==='2026-06-04').shape,'circle');
+assert.equal(out.groups.find(item=>item.bar_date==='2026-06-04').confirmed_count,1);
 assert.equal(out.groups.find(item=>item.event_type==='LPS').entries[0].row.first_available_at,'2026-06-04T15:00:00+08:00');
 assert.equal(w.buildDetailed({...args,events:[]}).markers.length,0);
 ''')
@@ -50,10 +52,11 @@ for(const frequency of ['周线','月线']) {
  const supply=out.groups.find(item=>item.event_type==='Upthrust');
  assert.equal(supply.period_status,'forming');assert.equal(supply.event_count,2);
  assert.deepEqual(supply.entries.map(item=>item.event_date),['2026-06-23','2026-06-24']);
- assert(out.markers.find(item=>item.id===supply.id).text.includes('×2'));
+ assert.equal(out.markers.find(item=>item.id===supply.id).text,'2');
+ assert.equal(out.markers.find(item=>item.id===supply.id).shape,'square');
  const ui=require(path.join(process.argv[1],'chart_evidence.js'));
  const popup=ui.popupHtml({groups:[supply],barDate:'2026-06-25',frequency,evidence:{rows:[]}});
- assert(popup.includes('W Upthrust确认'));assert(popup.includes('日线事件已可知／周期形成中'));
+ assert(popup.includes('Upthrust'));assert(popup.includes('确认'));assert(popup.includes('one'));assert(popup.includes('two'));assert(popup.includes('日线事件已可知／周期形成中'));
  assert(popup.includes('data-evidence-date="2026-06-23"'));assert(popup.includes('原观察 2026-06-24T15:00:00+08:00'));
  assert(!popup.includes('>S</span>'));assert.equal(ui.referenceSelection({groups:[supply],barDate:'2026-06-25',evidence:{rows:[]}}),null);
 }
