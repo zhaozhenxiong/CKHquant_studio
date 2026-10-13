@@ -83,7 +83,7 @@ path = sys.argv[1]
 driver = runpy.run_path(path, run_name='khquant_utf8_verifier')
 assert sys.stdout.encoding.lower() == 'cp1252', 'import must not reconfigure streams'
 main = driver['main']
-main.__globals__['verify'] = lambda device, output: {
+main.__globals__['verify'] = lambda device, output, **expected_identity: {
     'status': 'passed', '说明': '安装验证中文输出',
     'path': 'C:/行情数据/研究模型',
 }
@@ -99,7 +99,7 @@ main()
 
 
 @pytest.mark.parametrize("arguments, expected", [
-    (["--help"], "结构研究"),
+    (["--help"], "当前趋势共识策略"),
     (["analyze", "--help"], "计算设备"),
 ])
 def test_real_cli_help_is_utf8_under_cp1252(tmp_path, arguments, expected):

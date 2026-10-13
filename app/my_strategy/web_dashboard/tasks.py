@@ -34,6 +34,9 @@ class TaskManager:
         self.db_path = db_path or METADATA_ROOT / "czsc_tasks.db"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.results = results or ResultStore()
+        from my_strategy.services.model_training_center import TrainingCenter
+        self.training = TrainingCenter(store=self.results, metadata_root=self.db_path.parent,
+            personal_db=self.db_path.parent / "personal_portfolio.db")
         self._lock = threading.RLock()
         self._cancel: dict[str, threading.Event] = {}
         self._closed = False
@@ -44,6 +47,7 @@ class TaskManager:
             conn.commit()
         with closing(sqlite3.connect(self.db_path)) as conn:
             active = conn.execute("SELECT payload FROM czsc_tasks WHERE status IN ('queued','running','cancelling')").fetchall()
+        self.training.holding_guard = self._active_account_reasons
         for payload, in active:
             job = json.loads(payload)
             try:
@@ -53,6 +57,14 @@ class TaskManager:
                 live = False
             if not live:
                 self._patch(job["job_id"], status="failed", error="服务重启中断了任务，请重新提交。")
+
+    def _active_account_reasons(self):
+        """A running account must finish under its frozen model selection."""
+        with closing(sqlite3.connect(self.db_path, timeout=30)) as conn:
+            rows = conn.execute("SELECT payload FROM czsc_tasks WHERE status IN ('queued','running','cancelling')").fetchall()
+        jobs = [json.loads(row[0]) for row in rows]
+        active = [job for job in jobs if job.get('kind') in {'scan', 'backtest'}]
+        return [f"账户任务 {job['job_id']} 正在运行，完成或取消后才能切换模型" for job in active]
 
     def _write(self, job: dict[str, Any]) -> None:
         with closing(sqlite3.connect(self.db_path, timeout=30)) as conn:
@@ -83,7 +95,7 @@ class TaskManager:
             return job
 
     def submit(self, kind: str, spec: dict[str, Any]) -> dict[str, Any]:
-        if kind not in {"scan", "backtest", "update", "research_train", "dual_research_train", "wyckoff_research_train", "high_return_points_build", "high_return_episodes_build", "high_return_train", "high_return_backtest"}:
+        if kind not in {"scan", "backtest", "update", "model_training", "model_validation"}:
             raise ValueError("任务类型不受支持")
         with self._lock:
             if self._closed:
@@ -138,7 +150,7 @@ class TaskManager:
                 self._cancel.pop(job_id, None)
 
     def _finish_research_run(self, job: dict[str, Any]) -> None:
-        if not job.get("run_id") or not (job["kind"] in {"research_train", "dual_research_train", "wyckoff_research_train", "high_return_points_build", "high_return_episodes_build", "high_return_train", "high_return_backtest"} or job["spec"].get("research")):
+        if not job.get("run_id") or not (job["kind"] in {"model_training", "model_validation"} or job["spec"].get("research")):
             return
         path = (self.results.runs_root / job["run_id"] / "metadata.json").resolve()
         if not path.is_relative_to(self.results.runs_root.resolve()):
@@ -155,122 +167,28 @@ class TaskManager:
         from my_strategy.services.czsc_analysis import strategy_config
         if kind == "update":
             return self._update(job_id, spec)
-        if kind in {"high_return_points_build", "high_return_episodes_build", "high_return_train", "high_return_backtest"}:
-            from my_strategy.web_dashboard.trend_routes import reject_legacy_operation as reject_native_legacy_operation
-            reject_native_legacy_operation(kind, run_id=spec.get("model_run_id") or spec.get("source_training_run_id"),
-                consensus_version=spec.get("consensus_version"), research_config=spec.get("research_config"))
-            from my_strategy.web_dashboard.trend_routes import is_trend_run
-            if kind == "high_return_backtest" and is_trend_run(spec.get("model_run_id")):
-                from my_strategy.web_dashboard.trend_routes import strategy_adapter
-                adapter = strategy_adapter(model_run_id=spec.get("model_run_id"),
-                    consensus_version=spec.get("consensus_version"),consensus_config=spec.get("consensus_config"))
-                def trend_progress(stage, current, total):
-                    self._check(job_id)
-                    self._patch(job_id, progress_detail={"stage": stage, "current": current, "total": total})
-                return adapter.backtest_trend_consensus(model_run_id=spec["model_run_id"], symbols=spec.get("symbols") or None,
-                    start=spec.get("start") or "2026-01-01", end=spec.get("end"), initial_cash=spec.get("initial_cash", 100000),
-                    device=spec.get("device") or "cpu", cpu_workers=spec.get("cpu_workers") or 4,
-                    consensus_config=spec.get("consensus_config"), calendar_run_id=spec.get("calendar_run_id"),
-                    progress=trend_progress, check_cancel=lambda: self._check(job_id),
-                    run_callback=lambda run_id: self._patch(job_id, run_id=run_id))
-            from my_strategy.services.czsc_high_return_research import (
-                build_high_return_artifacts, train_high_return_research, backtest_high_return,
-            )
-            def high_return_progress(stage, current, total, failed=0):
-                self._check(job_id)
-                self._patch(job_id, progress_detail={"stage": stage, "current": current, "total": total, "failed": failed})
-            callbacks = {"progress": high_return_progress, "check_cancel": lambda: self._check(job_id),
-                         "run_callback": lambda run_id: self._patch(job_id, run_id=run_id)}
-            common = {"symbols": spec.get("symbols") or None, "end": spec.get("end"),
-                      "cpu_workers": spec.get("cpu_workers") or 4, "config": spec.get("research_config"), **callbacks}
-            if kind == "high_return_backtest":
-                if not spec.get("model_run_id"):
-                    raise ValueError("离线高收益策略回放需要明确模型运行")
-                return backtest_high_return(**common, model_run_id=spec["model_run_id"],
-                                            start=spec.get("start"), device=spec.get("device") or "cpu")
-            if not spec.get("source_training_run_id"):
-                raise ValueError("高收益研究需要明确冻结来源运行")
-            common["source_training_run_id"] = spec["source_training_run_id"]
-            if kind == "high_return_train":
-                return train_high_return_research(**common, device=spec.get("device") or "auto")
-            return build_high_return_artifacts(**common, stage="points" if kind == "high_return_points_build" else "episodes")
-        if spec.get("research") and spec.get("model_family") == "high_return":
-            if kind == "backtest":
-                raise ValueError("高收益策略须使用显式离线 high_return_backtest 任务并选择模型运行")
-            from my_strategy.web_dashboard.high_return import scan_high_return
-            def high_return_scan_progress(stage, current, total, failed=0):
-                self._check(job_id)
-                self._patch(job_id, progress=min(95, current / total * 95) if total else 0,
-                            progress_detail={"stage": stage, "current": current, "total": total, "failed": failed})
-            return scan_high_return(**{key: spec.get(key) for key in
-                ("symbols", "start", "end", "model_run_id", "model_fold", "usage_mode", "calendar_run_id", "device", "cpu_workers", "consensus_version", "consensus_config")},
-                progress=high_return_scan_progress, check_cancel=lambda: self._check(job_id),
-                run_callback=lambda run_id: self._patch(job_id, run_id=run_id))
-        if kind == "wyckoff_research_train":
-            from my_strategy.services.czsc_wyckoff_research import train_wyckoff_research
-            def wyckoff_progress(stage, current, total, failed):
-                self._check(job_id)
-                self._patch(job_id, progress_detail={"stage": stage, "current": current, "total": total, "failed": failed})
-            source = spec.get("source_training_run_id")
-            if not source:
-                raise ValueError("威科夫研究需要明确的冻结来源运行")
-            return train_wyckoff_research(source_training_run_id=source, end=spec.get("end"),
-                symbols=spec.get("symbols") or None, device=spec.get("device") or "auto",
-                cpu_workers=spec.get("cpu_workers") or 4, progress=wyckoff_progress,
-                check_cancel=lambda: self._check(job_id), run_callback=lambda run_id: self._patch(job_id, run_id=run_id))
-        if kind == "dual_research_train":
-            from my_strategy.services.czsc_dual_research import train_dual_research
-            def dual_progress(stage, current, total, failed):
-                self._check(job_id)
-                self._patch(job_id, progress_detail={"stage": stage, "current": current, "total": total, "failed": failed})
-            source = spec.get("source_training_run_id")
-            if not source:
-                raise ValueError("双专家研究需要明确的冻结来源运行")
-            return train_dual_research(source_training_run_id=source, end=spec.get("end"),
-                symbols=spec.get("symbols") or None, device=spec.get("device") or "auto",
-                cpu_workers=spec.get("cpu_workers") or 4, progress=dual_progress,
-                check_cancel=lambda: self._check(job_id), run_callback=lambda run_id: self._patch(job_id, run_id=run_id))
-        if kind == "research_train" or spec.get("research"):
-            from my_strategy.services.czsc_research import train_research, scan_research, backtest_research, research_status
-            last_notice, last_progress, last_stage = 0.0, 0.0, None
-            def research_progress(stage, current, total, failed):
-                nonlocal last_notice, last_progress, last_stage
-                self._check(job_id)
-                if time.monotonic() - last_notice < .25 and current != total and stage == last_stage:
-                    return
-                last_notice = time.monotonic()
-                last_stage = stage
-                updates = {"progress_detail": {"stage": stage, "current": current, "total": total, "failed": failed}}
-                if kind == "scan":
-                    last_progress = max(last_progress, min(95, current / total * 95 if total else 0))
-                    updates["progress"] = last_progress
-                    if stage.startswith("CPU") or stage == "多角色证据扫描":
-                        updates["progress_detail"]["device"] = "cpu"
-                    elif stage.startswith("GPU"):
-                        updates["progress_detail"]["device"] = capability["selected_device"]
-                self._patch(job_id, **updates)
-            from my_strategy.services.czsc_compute import compute_status
-            capability = compute_status(spec.get("device"))
-            if not capability["available"]:
-                raise RuntimeError(capability["fallback_reason"] or "研究设备不可用")
-            common = {"end": spec.get("end") or latest_market_date(), "symbols": spec.get("symbols") or [item["symbol"] for item in list_symbols()],
-                      "device": spec.get("device"), "progress": research_progress, "check_cancel": lambda: self._check(job_id),
-                      "run_callback": lambda run_id: self._patch(job_id, run_id=run_id)}
-            if kind == "research_train":
-                calendar_id = spec.get("calendar_run_id") or research_status()["calendar_run_id"]
-                if not calendar_id:
-                    raise ValueError("尚无已核验交易日历，先完成研究数据核验")
-                return train_research(**common, calendar_run_id=calendar_id, cpu_workers=spec.get("cpu_workers") or 4)
-            routed = {key: spec.get(key) for key in ("model_run_id", "model_fold", "calendar_run_id")}
-            routed.update(usage_mode=spec.get("usage_mode", "historical"), model_policy=spec.get("model_policy", "auto"),
-                          model_family=spec.get("model_family", "ma_trend"),
-                          cpu_workers=spec.get("cpu_workers"), batch_size=spec.get("batch_size"),
-                          entry_policy=spec.get("entry_policy", "legacy"))
-            if kind == "scan":
-                from my_strategy.storage.personal_portfolio import PersonalStore
-                held = {item["symbol"] for item in PersonalStore().holdings()["items"]}
-                return scan_research(**common, held_symbols=held, start=spec.get("start"), **routed)
-            return backtest_research(**common, start=spec["start"], initial_cash=spec.get("initial_cash", 100000), **routed)
+        def report_progress(stage, current=0, total=0, failed=0, **details):
+            self._check(job_id)
+            previous = self.get(job_id).get("progress", 0)
+            overall = 0 if kind in {"model_training", "model_validation"} else max(previous, min(95, current / total * 95) if total else previous)
+            self._patch(job_id, progress=overall,
+                progress_detail={"stage": stage, "current": current, "total": total,
+                                 "failed": failed, **details})
+        callbacks = {"progress": report_progress, "check_cancel": lambda: self._check(job_id),
+                     "run_callback": lambda run_id: self._patch(job_id, run_id=run_id)}
+        if kind == "model_training":
+            return self.training.run_training_job(spec, **callbacks)
+        if kind == "model_validation":
+            return self.training.run_validation_job(spec, **callbacks)
+        if spec.get("research", True):
+            from my_strategy.web_dashboard.trend_strategy import scan_trend_consensus, backtest_trend_consensus
+            params = {key: spec.get(key) for key in ("symbols", "start", "end", "model_run_id", "model_fold",
+                "usage_mode", "calendar_run_id", "device", "cpu_workers", "consensus_config") if spec.get(key) is not None}
+            params['symbols'] = spec.get('symbols') or None
+            params.setdefault('start', '2026-01-01')
+            if kind == 'scan':
+                return scan_trend_consensus(**params, **callbacks)
+            return backtest_trend_consensus(**params, initial_cash=spec.get('initial_cash', 100000), **callbacks)
         symbols = spec.get("symbols") or [row["symbol"] for row in list_symbols()]
         if not symbols:
             raise ValueError("本地行情没有有效股票")

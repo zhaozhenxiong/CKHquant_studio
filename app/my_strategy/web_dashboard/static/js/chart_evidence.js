@@ -10,9 +10,9 @@
   const ruleScore = (value) => finite(value) && Number(value) >= 0 && Number(value) <= 1 ? `${num(Number(value) * 100)} / 100` : '不可用';
   const supportScore = (value) => finite(value) ? num(Number(value) * 100) : '—';
   const consensusVersion = (row, config = null, version = '') => version || row?.version || config?.version || '';
-  const weightedConsensus = (row, config = null, version = '') => ['czsc_agent_consensus_v2','czsc_agent_consensus_v3','czsc_agent_consensus_v4','czsc_trend_consensus','czsc_trend_consensus_v2'].includes(consensusVersion(row,config,version));
-  const currentEvidenceConsensus = (row, config = null, version = '') => ['czsc_agent_consensus_v3','czsc_agent_consensus_v4','czsc_trend_consensus','czsc_trend_consensus_v2'].includes(consensusVersion(row,config,version));
-  const isTrendConsensus = (row, config = null, version = '') => ['czsc_trend_consensus','czsc_trend_consensus_v2'].includes(consensusVersion(row,config,version));
+  const weightedConsensus = (row, config = null, version = '') => consensusVersion(row,config,version) === 'trend_consensus';
+  const currentEvidenceConsensus = (row, config = null, version = '') => consensusVersion(row,config,version) === 'trend_consensus';
+  const isTrendConsensus = (row, config = null, version = '') => consensusVersion(row,config,version) === 'trend_consensus';
   function trendProbabilities(item = {}) {
     const present = item.kind === 'trend_probability' || ['p_up','p_down','p_neutral'].some((key) => Object.hasOwn(item,key));
     const available = present && ['p_up','p_down','p_neutral'].every((key) => validProbability(item[key])) && Math.abs(Number(item.p_up)+Number(item.p_down)+Number(item.p_neutral)-1)<1e-5;
@@ -192,7 +192,7 @@
       view.evaluationStatus = status;
       view.evaluationLabel = evaluationLabels[status] || statusLabel(item.status);
       view.status = status || view.status;
-      view.summary = validProbability(item.probability) ? `高收益区间概率 ${probability(item.probability)} · ${view.evaluationLabel}` : view.evaluationLabel;
+      view.summary = ['scored_passed','scored_rejected'].includes(status) && validProbability(item.probability) ? `高收益区间概率 ${probability(item.probability)} · ${view.evaluationLabel}` : view.evaluationLabel;
       view.explanation = evaluationExplanations[status] || '该日未提供完整高收益评估状态；概率不可用与0%概率分别展示。';
       if (trendProbabilities(row?.agents?.ma).present || isTrendConsensus(row?.consensus)) {
         if (view.target === 'actual_complete_fee_net_roundtrip_high_return_and_initial_risk') view.target = highReturnTargetText(item.label_target);
@@ -342,8 +342,8 @@
   const judgmentLabel = (value) => ({BUY:'支持买入',SELL:'支持卖出',WAIT:'观察',HOLD:'观察',UNAVAILABLE:'不可用',ABSTAIN:'弃权 · 无有效意见',CONFLICT:'同源冲突',buy:'支持买入',sell:'支持卖出',wait:'观察',unavailable:'不可用'})[value] || String(value || '不可用');
   function opinionReasons(item, version = '') {
     const values = item?.reason_codes || item?.reasons || (item?.reason ? [item.reason] : []);
-    const v4 = (version || item?.version) === 'czsc_agent_consensus_v4';
-    return (Array.isArray(values) ? values : [values]).map((code) => v4 && code === 'no_fresh_candidate_trigger'
+    const nativeCandidates = (version || item?.version) === 'trend_consensus';
+    return (Array.isArray(values) ? values : [values]).map((code) => nativeCandidates && code === 'no_fresh_candidate_trigger'
       ? '本日没有取得当前方向资格的新候选，活跃证据不会自行生成买卖点' : reason(code)).join('；');
   }
   function opinionHtml(item, key, context = {}) {
@@ -371,7 +371,7 @@
   function diagnosticsHtml(row) {
     const funnel = row?.funnel;
     if (!funnel || typeof funnel !== 'object') return '';
-    const countStages = [['raw_events','原始事件'],['observable_events','当日可见'],['fresh_candidates',row.version === 'czsc_agent_consensus_v4' ? '新候选（当前资格通过）' : '新候选'],['active_evidence','活跃证据'],['directional_sources','有方向来源'],['independent_buy_families','买入独立家族'],['independent_sell_families','卖出独立家族']];
+    const countStages = [['raw_events','原始事件'],['observable_events','当日可见'],['fresh_candidates','有效机会（当前资格通过）'],['active_evidence','活跃证据'],['directional_sources','有方向来源'],['independent_buy_families','买入独立家族'],['independent_sell_families','卖出独立家族']];
     const stages = countStages.filter(([key]) => finite(funnel[key])).map(([key,label]) => `${label} ${num(funnel[key],0)}`).join(' · ');
     const selling = row.proposed_action === 'SELL' || row.action === 'SELL';
     const gates = [['l1_qualified','方向与新机会'],['risk_eligible','风险资格'],['quality_passed','高收益质量'],['final_emitted','最终点']]
@@ -386,6 +386,7 @@
     if (!row) return '<section class="consensus-result"><strong>最终判断不可用</strong><p class="subtle">该结果没有已保存的多 Agent 仲裁，主图不显示最终买卖点。</p></section>';
     const side = finalSide(row), arbiter = row.agents?.arbiter, weighted = weightedConsensus(row,config,version);
     const currentVersion = consensusVersion(row,config,version);
+    if (currentVersion !== 'trend_consensus') return '<section class="consensus-result"><strong>该仲裁记录已退役</strong><p>历史身份不具备当前判断资格，请查看归档证据。</p></section>';
     const label = isTrendConsensus(row,config,version) ? `趋势共识策略 · 方向诊断：${side || judgmentLabel(row.action)}` : side ? `${side} · 最终${side === 'B' ? '买点' : '卖点'}` : '观察 · 本日未生成最终买卖点';
     const familyLabels = {ma:'均线／辅助结构',structure:'独立结构',wyckoff:'威科夫量价'};
     const families = (names) => (Array.isArray(names) ? names : []).map((key) => familyLabels[key] || key).join('、');
@@ -405,19 +406,19 @@
       thresholds = config ? `<p class="subtle">本次门槛：买入支持 ${num(config.min_buy_support)} · 卖出支持 ${num(config.min_sell_support)} · 方向优势 ${num(config.min_direction_margin)}</p>` : '';
     }
     const familyDetails = weighted && row.family_details && typeof row.family_details === 'object' ? Object.entries(row.family_details).map(([key,item]) => `<li>${esc(familyLabels[key] || key)}：${esc(judgmentLabel(item.side))} · 实际贡献 ${supportScore(item.weight)} 分${Array.isArray(item.sources) && item.sources.length ? ` · 来源 ${esc(item.sources.map((source) => labels[source] || source).join('、'))}` : ''}${item.conflict === true ? ' · 同家族方向冲突，贡献归零' : ''}</li>`).join('') : '';
-    return `<section class="consensus-result"><strong class="${side === 'B' ? 'valuation-gain' : side === 'S' ? 'valuation-loss' : ''}">${esc(label)}</strong>${codes ? `<p>${esc(codes)}</p>` : ''}${arbiter ? `<p class="subtle">仲裁 Agent：${esc(judgmentLabel(arbiter.judgment || arbiter.judgement || arbiter.opinion || arbiter.action))}${opinionReasons(arbiter,currentVersion) ? ` · ${esc(opinionReasons(arbiter,currentVersion))}` : ''}</p>` : ''}<p class="subtle">${esc(familyText)}${familyText ? '<br>' : ''}${scores}${direction ? `<br>${esc(direction)}` : ''}</p>${isTrendConsensus(row,config,version) ? '<p class="subtle">趋势共识策略 · 连续加权支持；方向诊断与账户操作分别记录。</p>' : weighted ? `<p class="subtle">仲裁 ${currentEvidenceConsensus(row,config,version) ? `${currentVersion.endsWith('_v4') ? 'v4' : 'v3'} · 各 Agent 共同评估新候选` : 'v2'} · 支持分，非获利概率；高收益只加买入质量分，不参与卖出或基础方向差额。</p>` : '<p class="subtle">仲裁 v1 · 按保存的加权支持票数判断。</p>'}${thresholds}${currentEvidenceConsensus(row,config,version) ? diagnosticsHtml(row) : ''}${familyDetails ? `<details><summary>独立家族与合并贡献</summary><ul>${familyDetails}</ul></details>` : ''}</section>`;
+    return `<section class="consensus-result"><strong class="${side === 'B' ? 'valuation-gain' : side === 'S' ? 'valuation-loss' : ''}">${esc(label)}</strong>${codes ? `<p>${esc(codes)}</p>` : ''}${arbiter ? `<p class="subtle">仲裁 Agent：${esc(judgmentLabel(arbiter.judgment || arbiter.judgement || arbiter.opinion || arbiter.action))}${opinionReasons(arbiter,currentVersion) ? ` · ${esc(opinionReasons(arbiter,currentVersion))}` : ''}</p>` : ''}<p class="subtle">${esc(familyText)}${familyText ? '<br>' : ''}${scores}${direction ? `<br>${esc(direction)}` : ''}</p><p class="subtle">趋势共识策略 · 连续加权支持；方向诊断与账户操作分别记录。</p>${thresholds}${currentEvidenceConsensus(row,config,version) ? diagnosticsHtml(row) : ''}${familyDetails ? `<details><summary>独立家族与合并贡献</summary><ul>${familyDetails}</ul></details>` : ''}</section>`;
   }
   function rawEventsHtml(row, entries = [], version = '') {
-    const v3 = currentEvidenceConsensus(null,null,version);
+    const candidateStateAssessment = currentEvidenceConsensus(null,null,version);
     const raw = Array.isArray(row?.events) ? row.events : entries.filter((entry) => entry.kind !== 'inspection').map((entry) => ({...entry.row,original_event_date:entry.row?.original_event_date || entry.event_date,excluded:entry.excluded,exclusion_reasons:entry.exclusion_reasons}));
     const facts = new Map((candidateFacts(row) || []).map((event) => [event.event_id,event]));
     const risks = riskDetails(row);
     const rows = raw.map((event) => {
       const excluded = event.excluded || event.candidate_eligible === false || event.evidence_visible === false;
       const fact = facts.get(event.event_id), risk = risks.get(event.event_id);
-      const directional = v3 && fact ? `<br>原始方向证据：${fact.direction_eligible === true || fact.direction_eligible == null && fact.candidate_direction_valid === true ? '有效；实际贡献按当日状态复核' : '未通过资格或不可见'}` : '';
-      const riskText = v3 && risk ? `<br>${risk.risk_reason_codes?.length ? `新入场风险拒绝：${esc(risk.risk_reason_codes.map(reason).join('、'))}` : `原始候选交易资格：${risk.candidate_eligible ? '通过' : '未通过'}`} · 参考 ${num(risk.reference_price)} 元 · 止损 ${num(risk.stop_price)} 元 · 距离 ${probability(risk.stop_distance)}` : '';
-      return `<p>${esc(event.source || '规则')} · ${esc(event.event_type || event.event || event.reason || '')}<br>发生 ${esc(event.original_event_date || date(event.date || event.time))} · 可用 ${esc(event.available_at || event.evidence_date || event.signal_at || '—')}${directional}${riskText}${excluded && !(v3 && fact) ? `<br>${v3 ? '原始候选资格或可见性未通过（方向与最终交易资格分别核验）' : '未计入最终判断'}：${esc((event.exclusion_reasons || event.reason_codes || []).map(reason).join('、') || '未通过输入资格')}` : ''}${event.price != null ? `<br>账本成交价 ${num(event.price)} 元` : ''}</p>`;
+      const directional = candidateStateAssessment && fact ? `<br>原始方向证据：${fact.direction_eligible === true || fact.direction_eligible == null && fact.candidate_direction_valid === true ? '有效；实际贡献按当日状态复核' : '未通过资格或不可见'}` : '';
+      const riskText = candidateStateAssessment && risk ? `<br>${risk.risk_reason_codes?.length ? `新入场风险拒绝：${esc(risk.risk_reason_codes.map(reason).join('、'))}` : `原始候选交易资格：${risk.candidate_eligible ? '通过' : '未通过'}`} · 参考 ${num(risk.reference_price)} 元 · 止损 ${num(risk.stop_price)} 元 · 距离 ${probability(risk.stop_distance)}` : '';
+      return `<p>${esc(event.source || '规则')} · ${esc(event.event_type || event.event || event.reason || '')}<br>发生 ${esc(event.original_event_date || date(event.date || event.time))} · 可用 ${esc(event.available_at || event.evidence_date || event.signal_at || '—')}${directional}${riskText}${excluded && !(candidateStateAssessment && fact) ? `<br>${candidateStateAssessment ? '原始候选资格或可见性未通过（方向与最终交易资格分别核验）' : '未计入最终判断'}：${esc((event.exclusion_reasons || event.reason_codes || []).map(reason).join('、') || '未通过输入资格')}` : ''}${event.price != null ? `<br>账本成交价 ${num(event.price)} 元` : ''}</p>`;
     }).join('');
     return `<details class="evidence-original"><summary>原始候选证据 ${raw.length} 条${raw.some((event) => event.excluded || event.candidate_eligible === false || event.evidence_visible === false) ? '（含未通过资格的证据）' : ''}</summary>${rows}</details>`;
   }

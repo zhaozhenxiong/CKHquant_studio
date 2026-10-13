@@ -10,9 +10,8 @@
   const day = (value) => value && typeof value === 'object' && 'year' in value ? `${value.year}-${String(value.month).padStart(2,'0')}-${String(value.day).padStart(2,'0')}` : typeof value === 'number' ? new Intl.DateTimeFormat('sv-SE', {timeZone:'Asia/Shanghai'}).format(new Date(value < 1e12 ? value * 1000 : value)) : String(value ?? '').slice(0, 10);
   const activeStatuses = new Set(['queued', 'running', 'cancelling']);
   const statusNames = {queued:'等待开始', running:'运行中', succeeded:'已完成', failed:'失败', cancelling:'正在取消', cancelled:'已取消'};
-  const kindNames = {analysis:'结构分析',scan:'结构扫描', backtest:'策略回测', update:'行情更新',research_train:'研究模型训练与评估',dual_research_train:'结构与均线融合、持仓退出研究',wyckoff_research_train:'威科夫量价、三专家及实际买卖研究',high_return_points_build:'三路独立买卖点构建',high_return_episodes_build:'真实操作区间构建',high_return_train:'高收益入场与持仓退出训练',high_return_backtest:'高收益策略离线回放'};
+  const kindNames = {analysis:'结构分析',scan:'全市场扫描',backtest:'策略回测',update:'行情更新',model_training:'完整模型训练',model_validation:'已完成模型复核',current_train:'完整模型训练'};
   const PAGE_SIZE = 100;
-  const researchKinds = ['research_train','dual_research_train','wyckoff_research_train','high_return_points_build','high_return_episodes_build','high_return_train'];
   const state = {analysis:null, query:null, frequency:'日线', dates:[], replayIndex:0, scan:null, backtest:null, scanPage:0, tradePage:0, tasks:[], delivered:new Set(), tracked:{}, favorites:new Set(), symbolCatalog:new Map(), analysisSequence:0, taskSequence:0, equityMode:'equity', pollTimer:null, watchlist:null, holdings:null, personalLoaded:false, watchlistBusy:false, holdingsBusy:false, watchlistSequence:0, holdingsSequence:0,research:null,pendingResearchContexts:{}};
   let chart, candles, volume, equityChart, equitySeries;
   let penSeries = [];
@@ -48,7 +47,7 @@
   }
   let priceOverlayFrame = null;
   const computeSequences = {analysis:0,scan:0,backtest:0,data:0};
-  const usageNames = {historical:'历史滚动研究',production:'当前生产判断',retrospective:'最新模型事后研究'};
+  const usageNames = {historical:'历史滚动研究',forward:'当前时点研究'};
   const entryPolicyNames = {legacy:'原目标仓位对照',fresh:'有效买点研究',risk:'价格与风险实验'};
   function entryPolicyCaption(policy) {
     return policy === 'risk' ? '价格与风险实验：区间、结构失效价及风险仓位未经独立认证；参考价不保证成交。' : policy === 'fresh' ? '有效买点研究：区分新入场与理论持仓；规则尚未独立认证，ML资格单独判断。' : '原目标仓位对照：保留原生 Position 的目标仓位与风险语义，供同一输入比较。';
@@ -74,10 +73,11 @@
   }
   function route() {
     const name = location.hash.slice(1) || location.pathname.replace(/^\//,'');
-    const selected = ['analysis', 'scan', 'backtest', 'watchlist', 'holdings', 'data'].includes(name) ? name : 'analysis';
+    const selected = ['analysis', 'scan', 'backtest', 'watchlist', 'holdings', 'training', 'parameters', 'data'].includes(name) ? name : 'analysis';
     if (selected !== 'analysis') resetChartSelection();
     showView(selected);
     requestAnimationFrame(resizeCharts);
+    if (['training','parameters'].includes(selected)) globalThis.KHQuantTraining?.refresh().catch(showError);
     if (selected === 'data') { refreshTasks().catch(showError); refreshRuns().catch(showError); }
     if (['analysis','scan','backtest'].includes(selected)) refreshResearch().catch(showError);
     if (selected === 'watchlist' || selected === 'holdings') (state.personalLoaded ? selected === 'watchlist' ? refreshWatchlist() : refreshHoldings() : ensurePersonal()).catch(showError);
@@ -218,7 +218,7 @@
       symbol,consensusVersion:displayedConsensus()?.version || displayedConsensus()?.config?.version || '',start:state.query?.start || '',asOf:day(state.query?.as_of || state.analysis.as_of || state.analysis.data_end),up:c.up,down:c.down});
     markers.push(...tradeMarkers.markers);
     const directionMarkers = trendStrategy && $('layer-directions')?.checked ? KHQuantMarkers.build({bars,dailyBars:normalizeBars(state.analysis.frequencies?.['日线']?.bars),frequency:state.frequency,
-      events:state.analysis.trend_consensus.events || [],symbol,consensusVersion:displayedConsensus()?.version || 'czsc_trend_consensus',start:state.query?.start || '',asOf:day(state.query?.as_of || state.analysis.as_of),up:c.up,down:c.down}) : null;
+      events:state.analysis.trend_consensus.events || [],symbol,consensusVersion:displayedConsensus()?.version || 'trend_consensus',start:state.query?.start || '',asOf:day(state.query?.as_of || state.analysis.as_of),up:c.up,down:c.down}) : null;
     if (directionMarkers) markers.push(...directionMarkers.markers.map((item) => ({...item,id:`${item.id}:direction`,text:`方向${item.text}`,size:.7})));
     const wyckoff = KHQuantWyckoffMarkers.buildDetailed({events:$('layer-wyckoff').checked ? state.analysis.wyckoff_events || [] : [],bars,frequency:state.frequency,symbol,start:state.query?.start || '',asOf:day(state.query?.as_of || state.analysis.as_of || state.analysis.data_end)});
     const wyckoffMarkers = wyckoff.markers;
@@ -482,35 +482,13 @@
     if (value == null || value === '' || !Number.isFinite(Number(value)) || Number(value) <= 0) return `${label}暂不可用`;
     return `${label} ${number(value,2)} 元（${date ? `${day(date)} 日` : '信号日'}收盘，非成交价）`;
   }
-  function isHighReturn(...records) { return records.some((record) => record?.model_family === 'high_return' || record?.research?.model_family === 'high_return' || record?.model_resolution?.model_family === 'high_return'); }
-  function isTrendVersion(value) { return ['czsc_trend_consensus','czsc_trend_consensus_v2'].includes(value); }
+  function isHighReturn(...records) { return records.some((record) => record?.model_family === 'current' || record?.research?.model_family === 'current' || record?.model_resolution?.model_family === 'current' || record?.strategy_version === 'trend_consensus'); }
+  function isTrendVersion(value) { return value === 'trend_consensus'; }
   function trendVersion(...records) { return records.flatMap(record => [record?.strategy_version,record?.schema_family,record?.version,record?.consensus_version,record?.model_resolution?.schema_family,record?.trend_consensus?.version]).find(isTrendVersion); }
-  function isTrendStrategy(...records) { return Boolean(trendVersion(...records)); }
-  function selectedTrendVersion(prefix) {
-    const selected = $(`${prefix}-model`).value || state.pendingResearchContexts[prefix]?.model_run_id;
-    const model = state.research?.high_return?.models?.find(item => item.run_id === selected);
-    return trendVersion(model,state.pendingResearchContexts[prefix]) || state.research?.high_return?.default_consensus_version;
-  }
-  function trendInputSelected(prefix) {
-    if ($(`${prefix}-mode`).value !== 'research' || $(`${prefix}-model-family`).value !== 'high_return') return false;
-    const selected = $(`${prefix}-model`).value || state.pendingResearchContexts[prefix]?.model_run_id;
-    const model = state.research?.high_return?.models?.find((item) => item.run_id === selected);
-    const policy = $(`${prefix}-model-policy`).value || state.pendingResearchContexts[prefix]?.model_policy;
-    if (model && (isTrendStrategy(model) || prefix === 'backtest' || policy === 'pinned')) return isTrendStrategy(model);
-    const restored = state.pendingResearchContexts[prefix];
-    if (restored?.consensus_version && restored.model_run_id === selected) return isTrendVersion(restored.consensus_version);
-    return isTrendVersion(state.research?.high_return?.default_consensus_version);
-  }
-  function modelName(...records) {
-    const trend = trendVersion(...records.flatMap(record => [record,record?.research,record?.model_resolution,record?.identity]));
-    if (trend) return trend === 'czsc_trend_consensus_v2' ? '趋势共识策略 · 有效机会重评' : '趋势共识策略';
-    if (isHighReturn(...records)) return '三路买卖点＋高收益区间 ML';
-    if (records.some((record) => record?.model_family === 'wyckoff' || record?.research?.model_family === 'wyckoff' || record?.model_resolution?.model_family === 'wyckoff' || record?.feature_profile === 'wyckoff_bundle_v1')) return '均线＋结构＋威科夫量价 ML';
-    if (records.some((record) => record?.model_family === 'dual' || record?.research?.model_family === 'dual' || record?.model_resolution?.model_family === 'dual' || record?.feature_profile === 'dual_bundle_v1')) return '结构＋均线融合 ML';
-    const profiles = records.flatMap((record) => [record,record?.research,record?.model_manifest,record?.model_resolution,record?.model,record?.identity,record?.config])
-      .filter(Boolean).map((record) => record.feature_profile || record.model_profile);
-    return profiles.find(Boolean) === 'ma_trend_v1' ? '均线趋势 ML' : 'ML';
-  }
+  function isTrendStrategy(...records) { return Boolean(trendVersion(...records)) || isHighReturn(...records); }
+  function selectedTrendVersion() { return 'trend_consensus'; }
+  function trendInputSelected(prefix) { return $(`${prefix}-mode`).value === 'research' && $(`${prefix}-model-family`).value === 'current'; }
+  function modelName() { return '趋势共识完整模型包'; }
   function modelInputUnavailable(resolution, row = {}) {
     if (resolution?.status === 'input_veto' || resolution?.reason_codes?.includes('model_input_ineligible')) return true;
     const explicit = resolution?.model_input_eligible ?? row.model_input_eligible;
@@ -531,7 +509,7 @@
       && resolution?.applied_to_entry === true && modelProbability(resolution,row) != null;
   }
   function ruleQualificationText(row) {
-    if (row.candidate_evidence?.version === 'czsc_candidate_evidence_v4' || isTrendStrategy(row) || row.agents?.ma?.kind === 'trend_probability') {
+    if (isTrendStrategy(row) || row.agents?.ma?.kind === 'trend_probability') {
       const status = row.agents?.high_return?.status || row.agents?.high_return?.evaluation_status;
       const facts = row.signal_points || (Array.isArray(row.candidate_evidence) ? row.candidate_evidence : row.candidate_evidence?.facts) || [];
       const validSell = facts.some((event) => String(event.side || event.action).toUpperCase() === 'SELL' && event.direction_eligible === true);
@@ -571,23 +549,9 @@
     return `${diagnostics.signal_at ? `信号时点 ${time(diagnostics.signal_at)}。` : ''}${candidateText(diagnostics,'最近模型候选')}${candidateText(diagnostics.dual_fallback,'双专家回退候选')}`;
   }
   function modelResolutionText(resolution, row = {}) {
-    if (!resolution) return '该结果未保存模型作用记录。';
-    if (isHighReturn(resolution,row)) return highReturnResolutionText(resolution,row);
-    const statuses = {shadow:'影子观察',qualified:'资格通过',production:'生产已生效',active:'生产已生效',production_active:'生产已生效',historical_released:'历史时点已有合格发布',historical_shadow:'历史重建影子模型',entry_contract_shadow:'10日模型与本次实际退出契约不一致，仅影子',rule_input_veto_shadow:'规则输入不可用，模型仅作影子',production_shadow:'候选影子模型，尚未发布',retrospective_shadow:'事后研究影子模型',dual_fallback_shadow:'量价输入不足，双专家回退影子',input_veto:'模型输入不可用',rules_no_model:'无兼容检查点，组合规则执行',no_model:'无可用模型',unavailable:'模型不可用',no_active_release:'暂无活动生产发布',retrospective:'事后研究',rules_only:'规则执行'};
-    const identity = resolution.model_run_id ? `${resolution.model_run_id} / ${resolution.checkpoint || '—'}` : '未使用模型';
-    const reasonLabels = {wyckoff_model_shadow:'三专家尚未获资格',wyckoff_input_ineligible:'量价输入不可用',historical_status_timeline_missing:'历史ST、退市及公司行动时间线未核验',dual_model_shadow:'双专家融合尚未获资格',independent_future_window_missing:'新独立验证窗口尚未完成',model_unavailable:'该时点无兼容检查点',model_training_after_signal:'模型实际训练完成晚于信号时点，不可回用于该次判断',model_validation_after_signal:'模型验证数据可用时间晚于信号时点，不可回用于该次判断',model_input_ineligible:'模型输入不可用',pinned_model_unavailable:'固定模型不兼容、损坏或该时点不可用',production_release_missing:'尚无该时点已生效的合格生产发布',model_shadow:'未获入场资格，概率仅作影子观察',entry_contract_mismatch:'10日模型未按本次实际退出契约训练，仅作影子观察',retrospective_only:'事后研究不能计入历史执行或认证',production_release_integrity_failure:'生产发布完整性核验失败',missing_target_date:'缺少目标日行情',unsupported_board:'当前执行仅支持主板',calendar_gap:'交易日历存在行情缺口'};
-    const reasons = [...new Set(resolution.reason_codes?.length ? resolution.reason_codes.map((code) => reasonLabels[code] || code) : [resolution.reason,...(Array.isArray(resolution.reasons) ? resolution.reasons : [])].filter(Boolean))].join('；');
-    const inputReasons = modelInputReasonText(resolution,row);
-    const effective = resolution.promotion_effective_at || resolution.promoted_at;
-    const probability = modelProbability(resolution,row), applied = modelEntryApplied(resolution,row);
-    const qualification = modelInputUnavailable(resolution,row) ? '输入不可用' : probability == null ? '未生成概率' : applied ? '参与入场过滤' : '影子观察';
-    const policyShadow = ['fresh','risk'].includes(row.entry_policy || row.entry_plan?.policy || resolution.entry_policy);
-    const experts = resolution.expert_probabilities;
-    const expertText = experts ? ` 均线专家 ${percent(experts.ma)} · 结构专家 ${percent(experts.structure)}${Object.prototype.hasOwnProperty.call(experts,'wyckoff') ? ` · 威科夫量价专家 ${percent(experts.wyckoff)}` : ''} · 融合 ${percent(experts.fusion)}。` : '';
-    const fallbackText = resolution.probability_source === 'dual_fallback' ? ` 回退概率来源：结构＋均线融合 ${resolution.fallback_model?.model_run_id || '来源未保存'} / ${resolution.fallback_model?.checkpoint || '—'}。三专家融合概率缺失。` : '';
-    const policyText = row.policy_entry_model ? ` 策略入场头：${row.policy_entry_model.reason || '需要实际空仓账户状态，保持影子'}` : '';
-    const exitText = row.exit_model ? ` 退出头：${row.exit_model.reason || (row.exit_model.probability == null ? '当前未生成持仓概率' : percent(row.exit_model.probability))}` : '';
-    return `${modelName(resolution,row)} · ${statuses[resolution.status] || resolution.status || '资格未记录'} · ${identity}。ML资格：${qualification}。${applied ? 'ML 已参与入场过滤。' : 'ML 未参与入场，使用组合规则。'}${probability == null ? '概率不可用。' : `假设新入场的10交易日费用后正收益研究概率 ${percent(probability)}；阈值 ${percent(resolution.threshold ?? resolution.probability_threshold)}。`}${policyShadow ? '本次入场规则与固定10日标签不同，模型保持影子。' : ''}${resolution.available_at ? `数据可用 ${resolution.available_at}。` : ''}${resolution.actual_training_completed_at ? `实际训练完成 ${resolution.actual_training_completed_at}。` : ''}${effective ? `发布生效 ${effective}。` : ''}${resolution.release_id ? `发布 ${resolution.release_id}。` : ''}${reasons ? `模型原因：${reasons}。` : ''}${modelAvailabilityText(resolution)}${inputReasons ? `输入核验原因：${inputReasons}。` : ''}${expertText}${fallbackText}${exitText}${policyText}`;
+    if (!resolution) return '该结果未保存当前模型作用记录。';
+    if (!isTrendStrategy(resolution,row)) return '历史模型协议已退役，不具备当前判断资格。';
+    return highReturnResolutionText(resolution,row);
   }
   function highReturnResolutionText(resolution, row = {}) {
     const trendAccount = isTrendStrategy(resolution,row) || evidenceUI()?.trendProbabilities(row.agents?.ma).present;
@@ -616,9 +580,9 @@
     const sourceText = Array.isArray(sources) ? sources.map((item) => names[item] || item).join('、') : String(sources || '');
     const events = Array.isArray(points) ? points.map((point) => `<p>${esc(names[point.source] || point.source || '')} · ${esc(point.event_type || point.signal || '')} · ${esc(point.side || point.action || '')}<br>锚点 ${esc(point.anchor_at || '—')} · 确认可用 ${esc(point.available_at || point.signal_at || '—')}</p>`).join('') : '';
     const trendAccount = isTrendStrategy(row) || evidenceUI()?.trendProbabilities(row.agents?.ma).present;
-    const exitNote = row.candidate_evidence?.version === 'czsc_candidate_evidence_v4' ? '新版通过独立 Broker 验收入口核验入场与冻结退出政策；旧版账户回测仍选择旧版模型。' : '退出模型只使用截至当日的兼容真实持仓状态。';
+    const exitNote = '退出模型只使用截至当日的兼容真实持仓状态；MA退出头在入场时固定。';
     const pricingNote = trendAccount ? `<p>高收益目标：${esc(evidenceUI()?.highReturnTargetText(row.agents?.high_return?.label_target))}。成交采用滑点模拟均价；R按冻结止损参考假设估计。</p>` : '';
-    return `<section class="research-evidence high-return-evidence" aria-label="高收益区间研究"><strong>三路独立买卖点与第二阶段判断</strong><p>候选来源：${esc(sourceText || '本日无新候选')}。同股同日候选保留各路证据。</p><p>${esc(highReturnResolutionText(row.model_resolution || {model_family:'high_return'},row))}</p>${events}${typeof row.expected_net_return === 'number' ? `<p>辅助预期费用后收益 ${percent(row.expected_net_return)} · 亏损研究概率 ${percent(row.loss_probability)}。</p>` : ''}<p>${trendAccount ? '入场质量使用所选研究Broker账户当日真实空仓资金状态；持仓退出使用该账户已发生的成交和持仓前缀。' : '新入场评分使用冻结初始资金的假设空仓账户；具体成交与资金状态在Broker回放中核验。'}</p>${pricingNote}<p>入场模型只判断已产生的候选。完整区间标签由实际成交、费用与冻结退出政策形成；高收益标签不代表未来最高涨幅。${esc(exitNote)}</p></section>`;
+    return `<section class="research-evidence high-return-evidence" aria-label="高收益区间研究"><strong>三路独立买卖点与第二阶段判断</strong><p>候选来源：${esc(sourceText || '本日无新候选')}。同股同日候选保留各路证据。</p><p>${esc(highReturnResolutionText(row.model_resolution || {model_family:'current'},row))}</p>${events}${typeof row.expected_net_return === 'number' ? `<p>辅助预期费用后收益 ${percent(row.expected_net_return)} · 亏损研究概率 ${percent(row.loss_probability)}。</p>` : ''}<p>${trendAccount ? '入场质量使用所选研究Broker账户当日真实空仓资金状态；持仓退出使用该账户已发生的成交和持仓前缀。' : '新入场评分使用冻结初始资金的假设空仓账户；具体成交与资金状态在Broker回放中核验。'}</p>${pricingNote}<p>入场模型只判断已产生的候选。完整区间标签由实际成交、费用与冻结退出政策形成；高收益标签不代表未来最高涨幅。${esc(exitNote)}</p></section>`;
   }
   function entryPlanHtml(row) {
     if (isHighReturn(row)) return '';
@@ -653,7 +617,7 @@
     const mode = decision.usage_mode || state.query?.usage_mode;
     const model = decision.model_resolution;
     const scope = trendAccount ? evidenceUI()?.accountContextText(decision.account_context) : decision.position_scope === 'actual_broker_state_required' ? '退出判断需要兼容的真实Broker持仓历史' : decision.position_scope === 'theoretical_prefix_position' ? '组合策略理论持仓，与手动持仓独立' : decision.position_scope === 'flat_at_start' ? `从研究开始日 ${day(decision.position_start) || '所选开始日'} 初始化为空仓，之后连续模拟；与手动持仓独立` : decision.position_scope || decision.scope;
-    return `${warning ? `${esc(warning)}<br>` : ''}${mode ? `<span class="decision-mode">${esc(usageNames[mode] || mode)}${mode === 'retrospective' ? ' · 不能作为历史可执行或认证成绩' : ''}</span><br>` : ''}<strong>${esc(session)} · <span class="badge ${actionClass(decision.action)}">${esc(label)}</span></strong><br>${esc(referencePriceText(decision.reference_close,decision.reference_price_date,priceLabel))}<br>条件：${esc(basis)}${scope ? `<br>仓位语境：${esc(display(scope))}` : ''}${model ? `<br>${esc(ruleQualificationText(decision))}<br><span class="model-resolution">${esc(modelResolutionText(model,decision))}</span>` : ''}`;
+    return `${warning ? `${esc(warning)}<br>` : ''}${mode ? `<span class="decision-mode">${esc(usageNames[mode] || '旧用途已退役，不恢复资格')}${mode === 'retrospective' ? ' · 不能作为历史可执行或认证成绩' : ''}</span><br>` : ''}<strong>${esc(session)} · <span class="badge ${actionClass(decision.action)}">${esc(label)}</span></strong><br>${esc(referencePriceText(decision.reference_close,decision.reference_price_date,priceLabel))}<br>条件：${esc(basis)}${scope ? `<br>仓位语境：${esc(display(scope))}` : ''}${model ? `<br>${esc(ruleQualificationText(decision))}<br><span class="model-resolution">${esc(modelResolutionText(model,decision))}</span>` : ''}`;
   }
   function renderEvents() {
     const events = state.analysis?.events || [];
@@ -837,102 +801,45 @@
     const experts = info.expert_inference;
     const expertWork = experts ? ' · 专家实际行数 ' + Object.entries(experts).map(([name,value]) => `${({ma:'均线',structure:'结构',wyckoff:'量价',fusion:'三专家融合',dual_fusion:'双专家融合'})[name] || name} ${number(value.rows)}`).join(' / ') : '';
     const timings = [['结构准备',info.preparation_wall_seconds],['推理阶段',info.inference_wall_seconds],['决策',info.decision_wall_seconds]].filter(([,value]) => value != null).map(([label,value]) => `${label} ${number(value,2)}秒`).join(' · ');
-    return `${name} · ${work}${info.model_inference_batches != null ? ` · ${number(info.model_inference_batches)} 个推理批次` : ''}${info.model_loads != null ? ` · 模型加载 ${number(info.model_loads)} 次` : ''}${info.cpu_workers != null ? ` · CPU 准备并发上限 ${number(info.cpu_workers)}` : ''}${info.cache_hits != null ? ` · 特征缓存命中 ${number(info.cache_hits)}` : ''}${timings ? ` · ${timings}` : ''}${expertWork}${info.model_family === 'wyckoff' ? ` · 实际空仓策略头 CPU ${number(info.policy_inference_rows || 0)} 行（独立目标，影子）` : ''}${['dual','wyckoff'].includes(info.model_family) ? ` · 实际持仓退出头 CPU ${number(info.exit_inference_rows || 0)} 行（影子）` : ''}。GPU 工作仅依据本次执行记录；结构识别与实际成交在 CPU。`;
+    return `${name} · ${work}${info.model_inference_batches != null ? ` · ${number(info.model_inference_batches)} 个推理批次` : ''}${info.model_loads != null ? ` · 模型加载 ${number(info.model_loads)} 次` : ''}${info.cpu_workers != null ? ` · CPU 准备并发上限 ${number(info.cpu_workers)}` : ''}${info.cache_hits != null ? ` · 特征缓存命中 ${number(info.cache_hits)}` : ''}${timings ? ` · ${timings}` : ''}${expertWork}。GPU 工作仅依据本次执行记录；结构识别与实际成交在 CPU。`;
   }
   function renderComputeResult(kind, info) { $(`${kind}-compute-result`).hidden = !state[kind]; $(`${kind}-compute-result`).textContent = info?.research ? researchComputeCaption(info,state[kind]) : computeCaption(info); }
   function renderScanComputePlan() {
     const research = $('scan-mode').value === 'research', device = $('scan-device').value;
-    $('scan-compute-plan').textContent = !research ? '结构识别在 CPU；CUDA 可执行批量信号运算，MPS 的结构价格比较保持 CPU float64 精度。' : `CPU 准备结构与量价特征，按所选日期匹配模型并批量推理（设备 ${device === 'auto' ? '自动选择' : device}）；缺模型时保留规则判断。真实推理行数、批次和 GPU 工作以本次结果为准。`;
+    $('scan-compute-plan').textContent = !research ? '结构识别在 CPU；CUDA 可执行批量信号运算，MPS 的结构价格比较保持 CPU float64 精度。' : `CPU 准备结构与量价特征，按所选日期匹配模型并批量推理（设备 ${device === 'auto' ? '自动选择' : device}）；缺少合格入场头时明确阻断。真实推理行数、批次和 GPU 工作以本次结果为准。`;
   }
   function gateCaption(gate) { return gate?.passed ? '样本外门槛通过' : '影子观察：尚未证实改善'; }
   function researchModels(prefix) {
-    const family = $(`${prefix}-model-family`).value;
-    const models = family === 'high_return' ? state.research?.high_return?.models || [] : family === 'wyckoff' ? state.research?.wyckoff?.models || [] : family === 'dual' ? state.research?.dual?.models || [] : state.research?.models || [];
-    const capability = {analysis:'chart',scan:'scan',backtest:'legacy_backtest'}[prefix];
-    const nativeDefault = family === 'high_return' && state.research?.high_return?.default_consensus_version === 'czsc_agent_consensus_v4';
-    const trendDefault = family === 'high_return' && isTrendVersion(state.research?.high_return?.default_consensus_version);
-    const explicitlySelected = state.pendingResearchContexts[prefix]?.model_run_id || $(`${prefix}-model`).value;
-    const native = (model) => model.schema_family === 'high_return_native_v4' || model.strategy_version === 'czsc_high_return_v4_native';
-    return models.filter((model) => {
-      if (capability && model.capabilities?.[capability] === false) return false;
-      if (trendDefault) return trendVersion(model) === state.research.high_return.default_consensus_version || model.run_id === explicitlySelected;
-      if (!nativeDefault) return true;
-      if (model.run_id === state.pendingResearchContexts[prefix]?.model_run_id) return true;
-      if (prefix === 'backtest') return !native(model);
-      return !['analysis','scan'].includes(prefix) || native(model);
-    });
+    const capability = {analysis:'chart',scan:'scan',backtest:'backtest'}[prefix];
+    return (state.research?.models || []).filter(model => (!model.model_family || model.model_family === 'current') && model.capabilities?.[capability] !== false);
   }
   function populateResearchModels(prefix) {
-    const select = $(`${prefix}-model`), previous = select.value, models = researchModels(prefix);
-    const context = state.pendingResearchContexts[prefix];
-    const restored = !context?.model_family || context.model_family === $(`${prefix}-model-family`).value ? context?.model_run_id : null;
-    const configured = $(`${prefix}-model-family`).value === 'high_return' && isTrendVersion(state.research?.high_return?.default_consensus_version) ? state.research.high_return.current_model_run_id : null;
-    const preferred = previous && previous !== select.dataset?.configuredDefaultModel ? previous : restored;
-    const explicit = Boolean(preferred && (models.some((model) => model.run_id === preferred) || preferred === restored));
-    const hasConfigured = models.some((model) => model.run_id === configured);
-    const absent = explicit && !models.some((model) => model.run_id === preferred) ? [preferred] : [];
-    select.innerHTML = `<option value="">${models.length || absent.length ? '请选择固定模型' : '暂无此版本的已完成模型'}</option>` + models.map((model) => `<option value="${esc(model.run_id)}">${esc(modelName(model))} · ${esc(model.run_id)} · ${esc(gateCaption(model.model_gate))}</option>`).join('') + absent.map((id) => `<option value="${esc(id)}">已绑定历史运行 · ${esc(id)}</option>`).join('');
-    select.value = explicit ? preferred : hasConfigured ? configured : '';
-    if (select.dataset) select.dataset.configuredDefaultModel = !explicit && hasConfigured ? configured : '';
+    const select = $(`${prefix}-model`), previous = select.value, models = researchModels(prefix), context = state.pendingResearchContexts[prefix];
+    const configured = state.research?.active_model?.run_id || state.research?.current_model_run_id;
+    const preferred = previous && previous !== select.dataset?.configuredDefaultModel ? previous : context?.model_run_id;
+    const explicit = Boolean(preferred), absent = explicit && !models.some(model => model.run_id === preferred) ? [preferred] : [];
+    select.innerHTML = '<option value="">自动使用当前模型</option>' + models.map(model => `<option value="${esc(model.run_id)}">${esc(model.display_name || modelName())} · ${esc(model.run_id)} · ${esc(gateCaption(model.model_gate))}</option>`).join('') + absent.map(id => `<option value="${esc(id)}">已绑定当前运行（加载时核验） · ${esc(id)}</option>`).join('');
+    select.value = explicit ? preferred : '';
+    if (select.dataset) select.dataset.configuredDefaultModel = explicit ? '' : configured || '';
   }
   function updateResearchControls(prefix) {
     const enabled = $(`${prefix}-mode`).value === 'research';
-    const highReturn = enabled && $(`${prefix}-model-family`).value === 'high_return';
-    const trendHighReturn = highReturn && trendInputSelected(prefix);
-    const reassessment = trendHighReturn && selectedTrendVersion(prefix) === 'czsc_trend_consensus_v2';
-    const highReturnOption = Array.from($(`${prefix}-model-family`).options || []).find((option) => option.value === 'high_return');
-    if (highReturnOption) highReturnOption.textContent = trendHighReturn || !highReturn && isTrendVersion(state.research?.high_return?.default_consensus_version) ? modelName({schema_family:selectedTrendVersion(prefix)}) : '三路买卖点＋高收益区间 ML';
-    const nativeHighReturn = highReturn && prefix !== 'backtest' && state.research?.high_return?.default_consensus_version === 'czsc_agent_consensus_v4';
-    const entrySelect = $(`${prefix}-entry-policy`);
-    const entryMemory = entrySelect.dataset || {};
-    if (highReturn && entryMemory.highReturnLocked !== 'true') entryMemory.previousEntryPolicy = entrySelect.value || 'fresh';
-    if (!highReturn && entryMemory.highReturnLocked === 'true') entrySelect.value = entryMemory.previousEntryPolicy || 'fresh';
-    entryMemory.highReturnLocked = String(highReturn);
-    if (highReturn) entrySelect.value = 'risk';
-    for (const option of Array.from(entrySelect.options || [])) {
-      option.disabled = highReturn && option.value !== 'risk';
-      option.hidden = highReturn && option.value !== 'risk';
-      if (option.value === 'risk') option.textContent = highReturn ? '三路候选冻结风险规则' : '价格与风险实验';
-    }
-    if (prefix === 'scan') {
-      ['high-return-source-label','build-research-points','build-research-episodes'].forEach((id) => { $(id).hidden = !highReturn || trendHighReturn; });
-      $('start-research_train').hidden = trendHighReturn;
-      $('start-research_train').disabled = trendHighReturn || !state.research?.calendar_run_id || state.tasks.some((item) => researchKinds.includes(item.kind) && activeStatuses.has(item.status));
-      $('scan-research-target-help').textContent = trendHighReturn ? '趋势共识策略：三分类趋势、连续结构与量价支持形成方向，再由所选研究账户和高收益入场质量解析操作。高收益目标为完整交易费用后收益至少8%，且≥2倍冻结止损参考风险。成交采用滑点模拟均价；R按冻结止损参考假设估计。缺少兼容高收益入场模型不自动放行；退出使用入场时固定的均线持仓退出模型、硬止损、冻结确认边界和卖方共识。二阶段退出模型仅作观察。请使用对应版本的独立重训入口。尚未取得生产资格。' : highReturn ? '均线ML、已确认结构与威科夫量价分别生成买卖点，再用真实成交区间学习入场和持仓退出。高收益入场目标为冻结退出政策下完整费用后收益至少8%且至少2倍初始风险，每股初始资金固定100000元。退出优势需要截至当日的兼容真实持仓。扫描保持影子；构建和训练使用所选冻结来源自己的截止日，扫描日期不改变它。' : '研究模型按固定时间窗口训练与评估。入场概率对应假设新入场后固定10交易日费用后正收益；有效买点与价格风险实验保持影子。融合模型及真实持仓退出需新独立窗口认证，无兼容模型或输入不可用时不生成概率。训练使用完整可靠历史，扫描开始日期只控制展示。';
-    }
-    if (prefix === 'scan' && reassessment) $('scan-research-target-help').textContent = '有效原机会在有效期内按真实空仓状态逐日核验方向、风险及高收益质量；未通过质量、缺模型或风险暂时阻止不消费机会。接受入场后使用一次冻结开盘意图。持仓每日核验持续卖方共识，并保留止损、最长持仓及固定MA退出优先级；二阶段退出模型仅作观察。历史评分是重建研究，尚未取得生产资格。';
-    if (highReturn && prefix === 'backtest') { $(`${prefix}-model-policy`).value = 'auto'; $(`${prefix}-usage-mode`).value = 'historical'; }
-    if (prefix === 'analysis') {
-      const retrospective = Array.from($(`${prefix}-usage-mode`).options || []).find((option) => option.value === 'retrospective');
-      if (retrospective) retrospective.disabled = highReturn;
-      if (highReturn && $(`${prefix}-usage-mode`).value === 'retrospective') $(`${prefix}-usage-mode`).value = 'historical';
-    }
-    if (prefix === 'analysis' && $(`${prefix}-usage-mode`).value === 'retrospective') $(`${prefix}-model-policy`).value = 'pinned';
-    const pinned = $(`${prefix}-model-policy`).value === 'pinned';
-    const model = researchModels(prefix).find((item) => item.run_id === $(`${prefix}-model`).value);
-    if (prefix === 'backtest') {
-      const cash = $('initial-cash');
-      if (highReturn && !cash.disabled) cash.dataset.previousValue = cash.value;
-      if (!highReturn && cash.disabled && cash.dataset.previousValue) cash.value = cash.dataset.previousValue;
-      cash.disabled = highReturn;
-      if (highReturn) cash.value = String(model?.initial_cash || 100000);
-      $('initial-cash-label').textContent = highReturn ? '每只股票冻结初始资金（元）' : '总初始资金（元）';
-    }
-    const select = $(`${prefix}-checkpoint`), previous = select.value;
-    const checkpoints = researchCheckpoints(prefix,model);
-    const automaticTrend = trendHighReturn && !pinned;
-    select.innerHTML = !automaticTrend && checkpoints.length ? checkpoints.map((item) => `<option value="${esc(item.name)}">${modelName(item,model) === 'ML' ? '' : esc(modelName(item,model)) + ' · '}${esc(item.name === 'production' ? '最终训练候选（production）' : item.name + ' 历史检查点')} · ${item.restored ? '已保存，加载时核验' : '可用 ' + esc(item.available_at)}</option>`).join('') : '<option value="">自动按日期匹配</option>';
-    if (!automaticTrend && checkpoints.some((item) => item.name === previous)) select.value = previous;
-    else if (automaticTrend) select.value = '';
-    $(`${prefix}-usage-mode`).disabled = !enabled || (highReturn && prefix === 'backtest'); $(`${prefix}-model-policy`).disabled = !enabled || (highReturn && prefix === 'backtest');
-    $(`${prefix}-model-family`).disabled = !enabled;
-    $(`${prefix}-entry-policy`).disabled = !enabled || highReturn;
-    $(`${prefix}-entry-policy-help`).hidden = !enabled;
-    $(`${prefix}-entry-policy-help`).textContent = enabled ? trendHighReturn ? '趋势共识策略：三分类趋势、连续规则支持和候选质量共同评分；账户状态与冻结退出政策解析最终 B/S。成交与拒单仅来自当前绑定的账户。缺少兼容高收益入场模型不自动放行；二阶段退出模型仅作观察。' : nativeHighReturn ? '三路原生候选使用冻结风险与退出政策，分析与扫描显示多 Agent 研究判断。新版使用独立 Broker 验收入口；旧版账户回测仍选择旧版模型。尚未取得生产资格。' : highReturn ? '三路独立候选并集使用自己的冻结风险与退出政策。分析与扫描保持影子；回测须明确模型运行，显式离线应用高收益入场和退出头，尚未取得生产资格。' : entryPolicyCaption($(`${prefix}-entry-policy`).value || 'fresh') + ($(`${prefix}-entry-policy`).value === 'risk' && $(`${prefix}-usage-mode`).value === 'production' ? '当前使用方式不兼容，请选择历史滚动研究。' : '') : '';
-    $(`${prefix}-model`).disabled = !enabled || (!pinned && !(highReturn && prefix === 'backtest')); select.disabled = !enabled || !pinned || !checkpoints.length;
+    $(`${prefix}-model-family`).value = 'current'; $(`${prefix}-model-family`).disabled = true;
+    $(`${prefix}-entry-policy`).value = 'risk'; $(`${prefix}-entry-policy`).disabled = true;
+    if (prefix === 'backtest') { $(`${prefix}-usage-mode`).value = 'historical'; $(`${prefix}-model-policy`).value = 'auto'; }
+    $(`${prefix}-model-policy`).disabled = !enabled || prefix === 'backtest';
+    $(`${prefix}-usage-mode`).disabled = !enabled || prefix === 'backtest';
+    const pinned = $(`${prefix}-model-policy`).value === 'pinned', model = researchModels(prefix).find(item => item.run_id === $(`${prefix}-model`).value);
+    const checkpoints = researchCheckpoints(prefix,model), select = $(`${prefix}-checkpoint`), previous = select.value;
+    select.innerHTML = '<option value="">自动按日期匹配</option>' + checkpoints.map(item => `<option value="${esc(item.name)}">${esc(item.name)} · 最早可用 ${esc(item.available_at || '加载时核验')}</option>`).join('');
+    if (checkpoints.some(item => item.name === previous)) select.value = previous;
+    select.disabled = !enabled || !pinned || !checkpoints.length;
+    $(`${prefix}-model`).disabled = !enabled;
+    const help = $(`${prefix}-entry-policy-help`); help.hidden = !enabled;
+    help.textContent = '有效原机会在实际空仓且风险合格期间逐日重评；质量拒绝、缺模型及暂时风险阻断不消费机会。实际成交使用下一核验开盘与Broker规则；持仓退出头在入场时固定，保护出口优先。';
+    if (prefix === 'backtest') { const cash = $('initial-cash'); cash.disabled = enabled; if (enabled) cash.value = String(model?.initial_cash || state.research?.initial_cash || 100000); $('initial-cash-label').textContent = '每只股票初始资金（元）'; }
     renderCheckpointHelp(prefix);
   }
-  function updateBacktestCheckpoint() { updateResearchControls('backtest'); }
   function researchCheckpoints(prefix, model) {
     if (model) return model.checkpoints || [];
     const restored = state.pendingResearchContexts[prefix];
@@ -944,84 +851,43 @@
     return researchCheckpoints(prefix,model).find((item) => item.name === $(`${prefix}-checkpoint`).value);
   }
   function renderCheckpointHelp(prefix = 'backtest') {
-    const highReturn = $(`${prefix}-model-family`).value === 'high_return';
-    const checkpoint = selectedCheckpoint(prefix), help = $(`${prefix}-checkpoint-help`);
-    help.hidden = $(`${prefix}-mode`).value !== 'research';
+    const help = $(`${prefix}-checkpoint-help`); help.hidden = $(`${prefix}-mode`).value !== 'research';
     if (help.hidden) { help.textContent = ''; return; }
-    const mode = $(`${prefix}-usage-mode`).value || 'historical', pinned = $(`${prefix}-model-policy`).value === 'pinned';
-    const model = researchModels(prefix).find((item) => item.run_id === $(`${prefix}-model`).value);
-    if (highReturn && trendInputSelected(prefix)) {
-      help.textContent = `${usageNames[mode]}。趋势共识策略按信号时点核验趋势与高收益入场检查点；缺少兼容高收益入场模型不自动放行。${pinned ? checkpoint ? `固定入场检查点 ${checkpoint.name} · 最早可用 ${checkpoint.available_at || '加载时核验'}；趋势检查点按可用时钟匹配。` : '请选择固定模型及检查点。' : '自动按日期选择检查点，仓位与账本连续。'}持仓退出模型在入场时固定，结合硬止损、冻结确认边界与卖方共识解析退出；二阶段退出模型仅作观察。${mode === 'historical' ? '历史评分为重建研究，非当时实际部署预测。' : '按模型实际训练完成时间核验。'}尚未取得生产资格。`;
-      return;
-    }
-    const modeNote = highReturn && prefix === 'backtest' ? '指定高收益研究运行，按当日可用的前向检查点显式离线应用入场和退出头；实际Broker账本用于开发验证，尚未取得生产资格。' : highReturn && mode === 'production' ? '按实际训练完成时间核验可用模型，仅显示三路候选影子分值；尚未取得认证发布，不产生生产买卖决定。' : mode === 'production' ? '只允许信息时点前真实生效的生产发布参与入场；无合格发布时保留组合规则。' : mode === 'retrospective' ? '事后研究可能使用较晚训练的模型，仅用于分析图；不生成历史可执行账本或晋升成绩。' : '按日选择数据上可用的历史重建候选；未来认证结果不能回填，未获资格时仅显示影子概率。';
-    const boundary = $(`${prefix}-${prefix === 'backtest' ? 'start' : 'end'}`).value;
-    const conflict = pinned && checkpoint && mode !== 'retrospective' && boundary && checkpoint.available_at > boundary;
-    help.textContent = `${usageNames[mode]}。${modeNote}${!pinned ? '自动切换检查点，仓位与账本连续；无模型日期继续规则研究。' : checkpoint ? `检查点 ${checkpoint.name} · 最早可用 ${checkpoint.available_at || '加载时核验'} · 训练标签截至 ${checkpoint.train_label_end || '—'}。${conflict ? `当前${prefix === 'backtest' ? '开始' : '截止'}日 ${boundary} 早于模型可用日，请选择更早历史检查点或自动按日期。` : ''}` : '请选择固定模型及检查点。'}${highReturn ? '高收益入场概率绑定完整实际区间与冻结退出政策；退出概率需兼容真实持仓。显式离线回放独立保存账本，未认证。' : '概率目标是10交易日费用后正收益，不是下一日涨幅。'}`;
+    const mode = $(`${prefix}-usage-mode`).value || 'historical', pinned = $(`${prefix}-model-policy`).value === 'pinned', checkpoint = selectedCheckpoint(prefix);
+    help.textContent = `${usageNames[mode]}。${pinned ? checkpoint ? `固定入场检查点 ${checkpoint.name}，最早可用 ${checkpoint.available_at || '加载时核验'}。` : '请选择合格模型与检查点。' : '按信号日期匹配合格先验检查点，账户与账本连续。'}缺少合格入场头明确阻断；MA退出头在入场时固定，硬止损与冻结边界优先。退出观察头不自动改变交易。${mode === 'historical' ? '历史评分为重建研究。' : '依据实际训练完成时间核验。'}正式资格以独立认证为准。`;
   }
   function researchSpec(prefix) {
     if ($(`${prefix}-mode`).value !== 'research') return {research:false};
-    const highReturn = $(`${prefix}-model-family`).value === 'high_return';
-    const usage_mode = $(`${prefix}-usage-mode`).value || 'historical', model_policy = highReturn && prefix === 'backtest' ? 'auto' : $(`${prefix}-model-policy`).value || 'auto';
-    if (highReturn && usage_mode === 'retrospective') throw new Error('高收益区间研究只支持前向历史检查点，不能使用事后模型研究历史图。');
-    if (!highReturn && $(`${prefix}-entry-policy`).value === 'risk' && usage_mode === 'production') throw new Error('价格与风险实验未经认证，不能用于当前生产判断；请选择历史滚动研究。');
-    if (prefix !== 'analysis' && usage_mode === 'retrospective') throw new Error('最新模型事后研究仅用于分析图，不能用于扫描任务、回测账本或晋升成绩。');
-    if (usage_mode === 'retrospective' && model_policy !== 'pinned') throw new Error('事后研究需要明确选择固定模型及检查点。');
-    const model = $(`${prefix}-model`).value;
-    if (highReturn && prefix === 'backtest' && !model) throw new Error('高收益离线回放需要明确选择高收益模型运行。');
+    const usage_mode = prefix === 'backtest' ? 'historical' : $(`${prefix}-usage-mode`).value || 'historical';
+    if (!['historical','forward'].includes(usage_mode)) throw new Error('旧用途已退役，不恢复资格；请选择历史滚动研究或当前时点研究。');
+    const model_policy = prefix === 'backtest' ? 'auto' : $(`${prefix}-model-policy`).value || 'auto', model = $(`${prefix}-model`).value;
     let checkpoint;
     if (model_policy === 'pinned') {
-      if (!model) throw new Error('请选择固定模型及检查点，或改用自动按日期。');
-      checkpoint = selectedCheckpoint(prefix);
-      if (!checkpoint) throw new Error('所选模型没有可用检查点，请刷新研究状态。');
-      const boundary = $(`${prefix}-${prefix === 'backtest' ? 'start' : 'end'}`).value;
-      if (usage_mode !== 'retrospective' && boundary && checkpoint.available_at > boundary) throw new Error(`检查点 ${checkpoint.name} 到 ${checkpoint.available_at} 才可用，不能用于 ${boundary} ${prefix === 'backtest' ? '开始的回测' : '截止的判断'}。请选择更早历史检查点，或使用自动按日期。`);
+      if (!model) throw new Error('请选择当前模型包与检查点。');
+      checkpoint = selectedCheckpoint(prefix); if (!checkpoint) throw new Error('所选模型没有合格检查点，请刷新状态。');
+      const boundary = $(`${prefix}-end`).value;
+      if (boundary && checkpoint.available_at > boundary) throw new Error(`检查点 ${checkpoint.name} 在 ${checkpoint.available_at} 才可用。`);
     }
     const restored = state.pendingResearchContexts[prefix];
-    const selectedTrend = highReturn && trendInputSelected(prefix);
-    const trendContext = selectedTrend ? {consensus_version:selectedTrendVersion(prefix),...(model ? {model_run_id:model} : {}),
-      ...(restored?.model_run_id === model ? Object.fromEntries(['account_start','account_initial_cash','consensus_config'].filter(key => restored[key] != null).map(key => [key,restored[key]])) : {})} : {};
-    const legacyConsensus = highReturn && prefix !== 'backtest' && model_policy === 'pinned' && restored?.model_run_id === model && restored.consensus_version && !isTrendVersion(restored.consensus_version)
-      ? {consensus_version:restored.consensus_version,...(restored.consensus_config ? {consensus_config:restored.consensus_config} : {})} : {};
-    return {research:true,...($(`${prefix}-model-family`).value ? {model_family:$(`${prefix}-model-family`).value} : {}),usage_mode,model_policy,entry_policy:highReturn ? 'risk' : $(`${prefix}-entry-policy`).value || 'fresh',...(checkpoint ? {model_run_id:model,model_fold:checkpoint.name} : highReturn && prefix === 'backtest' ? {model_run_id:model} : {}),...legacyConsensus,...trendContext,...(state.research?.calendar_run_id ? {calendar_run_id:state.research.calendar_run_id} : {}),...(prefix === 'analysis' ? {device:$('analysis-device').value || 'auto'} : {})};
-  }
-  function forwardSummaryText(summary) {
-    if (!summary) return '';
-    if (summary.status === 'pending_artifact_validation') return ' 高收益独立前向冻结证据尚未通过校验，统计检查待完成。';
-    if (summary.status === 'unavailable' || summary.error) return ' 高收益独立前向证据尚无兼容冻结协议，待完成新协议冻结。';
-    if (summary.append_registry_count == null || summary.mature_technical_windows == null) return '';
-    const statistics = summary.statistical_status === 'qualified' ? '技术统计检查通过，正式发布资格仍需独立审计' : '统计检查待完成或未通过';
-    return ` 高收益独立前向证据：${summary.status === 'pending_future_data' ? '冻结后核验行情不足' : '连续账户影子观察'}；已登记 ${number(summary.append_registry_count)} 次追加、${number(summary.mature_technical_windows)} 个成熟技术窗口；${statistics}${summary.observed_end ? `，证据截至 ${summary.observed_end}` : ''}。`;
+    return {research:true,model_family:'current',consensus_version:'trend_consensus',usage_mode,model_policy,entry_policy:'risk',
+      ...(model ? {model_run_id:model} : {}),...(checkpoint ? {model_fold:checkpoint.name} : {}),
+      ...(restored?.model_run_id === model ? Object.fromEntries(['account_start','account_initial_cash','consensus_config'].filter(key => restored[key] != null).map(key => [key,restored[key]])) : {}),
+      ...(state.research?.calendar_run_id ? {calendar_run_id:state.research.calendar_run_id} : {}),...(prefix === 'analysis' ? {device:$('analysis-device').value || 'auto'} : {})};
   }
   async function refreshResearch() {
-    const [data,dual,wyckoff,highReturn] = await Promise.all([request('/api/research/status'),request('/api/research/dual-status'),request('/api/research/wyckoff-status'),request('/api/research/high-return-status')]);
-    data.dual = dual; data.wyckoff = wyckoff; data.high_return = highReturn;
-    const sourceSelect = $('high-return-source'), previousSource = sourceSelect.value;
-    const sources = [...(data.wyckoff?.models || []),...(data.models || [])];
-    sourceSelect.innerHTML = '<option value="">请选择冻结数据运行</option>' + sources.map((model) => `<option value="${esc(model.run_id)}">${esc(modelName(model))} · ${esc(model.run_id)} · ${number(model.coverage?.requested)} 只</option>`).join('');
-    if (sources.some((item) => item.run_id === previousSource)) sourceSelect.value = previousSource;
-    else if (highReturn.source_training_run_id && sources.some((item) => item.run_id === highReturn.source_training_run_id)) sourceSelect.value = highReturn.source_training_run_id;
-    state.research = data;
-    ['analysis','scan','backtest'].forEach((prefix) => {
-      populateResearchModels(prefix);
-      updateResearchControls(prefix);
-      if (state.pendingResearchContexts[prefix]) { const context = state.pendingResearchContexts[prefix]; delete state.pendingResearchContexts[prefix]; applyResearchContext(prefix,context); }
-    });
+    const data = await request('/api/training/status'); state.research = data;
+    ['analysis','scan','backtest'].forEach(prefix => { populateResearchModels(prefix); updateResearchControls(prefix); if (state.pendingResearchContexts[prefix]) { const context = state.pendingResearchContexts[prefix]; delete state.pendingResearchContexts[prefix]; applyResearchContext(prefix,context); } });
     renderScanComputePlan();
-    const release = data.active_release;
-    $('research-status').textContent = `${modelName(data)} · ${number((data.models || []).length)} 个研究模型（均线单模型） · ${number((data.dual?.models || []).length)} 个双专家候选包 · ${number((data.wyckoff?.models || []).length)} 个威科夫三专家候选包 · ${number((data.high_return?.models || []).length)} 个高收益区间候选包 · ${data.calendar_run_id ? '已核验交易日历可用' : '尚无已核验交易日历，训练不可用'}${data.calendar_end ? `（截至 ${data.calendar_end}）` : ''}。${release ? `${modelName(release)} 活动生产发布 ${release.release_id || release.model_run_id || '已记录'} · 生效 ${release.effective_at || release.promotion_effective_at || release.created_at || '—'}；本次模型入场资格仍按信号日期和入场规则核验。` : !(data.models || []).length ? '无兼容检查点；默认组合规则执行，未生成模型概率。' : '暂无活动生产发布；可用模型仅作影子观察，默认组合规则执行。'}`;
-    $('research-status').textContent += forwardSummaryText(data.high_return?.forward_summary);
-    if (isTrendVersion(data.high_return?.default_consensus_version)) $('research-status').textContent = `${modelName({schema_family:data.high_return.default_consensus_version})} · ${number((data.high_return.models || []).filter(model => trendVersion(model) === data.high_return.default_consensus_version).length)} 个保存的对应研究运行 · ${data.calendar_run_id ? '已核验交易日历可用' : '尚无核验交易日历'}${data.calendar_end ? `（截至 ${data.calendar_end}）` : ''}。三分类趋势与高收益入场质量分别评分；缺少兼容高收益入场模型不自动放行。账户 B/S、成交与拒单按所选研究账户展示，尚未取得生产资格。`;
-    renderTasks();
-    return data;
+    $('research-status').textContent = `趋势共识完整模型包 · ${(data.models || []).length} 个当前运行 · ${data.active_model?.run_id ? `当前选择 ${data.active_model.run_id}` : '尚无合格当前选择'}。${data.calendar_run_id ? '核验交易日历可用。' : '核验日历状态以训练预检为准。'}缺少合格入场头明确阻断；正式资格 ${data.certification?.status === 'qualified' ? '已认证，仍按信号时点核验' : '尚未取得'}。`;
+    renderTasks(); return data;
   }
-  function dualFeatureEvidence(row) {
+  function operationFeatureEvidence(row) {
     const featureGroups = row.expert_features || row.dual_features;
     if (!featureGroups) return '';
     const three = Boolean(featureGroups.wyckoff);
     const labels={ma5_bias:'距5日均线',ma10_bias:'距10日均线',ma20_bias:'距20日均线',ma60_bias:'距60日均线',ma5_slope5:'5日均线近5日斜率',ma10_slope5:'10日均线近5日斜率',ma20_slope5:'20日均线近5日斜率',ma60_slope5:'60日均线近5日斜率',ma_alignment:'均线排列',close_above_ma20:'收盘相对20日均线方向',ret_1:'近1日收益',ret_5:'近5日收益',ret_20:'近20日收益',atr14_ratio:'14日真实波幅比',volatility20:'20日波动率',drawdown20:'20日回撤',drawdown60:'60日回撤',ma5_ma10_gap:'5与10日均线间距',ma10_ma20_gap:'10与20日均线间距',ma20_ma60_gap:'20与60日均线间距',bi1_direction:'最近笔方向',bi1_return:'最近笔涨跌',bi1_length:'最近笔长度',bi1_volume_ratio:'最近笔量能比',bi2_direction:'次近笔方向',bi2_return:'次近笔涨跌',bi2_length:'次近笔长度',bi3_direction:'第三近笔方向',bi3_return:'第三近笔涨跌',bi3_length:'第三近笔长度',bi1_power_ratio:'相邻笔力度比',confirmed_age:'结构确认距今',zone_low_distance:'距中枢下沿',zone_high_distance:'距中枢上沿',zone_width_ratio:'中枢宽度',weekly_return:'闭合周收益',weekly_direction:'闭合周方向',monthly_return:'闭合月收益',monthly_direction:'闭合月方向',weekly_bi_direction:'周线笔方向',monthly_bi_direction:'月线笔方向',finished_bi_count:'完成笔数',w_spread_atr:'振幅相对前期ATR',w_body_atr:'实体相对前期ATR',w_close_location:'收盘在当日振幅位置',w_upper_shadow:'上影线占比',w_lower_shadow:'下影线占比',w_gap_atr:'开盘缺口相对ATR',w_relative_volume20:'相对前20日成交量',w_volume_robust60:'前60日稳健量能偏离',w_volume5_to20:'5日与20日量能比',w_relative_amount20:'相对前20日成交额',w_up_down_volume20:'上涨与下跌量能比',w_price_volume_divergence:'价量变化分歧',w_pullback_push_volume20:'回撤与推进量能比',w_volume_contraction5:'近5日量能收缩',w_range_width_atr:'历史区间宽度相对ATR',w_range_duration:'区间样本长度',w_range_position:'收盘相对历史区间位置',w_support_distance_atr:'距历史支撑相对ATR',w_resistance_distance_atr:'距历史阻力相对ATR',w_compression20_60:'20日与60日区间压缩',w_down_probe_atr:'下探支撑幅度',w_up_probe_atr:'上探阻力幅度',w_spring:'Spring下探收回',w_test:'Test后续缩量测试',w_sos:'SOS放量突破',w_lps:'LPS后续回测确认',w_upthrust:'Upthrust上冲回落',w_sow:'SOW放量跌破',w_lpsy:'LPSY弱反弹确认',w_event_age:'最近事件距今',w_demand_score:'需求规则评分',w_supply_score:'供应规则评分'};
     const groups=Object.entries(featureGroups).map(([name,group]) => `<details><summary>${name === 'ma' ? '均线专家 · 20项输入' : name === 'structure' ? '结构专家 · 22项输入' : '威科夫量价专家 · 32项输入'}</summary><p>当前可见输入；此处不代表模型重要性或因果贡献。</p><table><tbody>${Object.entries(group.values || {}).map(([key,value]) => `<tr><th>${esc(labels[key] || key)}</th><td>${value == null ? '缺失' : number(value,5)}</td></tr>`).join('')}</tbody></table></details>`).join('');
-    return `<details class="research-evidence"><summary>${three ? '三专家的74项特征' : '双专家特征'}与决策路径</summary><p>已确认结构、均线趋势${three ? '与逐日量价证据' : ''} → ${three ? '三个' : '两个'}同目标专家 → 历史前向样本外概率融合 → 当日资格与入场门控 → 下一核验开盘。独立退出头另读真实Broker持仓；当前未认证，均为影子。需求与供应规则评分不等于盈利概率。</p>${wyckoffEvidence(row)}${groups}</details>`;
+    return `<details class="research-evidence"><summary>当前因果特征与决策路径</summary><p>已确认结构、均线趋势${three ? '与逐日量价证据' : ''} → 趋势与高收益质量分别评分 → 当日资格与入场门控 → 下一核验开盘。独立退出头另读真实Broker持仓；当前未认证，均为影子。需求与供应规则评分不等于盈利概率。</p>${wyckoffEvidence(row)}${groups}</details>`;
   }
   function wyckoffEvidence(row) {
     const evidence = row.wyckoff_evidence;
@@ -1056,7 +922,7 @@
     }).join('');
     const levels = row.reference_levels;
     const references = levels ? `<div>参考：MA20 ${number(levels.ma20,2)} · MA60 ${number(levels.ma60,2)} · 结构低/高 ${number(levels.structure_low,2)} / ${number(levels.structure_high,2)}。参考值不保证成交。</div>` : '';
-    return `${entryPlanHtml(row)}${dualFeatureEvidence(row)}<details class="research-evidence"><summary>触发条件与四角色证据</summary>${row.candidate_action ? `<div>组合条件：${esc(actionLabel(row.candidate_action))}候选；仓位意图：${esc(actionLabel(row.position_intent || row.action))}。条件满足可能仍无新的转仓。</div>` : ''}<div>${esc(ruleQualificationText(row))}</div><div>买入：${esc(row.entry_trigger || '以组合规则和仓位变化为准')}</div><div>失效：${esc(row.invalidation || '以结构退出及原生持仓约束为准')}</div><div>退出：${esc(row.exit_trigger || '规则退出与原生风控；ML 仅过滤入场')}</div>${references}<div>计划最早执行：${esc(row.next_market_session || '需刷新交易日历')}</div><div>${esc(row.probability_target || 'ML 估计假设新入场后固定10交易日费用后正收益，非下一日涨幅或成交价。')}</div>${row.model_resolution ? `<div>${esc(modelResolutionText(row.model_resolution,row))}</div>` : `<div>模型训练标签截至：${esc(row.model_train_end || '无可用模型')} · 模型可用 ${esc(row.model_available_at || '缺失')}</div>`}${evidence}</details>`;
+    return `${entryPlanHtml(row)}${operationFeatureEvidence(row)}<details class="research-evidence"><summary>触发条件与四角色证据</summary>${row.candidate_action ? `<div>组合条件：${esc(actionLabel(row.candidate_action))}候选；仓位意图：${esc(actionLabel(row.position_intent || row.action))}。条件满足可能仍无新的转仓。</div>` : ''}<div>${esc(ruleQualificationText(row))}</div><div>买入：${esc(row.entry_trigger || '以组合规则和仓位变化为准')}</div><div>失效：${esc(row.invalidation || '以结构退出及原生持仓约束为准')}</div><div>退出：${esc(row.exit_trigger || '规则退出与原生风控；ML 仅过滤入场')}</div>${references}<div>计划最早执行：${esc(row.next_market_session || '需刷新交易日历')}</div><div>${esc(row.probability_target || 'ML 估计假设新入场后固定10交易日费用后正收益，非下一日涨幅或成交价。')}</div>${row.model_resolution ? `<div>${esc(modelResolutionText(row.model_resolution,row))}</div>` : `<div>模型训练标签截至：${esc(row.model_train_end || '无可用模型')} · 模型可用 ${esc(row.model_available_at || '缺失')}</div>`}${evidence}</details>`;
   }
   function scanActionCell(row) {
     const categories = {buy:'买入候选',watch:'继续观察',exit:'持仓退出研究',excluded:'排除 / 不足'};
@@ -1142,22 +1008,6 @@
     renderDiagnostics('holdings-caveats',quoteNotes(items));
     personalBusy();
   }
-  function renderHoldingReplay(data) {
-    const host = $('holding-replay-result'), holding = data.holding_state, operation = data.observed_holding_features || {}, reference = data.account_reference;
-    host.hidden = false;
-    const status = {scored:'真实持仓已核验，退出影子评分可用',flat:'真实账户为空仓',model_unavailable:'真实持仓已核验，观察日模型不可用',input_unavailable:'真实持仓已核验，模型输入不可用',incompatible:'真实持仓引用不兼容'}[data.status] || '持仓研究不可用';
-    const identity = {historical:'历史回放开发研究',production:'生产影子研究，按实际训练时间核验'}[data.request?.usage_mode] || '只读持仓研究';
-    host.innerHTML = `<p class="form-note"><strong>${esc(status)}</strong> · ${esc(identity)} · ${esc(data.reason)} · 未取得生产发布资格</p>${holding ? `<div class="metrics-row">${[['实际股数',number(holding.shares)],['含费成本',number(holding.actual_cost_per_share,6)],['入场日',esc(holding.entry_date)],['已持有核验日',number(operation.holding_sessions)],['退出优势概率',percent(data.exit_probability)],['剩余价值优势',percent(data.exit_advantage)],['截至当日峰值收益',percent(operation.running_peak_return)],['截至当日谷值收益',percent(operation.running_trough_return)],['峰值后回吐',percent(operation.peak_giveback)]].map(([label,value]) => `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`).join('')}</div><p class="form-note">持仓前缀截至 ${esc(data.prefix_through_date)}；${data.hard_exit_priority ? '冻结风控退出优先。' : '研究评分不改变冻结风控或账户。'}目标：${esc(data.probability_target)}。</p>` : ''}${reference ? `<details><summary>账户来源、模型谱系与核验</summary><p class="form-note">${esc(reference.replay_run_id)} · ${esc(reference.window)} / ${esc(reference.arm)} · ${esc(reference.symbol)} · 来源 ${esc(reference.source)}<br>模型 ${esc(reference.model_run_id)} · 已核验保存的真实成交与因果回放前缀<br>账户 SHA256 ${esc(reference.account_sha256)}<br>冻结特征 SHA256 ${esc(reference.source_feature_sha256)}<br>来源快照哈希 ${esc(reference.source_snapshot_hash)}<br>代码与模型协议冻结哈希 ${esc(reference.model_freeze_hash)}</p>${data.exit_model ? `<p class="form-note">检查点 ${esc(data.exit_model.checkpoint)} · 数据可用 ${esc(data.exit_model.available_at)} · 实际训练完成 ${esc(data.exit_model.actual_training_completed_at)}</p>` : ''}</details>` : ''}${(data.available_holding_dates || []).length ? `<p class="form-note">此前实际有仓收盘日：${data.available_holding_dates.map(esc).join('、')}</p>` : ''}`;
-  }
-  async function observeHoldingReplay(event) {
-    event.preventDefault(); const button = $('holding-replay-submit'); button.disabled = true;
-    try {
-      const spec = {replay_run_id:$('holding-replay-run').value.trim(),window:$('holding-replay-window').value.trim(),
-        arm:$('holding-replay-arm').value,symbol:personalSymbol($('holding-replay-symbol').value),
-        as_of:$('holding-replay-asof').value,usage_mode:$('holding-replay-mode').value};
-      renderHoldingReplay(await request('/api/research/high-return-holding',{method:'POST',body:JSON.stringify(spec)}));
-    } finally { button.disabled = false; }
-  }
   async function loadPersonal() {
     let legacy = [];
     try { const saved = JSON.parse(localStorage.getItem('khquant_czsc_favorites') || '[]'); if (Array.isArray(saved)) legacy = saved; } catch (_) { /* Keep an unreadable legacy value; never overwrite persistent records. */ }
@@ -1213,7 +1063,7 @@
     if (kind === 'backtest' && !$('backtest-start').value) { notice('已选择关注股票，请设置回测开始日期'); $('backtest-start').focus(); return; }
     if (kind === 'backtest' && !$('backtest-form').reportValidity()) return;
     const spec = {symbols:list,...dateSpec(kind),...researchSpec(kind),...(kind === 'backtest' ? {initial_cash:Number($('initial-cash').value)} : {})};
-    await submitTask(kind === 'backtest' && spec.model_family === 'high_return' ? 'high_return_backtest' : kind,spec);
+    await submitTask(kind,spec);
   }
   function modelObservationUnavailableReason(item) {
     const status = item.status || '';
@@ -1265,7 +1115,7 @@
     ]).sort((a,b) => String(b.date).localeCompare(String(a.date)));
     $('backtest-model-observations').hidden = !observations.length;
     $('backtest-model-observation-rows').innerHTML = observations.slice(0,30).map((item) => `<tr><td>${esc(item.symbol)}</td><td>${esc(day(item.date))}</td><td>${esc(item.target)}</td><td>${item.forced_by_policy ? '冻结规则触发' : percent(item.probability)}</td><td>${backtestObservationApplication(item,result)}${item.probability == null ? ' · ' + esc(modelObservationUnavailableReason(item)) : ''}</td></tr>`).join('');
-    renderComputeResult('backtest',result?.compute_info || (isHighReturn(result) && result.actual_inference_device ? {research:true,model_family:'high_return'} : undefined));
+    renderComputeResult('backtest',result?.compute_info || (isHighReturn(result) && result.actual_inference_device ? {research:true,model_family:'current'} : undefined));
     $('backtest-research-result').hidden = !result?.model_gate && !result?.model_summary;
     if (trendStrategy) { $('backtest-research-result').hidden = false; $('backtest-research-result').innerHTML = `<p>趋势共识策略显式离线回放 · ${esc(result.model_run_id || '模型身份保存在运行报告')}。高收益入场缺兼容模型不自动放行；退出使用入场时固定的均线持仓退出模型与冻结风险、确认边界及卖方共识，二阶段退出模型仅作观察。费用后账本用于开发验证，尚未取得生产资格。</p><p>${esc(result.allocation || '')}${result.per_stock_initial_cash != null ? ` · 每股初始资金 ${number(result.per_stock_initial_cash,2)} 元` : ''}${result.initial_cash != null ? ` · 合计初始资金 ${number(result.initial_cash,2)} 元` : ''}</p>${researchComparisonHtml(result)}`; } else if (isHighReturn(result)) { $('backtest-research-result').hidden = false; $('backtest-research-result').innerHTML = `<p>高收益策略显式离线回放 · ${result.model_run_id || result.source_training_run_id || '模型身份保存在运行报告'} · 按当日可用检查点筛选三路独立候选并评估真实持仓退出；缺模型时执行冻结参考政策。费用后账本用于开发验证，尚未取得生产资格。</p>${researchComparisonHtml(result)}`; } else if (result?.model_summary) {
       const summary = result.model_summary, routes = result.model_routes || [];
@@ -1317,7 +1167,7 @@
   function taskDetail(task) {
     const d = task.progress_detail;
     if (!d || typeof d !== 'object') return display(d || '');
-    const info = task.compute_info, research = researchKinds.includes(task.kind) || task.spec?.research;
+    const info = task.compute_info, research = Boolean(task.spec?.plan_id) || task.spec?.research;
     const compute = info ? research ? ` · ${researchComputeCaption(info)}` : ` · ${info.cuda_work ? '已执行 CUDA 信号运算' : 'CPU 信号运算'}` : task.spec?.device ? ` · 所选设备 ${task.spec.device}（尚非 GPU 执行证明）` : '';
     return `${d.stage || ''}${d.current != null ? ` · ${number(d.current)} / ${number(d.total)}` : ''}${d.device && activeStatuses.has(task.status) ? ` · 当前阶段 ${d.device === 'cpu' ? 'CPU' : d.device}` : ''}${d.failed ? ` · 失败 ${number(d.failed)}` : ''}${compute}`;
   }
@@ -1327,34 +1177,15 @@
     return cancel + result;
   }
   function renderTasks() {
-    $('task-list').innerHTML = state.tasks.length ? state.tasks.map((task) => `<article class="task-row"><div class="task-heading"><div><strong>${esc(kindNames[task.kind] || task.kind)}</strong><small>${esc(task.created_at || '')} · ${esc(task.run_id || task.job_id)}</small></div><div class="task-actions"><span class="badge">${esc(statusNames[task.status] || task.status)}</span>${taskActions(task)}</div></div><div class="progress-track"><i style="width:${Math.max(0,Math.min(100,Number(task.progress) || 0))}%"></i></div><p class="task-detail ${task.error ? 'task-error' : ''}">${esc(task.error ? display(task.error) : taskDetail(task))}</p></article>`).join('') : '<div class="empty-copy">尚无任务。更新行情、扫描或回测后，可以在这里查看进度。</div>';
-    ['scan','backtest','research_train'].forEach((kind) => {
-      const candidates = kind === 'research_train' ? researchKinds : [kind === 'backtest' ? 'backtest' : kind,...(kind === 'backtest' ? ['high_return_backtest'] : [])];
-      const task = state.tasks.find((item) => candidates.includes(item.kind) && item.job_id === state.tracked[item.kind]);
-      const host = $(kind + '-progress'); host.hidden = !task;
-      if (task) host.innerHTML = `<div class="task-actions">${taskActions(task)}</div>${esc(statusNames[task.status] || task.status)} · ${number(task.progress)}%<br>${esc(task.error ? display(task.error) : taskDetail(task))}`;
-    });
-    ['scan','backtest','update'].forEach((kind) => { const running = state.tasks.some((task) => (task.kind === kind || (kind === 'backtest' && task.kind === 'high_return_backtest')) && activeStatuses.has(task.status)); const button = $(kind === 'update' ? 'update-data' : kind === 'dual_research_train' ? 'start-research_train' : `start-${kind}`); button.disabled = running; });
-    const researchRunning = state.tasks.some((task) => researchKinds.includes(task.kind) && activeStatuses.has(task.status));
-    $('start-research_train').hidden = trendInputSelected('scan');
-    $('start-research_train').disabled = trendInputSelected('scan') || !state.research?.calendar_run_id || researchRunning;
-    ['build-research-points','build-research-episodes'].forEach((id) => { $(id).disabled = researchRunning; });
+    $('task-list').innerHTML = state.tasks.length ? state.tasks.map(task => `<article class="task-row"><div class="task-heading"><div><strong>${esc(kindNames[task.kind] || '当前研究任务')}</strong><small>${esc(task.created_at || '')} · ${esc(task.run_id || task.job_id)}</small></div><div class="task-actions"><span class="badge">${esc(statusNames[task.status] || task.status)}</span>${taskActions(task)}</div></div><div class="progress-track"><i style="width:${Math.max(0,Math.min(100,Number(task.progress) || 0))}%"></i></div><p class="task-detail ${task.error ? 'task-error' : ''}">${esc(task.error ? display(task.error) : taskDetail(task))}</p></article>`).join('') : '<div class="empty-copy">尚无任务，可发起训练、更新行情、扫描或回测。</div>';
+    ['scan','backtest'].forEach(kind => { const task = state.tasks.find(item => item.kind === kind && item.job_id === state.tracked[kind]), host = $(kind + '-progress'); host.hidden = !task; if (task) host.innerHTML = `<div class="task-actions">${taskActions(task)}</div>${esc(statusNames[task.status] || task.status)} · ${number(task.progress)}%<br>${esc(task.error ? display(task.error) : taskDetail(task))}`; });
+    ['scan','backtest','update'].forEach(kind => { const button = $(kind === 'update' ? 'update-data' : `start-${kind}`); button.disabled = state.tasks.some(task => task.kind === kind && activeStatuses.has(task.status)); });
   }
   function showResult(kind,result,navigate = false) {
     if (kind === 'scan') { state.scan = result; state.scanPage = 0; renderScan(); }
-    if (kind === 'backtest' || kind === 'high_return_backtest') { state.backtest = highReturnBacktestView(result); state.tradePage = 0; renderBacktest(); if (state.analysis) renderAnalysis(false); }
-    if (researchKinds.includes(kind) && kind !== 'high_return_points_build' && kind !== 'high_return_episodes_build') {
-      $('research-training-result').hidden = false;
-      $('research-training-result').textContent = `${modelName(result)} · 研究运行 ${result.run_id} · ${gateCaption(result.model_gate)} · ${['dual','wyckoff','high_return'].includes(result.model_family) ? `${number(evaluationWindows(result).length)} 个开发窗口完成；正式资格未取得` : `${number(result.model_gate?.passing_windows)} / ${number(result.model_gate?.windows)} 个窗口通过`} · ${number(result.coverage?.success ?? result.coverage?.successful)} / ${number(result.coverage?.requested)} 只完成，失败 ${number(result.coverage?.failed)}。模型可用日期 ${result.model_manifest?.available_at || result.model_bundles?.find((item) => item.name === 'production')?.available_at || '缺失'}。${['dual','wyckoff','high_return'].includes(result.model_family) ? researchComputeCaption(result.compute_info || {}) : ''}`;
-      const variants = {high_return_full:'完整高收益入场＋退出',high_return_entry:'仅高收益入场',high_return_exit:'仅退出优势',union_reference:'三路并集参考',ma_independent:'均线独立路径',structure_independent:'结构独立路径',wyckoff_independent:'威科夫独立路径',wyckoff_rule:'C3 威科夫规则',wyckoff_only:'C4 威科夫ML',three_fusion:'C5 三专家10日融合',fusion_wyckoff_exit:'C6 双专家＋量价退出',three_fusion_exit:'C7 三专家＋量价退出',policy_fresh:'C8 实际策略入场＋量价退出',union_rules:'E0 合法买点并集规则',policy_union:'E1 并集策略入场＋量价退出',rules:'组合规则基线',ma_only:'基线＋均线专家',structure_only:'基线＋结构专家',rules_exit:'基线＋持仓退出头',fusion_exit:'融合入场＋持仓退出头',baseline:'组合规则基线',ma:'基线＋均线专家',structure:'基线＋结构专家',fusion:'基线＋双专家融合',exit:'基线＋持仓退出头',full:'融合入场＋持仓退出头',czsc:'当前CZSC',price_volume:'均线量价',czsc_price_volume:'CZSC＋量价',ml:modelName(result) === 'ML' ? 'CZSC＋量价＋ML' : '组合规则＋均线趋势 ML'};
-      const windows = evaluationWindows(result);
-      $('research-evaluation').hidden = !windows.length;
-      $('research-evaluation').innerHTML = `<table><caption>冻结股票池、固定等额独立账户的样本外费用后账本；模型分类指标不代替实际收益。</caption><thead><tr><th>窗口</th><th>策略</th><th>收益率</th><th>最大回撤</th><th>完整交易</th><th>费用后胜率</th><th>交易期望</th><th>盈亏比</th></tr></thead><tbody>${windows.flatMap((window) => Object.entries(window.variants || {}).map(([mode, item]) => `<tr><td>${esc(window.fold.name)}</td><td>${esc(variants[mode] || mode)}</td><td>${percent(item.metrics.total_return)}</td><td>${percent(item.metrics.max_drawdown)}</td><td>${number(item.metrics.completed_round_trips)}</td><td>${percent(item.metrics.win_rate)}</td><td>${percent(item.metrics.trade_expectancy)}</td><td>${number(item.metrics.payoff_ratio,2)}</td></tr>`)).join('')}</tbody></table>`;
-      if (isHighReturn(result)) $('research-evaluation').innerHTML = researchComparisonHtml(result);
-      refreshResearch().then(() => { ['scan','backtest'].forEach((prefix) => { if ([...$(`${prefix}-model`).options].some((option) => option.value === result.run_id)) $(`${prefix}-model`).value = result.run_id; }); updateBacktestCheckpoint(); }).catch(showError);
-    }
-    if (['high_return_points_build','high_return_episodes_build'].includes(kind)) { $('research-training-result').hidden = false; $('research-training-result').textContent = `${kindNames[kind]} · 运行 ${result.run_id} · ${number(result.coverage?.success ?? result.coverage?.successful)} / ${number(result.coverage?.requested)} 只完成；事件与区间保存于独立研究产物。`; }
-    if (navigate) location.hash = kind === 'update' ? 'data' : researchKinds.includes(kind) ? 'scan' : kind === 'high_return_backtest' ? 'backtest' : kind;
+    else if (kind === 'backtest') { state.backtest = highReturnBacktestView(result); state.tradePage = 0; renderBacktest(); if (state.analysis) renderAnalysis(false); }
+    else if (kind !== 'update') { globalThis.KHQuantTraining?.showResult(result); if (navigate) location.hash = 'training'; return; }
+    if (navigate) location.hash = kind === 'update' ? 'data' : kind;
   }
   async function refreshTasks() {
     const sequence = ++state.taskSequence;
@@ -1388,13 +1219,13 @@
     if (sequence === state.taskSequence && state.tasks.some((task) => activeStatuses.has(task.status))) state.pollTimer = setTimeout(() => refreshTasks().catch((error) => { showError(error); state.pollTimer = setTimeout(() => refreshTasks().catch(showError),5000); }),2500);
   }
   async function submitTask(kind,spec) {
-    const button = $(kind === 'update' ? 'update-data' : kind === 'high_return_points_build' ? 'build-research-points' : kind === 'high_return_episodes_build' ? 'build-research-episodes' : researchKinds.includes(kind) ? 'start-research_train' : kind === 'high_return_backtest' ? 'start-backtest' : `start-${kind}`);
-    button.disabled = true;
-    try { if (kind !== 'update' && computeLoaded) spec = {...spec,device:$(`${researchKinds.includes(kind) ? 'scan' : kind === 'high_return_backtest' ? 'backtest' : kind}-device`).value}; const task = await request('/api/tasks',{method:'POST',body:JSON.stringify({kind,spec})}); state.tracked[kind] = task.job_id; if (kind === 'high_return_backtest') state.tracked.backtest = task.job_id;
+    if (!['scan','backtest','update'].includes(kind)) throw new Error('该任务入口已退役，请使用模型训练页。');
+    const button = $(kind === 'update' ? 'update-data' : `start-${kind}`); button.disabled = true;
+    try { if (kind !== 'update' && computeLoaded) spec = {...spec,device:$(`${kind}-device`).value}; const task = await request('/api/tasks',{method:'POST',body:JSON.stringify({kind,spec})}); state.tracked[kind] = task.job_id;
       if (kind === 'scan') { state.scan = null; state.scanPage = 0; renderScan(); $('scan-coverage').textContent = '等待本次扫描结果'; $('scan-failures').hidden = true; }
-      if (kind === 'backtest' || kind === 'high_return_backtest') { state.backtest = null; state.tradePage = 0; renderBacktest(); if (state.analysis) renderAnalysis(false); }
-      notice(`${kindNames[kind]}任务已提交`); await refreshTasks(); }
-    catch (error) { showError(error); button.disabled = false; }
+      if (kind === 'backtest') { state.backtest = null; state.tradePage = 0; renderBacktest(); if (state.analysis) renderAnalysis(false); }
+      notice(`${kindNames[kind]}任务已提交`); await refreshTasks();
+    } catch (error) { showError(error); button.disabled = false; }
   }
   async function cancelTask(jobId) { await request(`/api/tasks/${encodeURIComponent(jobId)}/cancel`,{method:'POST',body:'{}'}); await refreshTasks(); notice('已请求取消任务'); }
   async function refreshRuns() {
@@ -1410,8 +1241,8 @@
         if (context[key] == null && result[key] != null) context[key] = result[key];
       });
       const account = result.account_actions?.context || result.account_context || result.research?.account_context || {}, params = result.run_context?.config?.parameters || {};
-      context.consensus_version = trendVersion(result,source,account) || 'czsc_trend_consensus';
-      context.model_family = 'high_return';
+      context.consensus_version = 'trend_consensus';
+      context.model_family = 'current';
       context.model_run_id ||= result.research?.model_run_id || account.model_identity?.model_run_id || result.model_run_id;
       context.model_policy ||= context.model_fold ? 'pinned' : account.model_identity?.model_policy || 'auto';
       const config = source.consensus_config || result.consensus_config || result.trend_consensus?.config || account.consensus || params.consensus_config;
@@ -1426,11 +1257,13 @@
     return context;
   }
   function applyResearchContext(prefix, context) {
+    if (context.research !== false && ((context.model_family && context.model_family !== 'current') || (context.consensus_version && context.consensus_version !== 'trend_consensus'))) throw new Error('该历史模型运行已退役，只能查看归档证据，不能恢复当前操作上下文。');
+    if (context.research !== false && context.usage_mode && !['historical','forward'].includes(context.usage_mode)) throw new Error('旧用途已退役，不恢复资格；请重新选择当前研究用途。');
     if (context.model_run_id) state.pendingResearchContexts[prefix] = context;
     else delete state.pendingResearchContexts[prefix];
     $(`${prefix}-model`).value = '';
     $(`${prefix}-mode`).value = context.research === false ? 'structure' : 'research';
-    $(`${prefix}-model-family`).value = context.model_family || 'ma_trend';
+    $(`${prefix}-model-family`).value = 'current';
     populateResearchModels(prefix);
     $(`${prefix}-entry-policy`).value = context.entry_policy || 'legacy';
     $(`${prefix}-usage-mode`).value = context.usage_mode || 'historical'; $(`${prefix}-model-policy`).value = context.model_policy || 'auto';
@@ -1453,7 +1286,7 @@
     catch (error) { if (sequence !== openRunSequence) return; throw error; }
     if (sequence !== openRunSequence) return;
     const result = data.result || data;
-    const kind = data.kind || (result.model_manifest && result.evaluation ? 'research_train' : result.trades ? 'backtest' : result.rows ? 'scan' : result.data_status ? 'update' : 'analysis');
+    const kind = data.kind || (result.model_manifest && result.evaluation ? 'model_training' : result.trades ? 'backtest' : result.rows ? 'scan' : result.data_status ? 'update' : 'analysis');
     if (kind !== 'analysis') { showResult(kind,result,true); return; }
     // A saved analysis replaces only the generation that existed when opened.
     // Other run types keep a pending analysis intact; a newer analysis wins.
@@ -1493,13 +1326,14 @@
     $('analysis-latest')?.addEventListener('click',async () => { setDateMode('analysis','latest'); updateChartSelection('clear'); try { await refreshLatestDates(); } catch (error) { showError(error); } });
     $('analysis-symbol').addEventListener('change',() => { if (dateModes.analysis === 'latest') refreshLatestDates().catch(showError); });
     window.addEventListener('hashchange',route);
+    window.addEventListener('khquant-selection-updated',() => refreshResearch().catch(showError));
     window.addEventListener('keydown',(event) => { if (event.key === 'Escape') updateChartSelection('clear'); });
     $('chart-evidence-reset').addEventListener('click',() => updateChartSelection('clear'));
     $('theme-toggle').addEventListener('click',() => setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
     $('page-error').querySelector('button').addEventListener('click',() => { $('page-error').hidden = true; });
     $('analysis-symbol').addEventListener('input',() => { updateChartSelection('clear'); clearTimeout(searchTimer); searchTimer = setTimeout(() => searchSymbols($('analysis-symbol').value).catch(showError),250); });
     $('analysis-form').addEventListener('submit',async (event) => { event.preventDefault(); try { if (dateModes.analysis === 'latest') await refreshLatestDates(); await analyze({symbol:getSymbol($('analysis-symbol').value),...dateSpec('analysis'),...researchSpec('analysis')}); } catch (error) { showError(error); } });
-    $('send-backtest').addEventListener('click',() => { try { const symbol = getSymbol($('analysis-symbol').value); if (!symbol) { notice('请先选择股票'); return; } const context = researchSpec('analysis'); if (context.usage_mode === 'retrospective') throw new Error('事后研究历史图不能转为可执行回测，请先切换历史滚动研究或当前生产判断。'); $('backtest-symbols').value = symbol; ['start','end'].forEach((key) => { $(`backtest-${key}`).value = $(`analysis-${key}`).value; }); setDateMode('backtest','historical'); applyResearchContext('backtest',context); location.hash = 'backtest'; } catch (error) { showError(error); } });
+    $('send-backtest').addEventListener('click',() => { try { const symbol = getSymbol($('analysis-symbol').value); if (!symbol) { notice('请先选择股票'); return; } const context = researchSpec('analysis'); $('backtest-symbols').value = symbol; ['start','end'].forEach((key) => { $(`backtest-${key}`).value = $(`analysis-${key}`).value; }); setDateMode('backtest','historical'); applyResearchContext('backtest',context); location.hash = 'backtest'; } catch (error) { showError(error); } });
     document.querySelectorAll('[data-frequency]').forEach((button) => button.addEventListener('click',() => { resetChartSelection(); state.frequency = button.dataset.frequency; document.querySelectorAll('[data-frequency]').forEach((item) => item.setAttribute('aria-pressed',String(item === button))); renderAnalysis(); }));
     ['ma','boll','chips','fractals','pens','zones','divergences','signals','directions','wyckoff','trades','volume'].forEach((name) => $(`layer-${name}`).addEventListener('change',() => { resetChartSelection(); renderAnalysis(false); }));
     ['start','end','mode','model-family','entry-policy','usage-mode','model-policy','model','checkpoint','device'].forEach((name) => $(`analysis-${name}`).addEventListener('change',() => updateChartSelection('clear')));
@@ -1512,7 +1346,7 @@
     $('replay-date').addEventListener('change',() => { const date = $('replay-date').value; const index = state.dates.findLastIndex((value) => value <= date); if (index < 0) notice('请选择可用行情范围内的日期'); else replay(index); });
     $('replay-reset').addEventListener('click',() => { if (!state.query) return; const {as_of:_,...query} = state.query; state.replayIndex = Math.max(0,state.dates.length - 1); analyze(query,true); });
     $('scan-form').addEventListener('submit',(event) => { event.preventDefault(); try { submitTask('scan',{symbols:symbols($('scan-symbols').value),...dateSpec('scan'),...researchSpec('scan')}); } catch(error) { showError(error); } });
-    $('backtest-form').addEventListener('submit',(event) => { event.preventDefault(); try { const spec = {symbols:symbols($('backtest-symbols').value),...dateSpec('backtest'),...researchSpec('backtest'),initial_cash:Number($('initial-cash').value)}; submitTask(spec.model_family === 'high_return' ? 'high_return_backtest' : 'backtest',spec); } catch(error) { showError(error); } });
+    $('backtest-form').addEventListener('submit',(event) => { event.preventDefault(); try { const spec = {symbols:symbols($('backtest-symbols').value),...dateSpec('backtest'),...researchSpec('backtest'),initial_cash:Number($('initial-cash').value)}; submitTask('backtest',spec); } catch(error) { showError(error); } });
     ['analysis','scan','backtest'].forEach((prefix) => {
       ['mode','model-family','usage-mode','model-policy','model','entry-policy'].forEach((name) => $(`${prefix}-${name}`).addEventListener('change',() => {
         if (name === 'model-family' || name === 'model' && $(`${prefix}-model`).value !== state.pendingResearchContexts[prefix]?.model_run_id) delete state.pendingResearchContexts[prefix];
@@ -1524,25 +1358,6 @@
       $(`${prefix}-${prefix === 'backtest' ? 'start' : 'end'}`).addEventListener('change',() => renderCheckpointHelp(prefix));
     });
     $('refresh-research').addEventListener('click',() => refreshResearch().catch(showError));
-    $('start-research_train').addEventListener('click',() => {
-      try {
-        if (trendInputSelected('scan')) throw new Error(`所选趋势策略请使用 ${selectedTrendVersion('scan') === 'czsc_trend_consensus_v2' ? 'train_trend_reassessment' : 'train_trend_consensus'} 独立训练入口。`);
-        if (!$('scan-end').value) throw new Error('请先设置研究截止日期。');
-        if (!state.research?.calendar_run_id) throw new Error('尚无核验交易日历，请更新数据并刷新研究状态。');
-        if (!$('scan-form').reportValidity()) return;
-        if ($('scan-model-family').value === 'high_return') {
-          const source = $('high-return-source').value;
-          if (!source) throw new Error('请选择包含因果特征的冻结来源运行。');
-          submitTask('high_return_train',{source_training_run_id:source,symbols:symbols($('scan-symbols').value),research:true,model_family:'high_return'});
-        } else if (['dual','wyckoff'].includes($('scan-model-family').value)) {
-          const family = $('scan-model-family').value;
-          const sources = [...(state.research.models || [])].sort((a,b) => (b.coverage?.requested || 0) - (a.coverage?.requested || 0));
-          if (!sources.length) throw new Error('双专家研究需要先完成含结构全列的冻结数据集。');
-          submitTask(family === 'wyckoff' ? 'wyckoff_research_train' : 'dual_research_train',{source_training_run_id:sources[0].run_id,symbols:symbols($('scan-symbols').value),end:$('scan-end').value,research:true,model_family:family});
-        } else submitTask('research_train',{symbols:symbols($('scan-symbols').value),end:$('scan-end').value,calendar_run_id:state.research.calendar_run_id,research:true});
-      } catch (error) { showError(error); }
-    });
-    [['build-research-points','high_return_points_build'],['build-research-episodes','high_return_episodes_build']].forEach(([id,kind]) => $(id).addEventListener('click',() => { try { if (trendInputSelected('scan')) throw new Error(`所选趋势策略请使用 ${selectedTrendVersion('scan') === 'czsc_trend_consensus_v2' ? 'train_trend_reassessment' : 'train_trend_consensus'} 独立重建入口。`); const source = $('high-return-source').value; if (!source) throw new Error('请选择包含因果特征的冻结来源运行。'); submitTask(kind,{source_training_run_id:source,symbols:symbols($('scan-symbols').value),research:true,model_family:'high_return'}); } catch (error) { showError(error); } }));
     ['scan-search','scan-filter'].forEach((id) => $(id).addEventListener(id === 'scan-search' ? 'input' : 'change',async () => {
       state.scanPage = 0; renderScan();
       const query = $('scan-search').value.trim();
@@ -1561,7 +1376,6 @@
     $('watchlist-form').addEventListener('submit',(event) => { event.preventDefault(); try { changeWatchlist(personalSymbol($('watchlist-symbol').value),false).then(() => { $('watchlist-symbol').value = ''; }).catch(showError); } catch (error) { showError(error); } });
     $('refresh-watchlist').addEventListener('click',() => refreshWatchlist().catch(showError));
     $('refresh-holdings').addEventListener('click',() => refreshHoldings().catch(showError));
-    $('holding-replay-form').addEventListener('submit',(event) => observeHoldingReplay(event).catch(showError));
     $('scan-watchlist').addEventListener('click',() => watchlistTask('scan').catch(showError));
     $('backtest-watchlist').addEventListener('click',() => watchlistTask('backtest').catch(showError));
     $('cancel-holding-edit').addEventListener('click',resetHoldingForm);

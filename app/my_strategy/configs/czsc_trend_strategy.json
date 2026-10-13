@@ -1,13 +1,20 @@
 {
-  "version": "czsc_trend_consensus",
+  "version": "trend_consensus",
   "publication_allowed": false,
   "observed_windows_diagnostic_only": true,
-  "source_training_run_id": "20261009-190909-196001-20261008-czsc-wyckoff-research-train-NO_GIT",
   "feature_start": "2023-01-01",
   "initial_cash": 100000,
   "seed": 42,
   "epochs": 20,
   "batch_size": 2048,
+  "full_qualified_pool": true,
+  "stock_batch_size": 360,
+  "liquidity_universe": {
+    "lookback_sessions": 20,
+    "min_median_amount": 30000000.0,
+    "complete_verified_window": true,
+    "selection": "historical_daily_eligible_union"
+  },
   "min_train_rows": 100,
   "min_calibration_rows": 30,
   "signal_points": {
@@ -115,13 +122,10 @@
   "default_entry_threshold": 0.1,
   "ma_entry_alignment": "independent_direction_and_signal_pinned_holding_exit",
   "display_name": "趋势共识策略",
-  "candidate_policy": "confirmed_native_and_first_trend_cross",
-  "candidate_envelope": "risk_qualified_fresh_trend_native_union",
+  "candidate_policy": "valid_original_opportunity_daily_reassessment",
+  "candidate_envelope": "actual_flat_pre_gate_daily_attempts",
   "risk_policy": "confirmed_source_boundary_prior_atr",
   "strategy": {
-    "strategy_version": "czsc_confirmed_trend_v1",
-    "czsc_version": "1.0.1",
-    "source_sha256": "ab0e52644fe8936e0641372cb00a15e4b9d0bd93bb2c8d36402299e0d1af18c3",
     "frequencies": [
       "日线",
       "周线",
@@ -195,7 +199,7 @@
     "checkpoint_change_is_not_cross": true
   },
   "consensus": {
-    "version": "czsc_trend_consensus",
+    "version": "trend_consensus",
     "source_weights": {
       "ma": 0.4,
       "structure": 0.2,
@@ -271,6 +275,26 @@
     "ma_boundary": "max_prior20_low_close_minus_2_prior_atr14",
     "ma_buffer_prior_atr": 0.25,
     "max_initial_stop_distance": 0.15,
-    "qualification": "first_eligible_unconsumed_original_opportunity"
+    "qualification": "each_actual_flat_eligible_day_of_unreserved_valid_original_opportunity"
+  },
+  "training_population": "strict_prior_l2_actual_flat_prefix_pre_gate_attempts",
+  "split_policy": "atomic_original_first_pre_gate_dependency_purge_each_row_real_label_end",
+  "economic_weighting": "selected_segment_symbol_shared_original_atom_connected_components_inverse_rows",
+  "holding_split_policy": "actual_held_episode_first_observed_group_each_row_real_label_end",
+  "holding_economic_weighting": "selected_segment_inverse_rows_per_actual_held_episode",
+  "reassessment": {
+    "version": "valid_original_opportunity_daily_reassessment",
+    "consumption": "actual_account_single_execution_reservation",
+    "quality_rejection_consumes": false,
+    "risk_rejection_consumes": false,
+    "missing_model_consumes": false,
+    "broker_rejection_retry": false,
+    "expiration": "original_first_available_clock",
+    "permanent_invalidation": "original_boundary_break_no_resurrection",
+    "holding_sell": "continuous_sell_pass_not_new_event_or_entry_cooldown",
+    "training_population": "strict_prior_l2_actual_flat_prefix_pre_gate_attempts",
+    "no_prior_l2_entry": "blocked_actual_account_with_forced_entry_label_clone",
+    "economic_group": "symbol_original_opportunity_ids",
+    "attempt_identity": "original_opportunity_signal_day_actual_flat_state_plan_hash"
   }
 }

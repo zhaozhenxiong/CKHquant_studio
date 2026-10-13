@@ -7,9 +7,13 @@ import numpy as np
 from my_strategy.core.run_context import stable_hash
 from my_strategy.execution.cost_model import CostModel
 from my_strategy.services.czsc_backtest import _tick
+from my_strategy.services.czsc_trend_contracts import (STRATEGY_ID, TRAINING_POPULATION,
+    CANDIDATE_POLICY, ENTRY_HEADS, HOLDING_HEADS, head_dependency_policy)
 
-ENTRY_LABEL_VERSION = "czsc_trend_actual_episode_high_return"
-EXIT_LABEL_VERSION = "czsc_trend_remaining_value_exit_advantage"
+ENTRY_LABEL_VERSION = "czsc_trend_daily_attempt_forced_episode_high_return"
+EXIT_LABEL_VERSION = "czsc_trend_continuous_sell_remaining_value_exit_advantage"
+RETURN_LABEL_VERSION = "czsc_trend_daily_attempt_forced_episode_net_return"
+LOSS_LABEL_VERSION = "czsc_trend_daily_attempt_forced_episode_net_loss"
 DEFAULT_HIGH_RETURN_CONFIG = {"min_net_return": .08, "min_r_multiple": 2.,
     "max_holding_sessions": 60, "min_risk_fraction": .001,
     "max_risk_fraction": .15, "low_return_ceiling": .02}
@@ -109,12 +113,14 @@ def exit_outcome(*, forced, continued_proceeds, continued_end, shares, close, co
 
 def target_contract(*, head, config, market_dates, source_snapshot_hash,
                     feature_schema_hash, continuation_policy_hash, initial_cash, stage, candidate_policy_hash):
-    if head not in {"entry", "ma_exit", "exit", "exit_advantage"}:
+    if head not in ENTRY_HEADS | HOLDING_HEADS:
         raise ValueError("unknown trend interval head")
-    value = {"family": "czsc_trend_consensus", "model_head": head,
-        "label_version": ENTRY_LABEL_VERSION if head == "entry" else EXIT_LABEL_VERSION,
-        "target": "actual_complete_fee_net_roundtrip_high_return_and_initial_risk" if head == "entry" else
-                  "remaining_net_sell_proceeds_exit_next_open_minus_frozen_continue_over_current_market_value",
+    entry_head = head in ENTRY_HEADS
+    targets = {"entry": "actual_complete_fee_net_roundtrip_high_return_and_initial_risk",
+        "return": "actual_complete_fee_net_roundtrip_return", "loss": "actual_complete_fee_net_roundtrip_loss"}
+    value = {"family": STRATEGY_ID, "model_head": head,
+        "label_version": label_version_for(head),
+        "target": targets[head] if entry_head else "remaining_net_sell_proceeds_exit_next_open_minus_frozen_continue_over_current_market_value",
         "source": "union", "stage": stage, "high_return": label_config(config),
         "exit_advantage_margin": float(config["high_return"].get("exit_advantage_margin", .002)),
         "source_snapshot_hash": source_snapshot_hash, "feature_schema_hash": feature_schema_hash,
@@ -122,9 +128,29 @@ def target_contract(*, head, config, market_dates, source_snapshot_hash,
         "calendar_hash": stable_hash(market_dates), "initial_cash": float(initial_cash),
         "execution_config_hash": stable_hash(config["account"]), "candidate_policy_hash": candidate_policy_hash,
         "continuation_policy_hash": continuation_policy_hash, "strategy_hash": stable_hash(config),
-        "population": "actual_flat_candidate_clone" if head == "entry" else "actual_holding_remaining_inventory_pair",
-        "admission": "same_runtime_base_direction_BUY_and_actual_flat_no_pending_SELL" if head == "entry" else "actual_held_Broker_state_only",
-        "opportunity_identity": "stable_original_event_ids_and_policy_no_daily_regeneration",
-        "maturity": "actual_complete_liquidation" if head == "entry" else "both_complete_liquidations_later_date",
+        "population": "actual_flat_pre_gate_daily_attempt_forced_entry_clone" if entry_head else "actual_holding_remaining_inventory_pair",
+        "training_population": TRAINING_POPULATION if entry_head else "actual_held_Broker_prefix_paired_liquidations",
+        "admission": "valid_original_BUY_base_risk_qualified_actual_flat_before_L2_gate" if entry_head else "actual_held_Broker_state_only",
+        "candidate_policy": CANDIDATE_POLICY,
+        "opportunity_identity": "stable_original_event_ids_and_first_available_expiration_no_daily_regeneration",
+        **head_dependency_policy(head),
+        "reference_account": "strict_prior_completed_L2_only_missing_head_blocks_actual_entry" if entry_head else "frozen_stage_actual_Broker_account",
+        "label_branch": f"single_forced_entry_real_Broker_clone_frozen_{stage}_no_pending_head" if entry_head else "actual_inventory_forced_next_open_vs_frozen_continue",
+        "holding_sell": "continuous_sell_pass_not_new_event_or_entry_cooldown",
+        "maturity": "actual_complete_liquidation" if entry_head else "both_complete_liquidations_later_date",
         "execution": "next_verified_open_guarded_Broker_partial_pending", "publication_allowed": False}
+    if head in {"return", "loss"}:
+        value["auxiliary_outcome"] = "actual_fee_net_return_continuous" if head == "return" else "actual_fee_net_return_nonpositive"
+        value["auxiliary_label_availability"] = "same_entry_clone_risk_identity_verified_price_basis_complete_liquidation"
+    if entry_head and config.get("reference_population") is not None:
+        value["reference_population"] = config["reference_population"]
+        value["reference_population_hash"] = stable_hash(config["reference_population"])
     return {**value, "contract_hash": stable_hash(value)}
+
+
+def label_version_for(head):
+    if head == "entry": return ENTRY_LABEL_VERSION
+    if head == "return": return RETURN_LABEL_VERSION
+    if head == "loss": return LOSS_LABEL_VERSION
+    if head in HOLDING_HEADS: return EXIT_LABEL_VERSION
+    raise ValueError("unknown trend interval head")

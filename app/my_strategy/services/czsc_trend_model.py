@@ -15,19 +15,20 @@ import pandas as pd
 
 from my_strategy.core.run_context import stable_hash
 from my_strategy.core.tz import local_now
-from my_strategy.services.czsc_research import _save, _file_hash
-from my_strategy.services.czsc_research_ml import _fit_preprocess, _transform
-from my_strategy.services.czsc_research_profiles import MA_TREND_COLUMNS
-from my_strategy.services.czsc_research_data import VERIFIED_SOURCES
+from my_strategy.services.czsc_trend_support import _save, _file_hash
+from my_strategy.services.czsc_trend_math import _fit_preprocess, _transform
+from my_strategy.services.czsc_market_profiles import MA_TREND_COLUMNS
+from my_strategy.services.czsc_trend_support import VERIFIED_SOURCES
 from my_strategy.services.czsc_trend_contracts import STRATEGY_ID, TREND_TARGET
 
 FAMILY = STRATEGY_ID
 HEAD = "trend_direction"
 CLASSES = ("UP", "DOWN", "NEUTRAL")
 TARGET = TREND_TARGET
+FEATURE_VERSION = "czsc_trend_independent_MA_direction"
 DEFAULT_TREND_CONFIG = {"horizon_sessions": 10, "neutral_floor": .01, "atr_multiple": 1.,
     "min_train_per_class": 100, "min_calibration_per_class": 30, "min_policy_per_class": 30}
-SCHEMA_HASH = stable_hash({"family": FAMILY, "head": HEAD, "columns": MA_TREND_COLUMNS,
+SCHEMA_HASH = stable_hash({"family": FAMILY, "feature_version": FEATURE_VERSION, "head": HEAD, "columns": MA_TREND_COLUMNS,
     "input": "known_close_twenty_independent_MA_inputs", "output": CLASSES,
     "dependency": "65_verified_raw_sessions_MA60_slope5;no_missing_or_unverified_quotes",
     "target": TARGET, "price_basis": "unadjusted_verified_no_ambiguous_corporate_action"})
@@ -48,16 +49,32 @@ def trend_config(config=None):
 
 
 def trend_contract(config=None, *, source_snapshot_hash, pipeline_contract_hash):
+    from my_strategy.services.czsc_liquidity import liquidity_policy
+    policy = liquidity_policy((config or {}).get('liquidity_universe'))
     body = {"family": FAMILY, "head": HEAD, "target": TARGET, "classes": list(CLASSES),
-        "parameters": trend_config(config), "feature_schema_hash": SCHEMA_HASH,
+        "parameters": trend_config(config), "feature_version": FEATURE_VERSION, "feature_schema_hash": SCHEMA_HASH,
         "source_snapshot_hash": source_snapshot_hash, "pipeline_contract_hash": pipeline_contract_hash,
         "horizon": "H includes next verified entry-reference session; terminal=t+H market-calendar close",
         "band": "log1p(max(neutral_floor,atr_multiple*prior14_ATR/signal_close))",
-        "maturity": "terminal_verified_close", "population": "all_qualified_daily_MA_observations",
+        "maturity": "terminal_verified_close", "population": "historical_daily_liquidity_qualified_MA_observations",
+        "liquidity_policy": policy, "liquidity_policy_hash": stable_hash(policy),
         "execution": "analytical_direction_not_profit;actual_entry_guards_separate",
         "missing": "no_missing_open_end_calendar_or_action_is_neutral",
         "publication_allowed": False}
     return {**body, "contract_hash": stable_hash(body)}
+
+
+def _validate_trend_contract(contract):
+    body = {k: v for k, v in contract.items() if k != "contract_hash"}
+    if (contract.get("contract_hash") != stable_hash(body)
+            or contract.get("family") != FAMILY or contract.get("head") != HEAD
+            or contract.get("target") != TARGET or contract.get("classes") != list(CLASSES)
+            or contract.get("feature_version") != FEATURE_VERSION
+            or contract.get("feature_schema_hash") != SCHEMA_HASH
+            or contract.get('population') != 'historical_daily_liquidity_qualified_MA_observations'
+            or contract.get('liquidity_policy_hash') != stable_hash(contract.get('liquidity_policy'))
+            or not contract.get("source_snapshot_hash") or not contract.get("pipeline_contract_hash")):
+        raise ValueError("trend target/input family contract mismatch")
 
 
 def _calendar(values):
@@ -67,7 +84,7 @@ def _calendar(values):
     return dates
 
 
-def bind_trend_inputs(frame,market_dates=None):
+def bind_trend_inputs(frame,market_dates=None,config=None):
     if not set(MA_TREND_COLUMNS) <= set(frame):
         raise ValueError("trend requires the twenty ordered MA columns")
     result = frame.copy()
@@ -92,14 +109,20 @@ def bind_trend_inputs(frame,market_dates=None):
     result['trend_dependency_complete']=dependencies
     result['model_input_eligible'] = original & finite & np.asarray(dependencies,bool)
     result['trend_input_reason'] = np.where(result['model_input_eligible'],'qualified_twenty_MA_inputs','MA_dependency_or_feature_input_unavailable')
-    result.attrs.update(schema_hash=SCHEMA_HASH, feature_columns=list(MA_TREND_COLUMNS), head=HEAD)
+    from my_strategy.services.czsc_liquidity import annotate_liquidity
+    result = annotate_liquidity(result, calendar, (config or {}).get('liquidity_universe'), verify_existing=True)
+    # Liquidity qualifies new forecasts/entries. It must never remove the same
+    # twenty MA inputs from a position's already pinned holding-exit head.
+    result['trend_input_eligible'] = result['model_input_eligible'] & result['liquidity_pool_eligible']
+    result.loc[result.model_input_eligible & ~result.liquidity_pool_eligible, 'trend_input_reason'] = 'historical_liquidity_ineligible'
+    result.attrs.update(feature_version=FEATURE_VERSION, schema_hash=SCHEMA_HASH, feature_columns=list(MA_TREND_COLUMNS), head=HEAD)
     return result
 
 
 def build_trend_labels(frame, market_dates, config=None, *, source_snapshot_hash, pipeline_contract_hash):
     """Keep unavailable/immature rows and exact nominal calendar horizons."""
     cfg = trend_config(config); calendar = _calendar(market_dates); market = {d: i for i, d in enumerate(calendar)}
-    data = bind_trend_inputs(frame,calendar); data["date"] = pd.to_datetime(data.date).dt.strftime("%Y-%m-%d")
+    data = bind_trend_inputs(frame,calendar,config); data["date"] = pd.to_datetime(data.date).dt.strftime("%Y-%m-%d")
     if data.empty or data.symbol.nunique() != 1 or data.date.duplicated().any() or list(data.date) != sorted(data.date):
         raise ValueError("trend labels require one unique ascending stock prefix")
     if not set(data.date) <= set(calendar):
@@ -120,14 +143,18 @@ def build_trend_labels(frame, market_dates, config=None, *, source_snapshot_hash
         day = row["date"]; m = market[day]; h = cfg["horizon_sessions"]
         entry_day = calendar[m+1] if m+1 < len(calendar) else None
         terminal = calendar[m+h] if m+h < len(calendar) else None
-        input_ok = bool(row.get("model_input_eligible", False) and np.isfinite(numeric[i]).all() and quote(row, "close"))
+        input_ok = bool(row.get("trend_input_eligible", False) and np.isfinite(numeric[i]).all() and quote(row, "close"))
         band = math.log1p(max(cfg["neutral_floor"], cfg["atr_multiple"]*atr[i]/float(row["close"]))) if input_ok and np.isfinite(atr[i]) else None
         outcome = {"symbol": str(row["symbol"]), "date": day, "available_at": day+"T15:00:00+08:00",
             "input_eligible": input_ok, "label_available": False, "label": np.nan, "label_class": None,
             "label_start": entry_day, "label_end": terminal, "label_available_at": None,
             "horizon_sessions": h, "trend_band_log": band, "future_log_return": np.nan,
             "label_reason": "input_ineligible", "observation_id": stable_hash({"symbol": row["symbol"], "date": day,
-                "horizon": h, "band_parameters": cfg, "schema_hash": SCHEMA_HASH})}
+                "horizon": h, "band_parameters": cfg, "schema_hash": SCHEMA_HASH,
+                "liquidity_policy_hash": row['liquidity_policy_hash']})}
+        outcome.update({key: row[key] for key in row if key.startswith('liquidity_')})
+        if not row['liquidity_pool_eligible']:
+            outcome['label_reason'] = 'historical_liquidity_ineligible'
         if input_ok and band is not None:
             if terminal is None or terminal > rows[-1]["date"]:
                 outcome["label_reason"] = "horizon_not_mature"
@@ -190,12 +217,18 @@ def _softmax(logits):
 
 
 def _concurrency_weights(frame, mask):
-    selected = frame.loc[mask]; result = []
+    selected = frame.loc[mask,['symbol','date','label_end']]; result = []
     for _, group in selected.groupby("symbol", sort=False):
-        days = sorted(set(group.date.tolist()+group.label_end.tolist())); counts = np.zeros(len(days), float)
+        days = sorted(set(group.date.tolist()+group.label_end.tolist()))
         pos = {d:i for i,d in enumerate(days)}
-        for row in group.itertuples(): counts[pos[row.date]:pos[row.label_end]+1] += 1
-        for row in group.itertuples(): result.append((row.Index, float(np.mean(1/counts[pos[row.date]:pos[row.label_end]+1]))))
+        starts=group.date.map(pos).to_numpy(int);ends=group.label_end.map(pos).to_numpy(int)
+        changes=np.zeros(len(days)+1,float)
+        np.add.at(changes,starts,1.);np.add.at(changes,ends+1,-1.)
+        counts=np.cumsum(changes[:-1]);reciprocal=np.zeros_like(counts)
+        np.divide(1.,counts,out=reciprocal,where=counts>0)
+        prefix=np.r_[0.,np.cumsum(reciprocal)]
+        weights=(prefix[ends+1]-prefix[starts])/(ends-starts+1)
+        result.extend(zip(group.index,weights))
     weights = pd.Series(dict(result)).reindex(selected.index).to_numpy(float)
     return weights/weights.mean()
 
@@ -219,9 +252,8 @@ def train_trend_head(dataset, output_dir, fold, config, *, contract):
     from threadpoolctl import threadpool_limits
     if contract != dataset.attrs.get("label_contract") or contract.get("contract_hash") != stable_hash({k:v for k,v in contract.items() if k!="contract_hash"}):
         raise ValueError("trend dataset/target identity mismatch")
-    if contract.get("family") != FAMILY or contract.get("target") != TARGET or contract.get("feature_schema_hash") != SCHEMA_HASH:
-        raise ValueError("old profitable-entry target cannot be used for trend")
-    data = dataset.drop_duplicates("observation_id").reset_index(drop=True)
+    _validate_trend_contract(contract)
+    data = dataset if dataset.observation_id.is_unique else dataset.drop_duplicates("observation_id").reset_index(drop=True)
     train, calibration, policy = trend_time_masks(data, fold); cfg = trend_config(config)
     labels = pd.to_numeric(data.label).to_numpy(float)
     counts = {name: {c:int((labels[m] == i).sum()) for i,c in enumerate(CLASSES)}
@@ -246,7 +278,7 @@ def train_trend_head(dataset, output_dir, fold, config, *, contract):
     directory = Path(output_dir)
     if directory.exists() and any(directory.iterdir()):raise FileExistsError("trend head requires a new empty directory")
     directory.mkdir(parents=True,exist_ok=True);path=directory/"model.joblib";joblib.dump(model,path)
-    manifest={"family":FAMILY,"head":HEAD,"target":TARGET,"classes":list(CLASSES),"columns":list(MA_TREND_COLUMNS),
+    manifest={"family":FAMILY,"feature_version":FEATURE_VERSION,"head":HEAD,"target":TARGET,"classes":list(CLASSES),"columns":list(MA_TREND_COLUMNS),
         "feature_schema_hash":SCHEMA_HASH,"target_contract":contract,"target_contract_hash":stable_hash(contract),
         "pipeline_contract_hash":contract["pipeline_contract_hash"],"fold":fold,"preprocess":pre,"calibration":cal,
         "train_label_end":str(data.loc[train,"label_end"].max()),"calibration_label_end":str(data.loc[calibration,"label_end"].max()),
@@ -262,12 +294,13 @@ def train_trend_head(dataset, output_dir, fold, config, *, contract):
 
 def load_trend_head(path):
     directory=Path(path).resolve();m=json.loads((directory/"manifest.json").read_text());sha=m.pop("manifest_sha256",None)
-    if sha!=stable_hash(m) or m.get("family")!=FAMILY or m.get("head")!=HEAD or m.get("target")!=TARGET or m.get("classes")!=list(CLASSES):
+    if sha!=stable_hash(m) or m.get("family")!=FAMILY or m.get("feature_version")!=FEATURE_VERSION or m.get("head")!=HEAD or m.get("target")!=TARGET or m.get("classes")!=list(CLASSES):
         raise ValueError("trend manifest identity mismatch")
     m["manifest_sha256"]=sha;checkpoint=(directory/m["checkpoint"]).resolve()
     if not checkpoint.is_relative_to(directory) or _file_hash(checkpoint)!=m["checkpoint_sha256"] or m["feature_schema_hash"]!=SCHEMA_HASH:
         raise ValueError("trend checkpoint/schema integrity mismatch")
     if stable_hash(m["target_contract"])!=m["target_contract_hash"]:raise ValueError("trend contract drift")
+    _validate_trend_contract(m["target_contract"])
     return m
 
 
@@ -288,6 +321,6 @@ class TrendSession:
         elif mode!="historical":raise ValueError("unknown trend inference mode")
         xx=_transform(frame[list(MA_TREND_COLUMNS)].to_numpy(float),m["preprocess"])
         p=_softmax(model.decision_function(xx)/m["calibration"]["temperature"]+np.asarray(m["calibration"]["bias"]))
-        eligible=frame.get("model_input_eligible",frame.get("input_eligible",pd.Series(False,index=frame.index))).fillna(False).to_numpy(bool)
+        eligible=frame.get("trend_input_eligible",frame.get("model_input_eligible",frame.get("input_eligible",pd.Series(False,index=frame.index)))).fillna(False).to_numpy(bool)
         p[~eligible]=np.nan;self.diagnostics["rows"]+=len(frame);self.diagnostics["batches"]+=1
         return p,m

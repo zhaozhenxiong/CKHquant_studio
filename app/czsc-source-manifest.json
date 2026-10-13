@@ -928,7 +928,7 @@
     "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
     "maturin": "maturin 1.13.1",
     "compiler": "clang version 23.1.2 (https://github.com/llvm/llvm-project.git 85ac560262434c9ccfc0c183ec22d4138ed647fb)",
-    "rustflags": "-Lnative=C:/Users/Admin/.codex/worktrees/96d4/KHQuant/.scratch/gnu-gcc-support -C dlltool=C:/Users/Admin/.codex/worktrees/96d4/KHQuant/.scratch/mingw/llvm-mingw-20260922-ucrt-x86_64/bin/llvm-dlltool.exe",
+    "rustflags": "-Lnative=<build-local-native-library-dir> -C dlltool=<build-local-dlltool>",
     "release_profile_overrides": {
       "CARGO_PROFILE_RELEASE_LTO": "false",
       "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "16"
@@ -936,7 +936,7 @@
     "source_tree_sha256": "23cc880c2eccb8505a011fe61a95dd9a93cb3c8fb58ae09410a37f1e776958a7",
     "cargo_locked": true,
     "source_algorithm_patches": false,
-    "cargo_target_dir": "C:\\Users\\Admin\\.codex\\worktrees\\96d4\\KHQuant\\app\\vendor\\czsc\\target",
+    "cargo_target_dir": "<build-local-cargo-target-dir>",
     "toolchain_archives": [
       {
         "name": "rustup-init.exe",
@@ -969,6 +969,7 @@
       "combase.dll",
       "crypt32.dll"
     ],
-    "discarded_attempt": "Original fat LTO/codegen-units=1 was interrupted after more than 21 CPU minutes; source unchanged. Successful build used the recorded overrides."
+    "discarded_attempt": "Original fat LTO/codegen-units=1 was interrupted after more than 21 CPU minutes; source unchanged. Successful build used the recorded overrides.",
+    "public_build_paths_redacted": true
   }
 }

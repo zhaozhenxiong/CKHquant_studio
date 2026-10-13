@@ -133,7 +133,7 @@ state.analysis=null; renderAnalysis(false); assert.equal(liveLines.size,0);
     assert result.returncode == 0, result.stderr
 
 
-def test_research_checkpoint_preflight_and_failed_backtest_empty_state():
+def test_current_checkpoint_time_check_and_failed_backtest_empty_state():
     node = shutil.which("node")
     if not node:
         pytest.skip("Node required for shipped backtest UI checks")
@@ -147,26 +147,31 @@ function element(id) {
 }
 global.document = {getElementById:element};
 const source = fs.readFileSync(process.argv[1],'utf8').replace('init().catch(showError);',
-  'globalThis.backtestTest={state,updateBacktestCheckpoint,researchSpec,renderBacktest};');
+  'globalThis.backtestTest={state,updateResearchControls,researchSpec,renderBacktest};');
 vm.runInThisContext(source);
-const {state,updateBacktestCheckpoint,researchSpec,renderBacktest}=backtestTest;
+const {state,updateResearchControls,researchSpec,renderBacktest}=backtestTest;
 state.research={calendar_run_id:'verified',models:[{run_id:'train',checkpoints:[
   {name:'production',available_at:'2026-09-30',train_label_end:'2026-06-30'},
   {name:'2025Q4',available_at:'2025-09-30',train_label_end:'2025-06-30'}]}]};
-element('backtest-mode').value='research'; element('backtest-model').value='train';
-element('backtest-model-policy').value='pinned'; element('backtest-usage-mode').value='historical';
-element('backtest-start').value='2026-01-01'; element('backtest-checkpoint').value='production';
-updateBacktestCheckpoint();
-assert(element('backtest-checkpoint').innerHTML.includes('2025Q4 历史检查点 · 可用 2025-09-30'));
-assert(element('backtest-checkpoint-help').textContent.includes('当前开始日 2026-01-01 早于模型可用日'));
-assert.throws(() => researchSpec('backtest'),/不能用于 2026-01-01/);
-element('backtest-checkpoint').value='2025Q4';
-assert.deepEqual(researchSpec('backtest'),{research:true,usage_mode:'historical',model_policy:'pinned',entry_policy:'fresh',model_run_id:'train',model_fold:'2025Q4',calendar_run_id:'verified'});
+element('analysis-mode').value='research'; element('analysis-model').value='train';
+element('analysis-model-policy').value='pinned'; element('analysis-usage-mode').value='historical';
+element('analysis-end').value='2026-01-01'; element('analysis-checkpoint').value='production';
+updateResearchControls('analysis');
+assert(element('analysis-checkpoint').innerHTML.includes('2025Q4 · 最早可用 2025-09-30'));
+assert(element('analysis-checkpoint-help').textContent.includes('固定入场检查点 production'));
+assert.throws(() => researchSpec('analysis'),/2026-09-30 才可用/);
+element('analysis-checkpoint').value='2025Q4';
+assert.deepEqual(researchSpec('analysis'),{research:true,model_family:'current',consensus_version:'trend_consensus',usage_mode:'historical',model_policy:'pinned',entry_policy:'risk',model_run_id:'train',model_fold:'2025Q4',calendar_run_id:'verified',device:'auto'});
 element('scan-mode').value='research'; element('scan-model').value='train';
 assert.equal(researchSpec('scan').model_fold,undefined);
-element('backtest-model').value=''; element('backtest-model-policy').value='auto'; updateBacktestCheckpoint();
+element('backtest-mode').value='research'; element('backtest-model').value='';
+element('backtest-model-policy').value='pinned'; element('backtest-usage-mode').value='forward';
+updateResearchControls('backtest');
 assert(element('backtest-checkpoint').disabled);
-assert.deepEqual(researchSpec('backtest'),{research:true,usage_mode:'historical',model_policy:'auto',entry_policy:'fresh',calendar_run_id:'verified'});
+assert.equal(element('backtest-model-policy').value,'auto');
+assert(element('backtest-model-policy').disabled);
+assert.equal(element('backtest-usage-mode').value,'historical');
+assert.deepEqual(researchSpec('backtest'),{research:true,model_family:'current',consensus_version:'trend_consensus',usage_mode:'historical',model_policy:'auto',entry_policy:'risk',calendar_run_id:'verified'});
 state.tracked.backtest='job'; state.tasks=[{job_id:'job',status:'failed',error:'模型 <too late>'}];
 renderBacktest();
 assert(element('backtest-metrics').innerHTML.includes('本次回测失败：模型 &lt;too late&gt;'));
@@ -184,79 +189,36 @@ assert(element('backtest-metrics').innerHTML.includes('尚未运行回测'));
     assert result.returncode == 0, result.stderr
 
 
-def test_model_unavailability_reasons_preserve_input_probability_and_entry_qualification():
+def test_current_model_unavailability_and_actual_holding_contract_are_explicit():
     node = shutil.which("node")
     if not node:
         pytest.skip("Node required for shipped model qualification checks")
     path = Path(__file__).resolve().parents[1] / "web_dashboard/static/js/workbench.js"
     script = r"""
-const fs = require('fs'), vm = require('vm'), assert = require('node:assert/strict');
-const source = fs.readFileSync(process.argv[1],'utf8').replace('init().catch(showError);',
+const fs=require('fs'), vm=require('vm'), assert=require('node:assert/strict');
+global.KHQuantEvidence=require(require('path').join(require('path').dirname(process.argv[1]),'chart_evidence.js'));
+const source=fs.readFileSync(process.argv[1],'utf8').replace('init().catch(showError);',
   'globalThis.modelTest={modelResolutionText,modelInputReasonText,ruleQualificationText,nextSessionGuidance};');
 vm.runInThisContext(source);
-const {modelResolutionText,modelInputReasonText,ruleQualificationText,nextSessionGuidance}=modelTest;
-const signal='2026-10-09T15:00:00+08:00';
-const candidate=(checkpoint,completed) => ({checkpoint,actual_training_completed_at:completed,reason_codes:['model_training_after_signal']});
-const route={status:'rules_no_model',model_family:'wyckoff',model_input_eligible:false,probability:.9,
-  reason_codes:['model_unavailable','model_training_after_signal','model_training_after_signal'],
-  model_input_reason_codes:['calendar_missing_market_bar_window','calendar_missing_market_bar_window',
-    'structural_input_ineligible','wyckoff_calendar_gap_window'],
-  model_availability_diagnostics:{signal_at:signal,candidates:[candidate('2025Q1','2026-10-09T20:00:00+08:00'),
-    candidate('production','2026-10-09T20:10:44+08:00')],
-    dual_fallback:{signal_at:signal,candidates:[candidate('production','2026-10-09T16:24:21+08:00')]}}};
-let text=modelResolutionText(route,{entry_policy:'fresh'});
-assert(text.includes('ML资格：输入不可用。'));
-assert(text.includes('概率不可用。'));
+const {modelResolutionText,modelInputReasonText}=modelTest;
+assert(modelResolutionText({model_family:'retired_family',probability:.9}).includes('历史模型协议已退役'));
+assert(!modelResolutionText({model_family:'retired_family',probability:.9}).includes('90%'));
+const resolution={model_family:'current',strategy_version:'trend_consensus',reason_codes:['no_prior_high_return_head']};
+const row={model_family:'current',strategy_version:'trend_consensus',agents:{high_return:{evaluation_status:'model_unavailable',probability:.9}},
+  account_context:{model_identity:{model_run_id:'saved-current'}},holding:{shares:0}};
+let text=modelResolutionText(resolution,row);
+assert(text.includes('所选研究运行 saved-current'));
+assert(text.includes('缺兼容模型 · 未评估'));
+assert(text.includes('该研究账户空仓，退出不适用'));
 assert(!text.includes('90%'));
-assert(text.includes('模型实际训练完成晚于信号时点，不可回用于该次判断'));
-assert.equal(text.match(/模型实际训练完成晚于信号时点/g).length,1);
-assert(text.includes('信号时点 2026-10-09 15:00:00（北京时间）'));
-assert(text.includes('最近模型候选 production：实际训练完成 2026-10-09 20:10:44（北京时间）'));
-assert(text.includes('双专家回退候选 production：实际训练完成 2026-10-09 16:24:21（北京时间）'));
-assert(!text.includes('2025Q1'));
-assert(!text.includes('20:00:00'));
-assert(text.includes('输入核验原因：近期行情与核验交易日历不一致或存在缺口；结构输入未通过核验'));
-assert.equal(text.match(/近期行情与核验交易日历不一致或存在缺口/g).length,1);
-assert(!text.includes('calendar_missing_market_bar_window'));
-assert(!text.includes('wyckoff_calendar_gap_window'));
-assert(!text.includes('model_training_after_signal'));
-const guidance=nextSessionGuidance({action:'WAIT',signal_date:'2026-10-09',reference_close:55.55,
-  reference_price_date:'2026-10-09',eligible:false,model_resolution:route,entry_policy:'fresh'},'2026-10-09');
-assert(guidance.includes('规则资格：输入不可用'));
-assert(guidance.includes('输入核验原因：'));
-
-text=modelResolutionText({...route,model_input_eligible:true,model_input_reason_codes:[],probability:null});
-assert(text.includes('无兼容检查点'));
-assert(text.includes('ML资格：未生成概率。'));
-assert(!text.includes('输入不可用'));
-assert(!text.includes('输入核验原因：'));
-text=modelResolutionText({status:'input_veto',model_input_eligible:false,model_run_id:'existing-model',
-  model_input_reason_codes:['ma_history_unavailable'],probability:.8});
-assert(text.includes('existing-model'));
-assert(text.includes('均线输入历史不足'));
-assert(!text.includes('无兼容检查点'));
-assert(!text.includes('未使用模型'));
+assert(text.includes('尚未取得生产资格'));
+text=modelResolutionText(resolution,{...row,holding:{shares:100},account_action:{exit_evaluation:{probability:.8,holding_contract_compatible:false}}});
+assert(text.includes('此日未生成兼容退出评分'));
 assert(!text.includes('80%'));
+text=modelResolutionText(resolution,{...row,holding:{shares:100},account_action:{exit_evaluation:{probability:.8,holding_contract_compatible:true}}});
+assert(text.includes('持仓退出概率 80%'));
 assert.equal(modelInputReasonText({model_input_reason_codes:['quality_warmup','wyckoff_quality_warmup']},
   {model_input_reason_codes:['quality_warmup']}),'可靠历史不足');
-
-const shadow={status:'entry_contract_shadow',model_run_id:'available-model',model_input_eligible:true,
-  probability:.7,threshold:.55,applied_to_entry:true,reason_codes:['entry_contract_mismatch','model_shadow']};
-text=modelResolutionText(shadow,{eligible:true,entry_policy:'fresh'});
-assert(text.includes('ML资格：影子观察。'));
-assert(text.includes('研究概率 70%'));
-assert(text.includes('ML 未参与入场'));
-assert(!text.includes('输入不可用'));
-text=modelResolutionText({...shadow,status:'production',reason_codes:[]},{eligible:true,entry_policy:'legacy'});
-assert(text.includes('ML资格：参与入场过滤。'));
-assert(text.includes('ML 已参与入场过滤。'));
-const validation={...route,model_input_eligible:true,model_input_reason_codes:[],
-  reason_codes:['model_unavailable','model_validation_after_signal'],
-  model_availability_diagnostics:{signal_at:signal,candidates:[{checkpoint:'production',
-    available_at:'2026-10-10T15:00:00+08:00',reason_codes:['model_validation_after_signal']}]}};
-text=modelResolutionText(validation);
-assert(text.includes('模型验证数据可用时间晚于信号时点'));
-assert(text.includes('验证数据可用 2026-10-10 15:00:00（北京时间）'));
 """
     result = subprocess.run([node, "-e", script, str(path)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr

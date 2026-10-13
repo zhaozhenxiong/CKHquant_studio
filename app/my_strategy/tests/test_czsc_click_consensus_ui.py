@@ -27,27 +27,27 @@ const row={date:'2026-07-01',reference_close:11,events:[
   {source:'structure',event_type:'three_buy',date:'2026-07-01',candidate_eligible:false}],
   agents:{ma:{kind:'model_probability',probability:.72},structure:{kind:'rule_evidence',buy_count:1,sell_count:0},
   wyckoff:{kind:'rule_evidence',buy_score:.8,sell_score:.1},high_return:{kind:'model_probability',probability:null}}};
-const decision={date:row.date,action:'BUY',emitted:true,buy_support:2,sell_support:0,state_before:'NEUTRAL',state_after:'BULLISH',
+const decision={date:row.date,version:'trend_consensus',action:'BUY',emitted:true,buy_support:2,sell_support:0,state_before:'NEUTRAL',state_after:'BULLISH',
   buy_independent_count:2,sell_independent_count:0,buy_independent_families:['ma','wyckoff'],sell_independent_families:[],reason_codes:['multi_agent_direction_confirmed'],agents:{ma:{judgment:'BUY',threshold:.55,model_threshold:.6,historical_reconstruction:true,reason_codes:['eligible_causal_source_support']},
   structure:{judgment:'UNAVAILABLE',reason_codes:['input_ineligible']},wyckoff:{judgment:'BUY',reason_codes:['demand_advantage']},
   high_return:{judgment:'ABSTAIN',status:'unavailable',threshold:.1,required:true,counts_as_vote:false,reason_codes:['high_return_score_unavailable']},arbiter:{judgment:'BUY',reason_codes:['multi_agent_direction_confirmed']}}};
-const consensus={rows:[decision]},evidence={rows:[row]};
+const consensus={version:'trend_consensus',config:{version:'trend_consensus'},rows:[decision]},evidence={rows:[row]};
 const group={kind:'intention',source_count:1,action:'BUY',visible:true,entries:[{row:{source:'consensus',evidence_date:row.date}}]};
 const html=ui.popupHtml({evidence,consensus,groups:[group],barDate:row.date,frequency:'日线'});
-assert(html.indexOf('B · 最终买点')<html.indexOf('收盘参考价'));
+assert(html.includes('趋势共识策略 · 方向诊断：B'));
 assert(html.includes('入场模型分 72%'));assert(html.includes('需求 80 / 100'));assert(!html.includes('需求 80%'));
 assert(html.includes('仲裁意见：支持买入'));assert(html.includes('仲裁意见：不可用'));
 assert(html.includes('持仓退出概率 不可用'));assert(!html.includes('28%'));
 assert(html.includes('原始候选证据 2 条（含未通过资格的证据）'));
 assert(html.includes('recovery&lt;script&gt;'));assert(!html.includes('recovery<script>'));
-assert(html.includes('多 Agent 已确认最终方向'));assert(html.includes('独立证据家族：买 2（均线／辅助结构、威科夫量价）'));assert(html.includes('均线 ML'));assert(html.includes('当前仲裁门槛 55%'));assert(html.includes('原模型冻结门槛 60%'));assert(html.includes('不计入支持票数'));assert(html.includes('历史重建意见'));assert(html.includes('方向 中性 → 看多'));
+assert(html.includes('多 Agent 已确认最终方向'));assert(html.includes('独立证据家族：买 2（均线／辅助结构、威科夫量价）'));assert(html.includes('均线 ML'));assert(html.includes('当前仲裁门槛 55%'));assert(html.includes('原模型冻结门槛 60%'));assert(html.includes('仅为已有买入候选加质量分'));assert(html.includes('历史重建意见'));assert(html.includes('方向 中性 → 看多'));
 const wait={...decision,action:'WAIT',proposed_action:'BUY',emitted:false,reason_codes:['insufficient_independent_support']};
 const merged=ui.mergeEvidenceRows([row],[wait]);
 assert.equal(ui.finalSide(merged[0].consensus),'');
 assert(ui.historyHtml(merged).includes('独立证据家族支持未达到门槛'));
 assert(!ui.historyHtml(merged).includes('<td>B</td>')); // Raw candidates never become final history points.
 assert(!ui.historyHtml([row]).includes('<td>B</td>'));
-assert(ui.consensusHtml(wait).includes('本日未生成最终买卖点'));
+assert(ui.consensusHtml(wait).includes('方向诊断：观察'));
 assert(ui.consensusHtml(null).includes('最终判断不可用'));
 assert(ui.historyHtml(ui.mergeEvidenceRows([row],[decision])).includes('<td>B</td>'));
 assert.equal(ui.probability(null),'不可用');assert.equal(ui.probability(false),'不可用');assert.equal(ui.probability(0),'0%');
@@ -93,7 +93,7 @@ const profile=as_of=>({status:'available',as_of,window_bars:120,chip70_low:9.5,c
 const profiles=Object.fromEntries(dates.map(day=>[day,profile(day)]));
 const rows=dates.map((date,i)=>({date,reference_close:11+i,agents:{},events:[{source:'structure',date,action:'BUY',event_type:'raw_candidate'}]}));
 const consensusRows=dates.map((date,i)=>({date,action:i===0?'BUY':i===2?'SELL':'WAIT',emitted:i===0||i===2,reason_codes:[i===0||i===2?'consensus_confirmed':'insufficient_support'],agents:{arbiter:{judgment:i===0?'BUY':i===2?'SELL':'WAIT'}}}));
-const consensus={config:{min_support:2},rows:consensusRows,events:consensusRows.filter(row=>row.emitted).map(row=>({date:row.date,time:row.date,evidence_date:row.date,source:'consensus',action:row.action,symbol:'600027.SH',event_id:row.date}))};
+const consensus={version:'trend_consensus',config:{version:'trend_consensus',min_support:2},rows:consensusRows,events:consensusRows.filter(row=>row.emitted).map(row=>({date:row.date,time:row.date,evidence_date:row.date,source:'consensus',action:row.action,symbol:'600027.SH',event_id:row.date}))};
 const raw=dates.map(date=>({source:'structure',date,time:date,action:'BUY',candidate_eligible:true,symbol:'600027.SH'}));
 state.analysis={symbol:'600027.SH',as_of:dates[3],data_end:dates[3],consensus_decisions:consensus,events:raw,chart_evidence:{rows},
   frequencies:{'日线':{bars,indicators:{rows:bars,chip_profile:profiles[dates[3]],chip_profiles:profiles}},
@@ -106,8 +106,8 @@ assert.deepEqual(firstSeries.markers.map(({time,text})=>({time,text})),[{time:da
 const hover=time=>crosshair({time,point:{x:420,y:430},seriesData:new Map([[firstSeries,{close:11}]])});
 const clicked=time=>click({time,point:{x:750,y:700}});
 hover(dates[0]);assert(element('chart-evidence-popup').hidden);assert.equal(selectedChipProfile().as_of,dates[0]);
-clicked(dates[0]);assert(!element('chart-evidence-popup').hidden);assert(element('chart-evidence-popup').innerHTML.includes('B · 最终买点'));
-clicked(dates[2]);assert(element('chart-evidence-popup').innerHTML.includes('S · 最终卖点'));assert(element('chart-evidence-popup').innerHTML.includes('13 元'));
+clicked(dates[0]);assert(!element('chart-evidence-popup').hidden);assert(element('chart-evidence-popup').innerHTML.includes('趋势共识策略 · 方向诊断：B'));
+clicked(dates[2]);assert(element('chart-evidence-popup').innerHTML.includes('趋势共识策略 · 方向诊断：S'));assert(element('chart-evidence-popup').innerHTML.includes('13 元'));
 const closeButton=newElement('button');closeButton.setAttribute('data-chart-evidence-close','');
 documentListeners.click({target:{closest:()=>closeButton}});assert(element('chart-evidence-popup').hidden);
 hover(dates[0]);assert(element('chart-evidence-popup').hidden);
@@ -123,12 +123,12 @@ assert.deepEqual(firstSeries.markers.map(marker=>marker.text),['B','S']);
 state.backtest={trades:[{symbol:'600027.SH',date:dates[1],action:'BUY',price:11}]};element('layer-trades').checked=true;renderAnalysis(false);
 clicked(dates[2]);assert(!element('chart-evidence-popup').hidden);assert(!element('chart-evidence-popup').innerHTML.includes('data-evidence-date="2026-07-02"'));
 const buyMarker=firstSeries.markers.find(marker=>marker.text==='B');click({time:dates[2],hoveredObjectId:buyMarker.id,point:{x:750,y:700}});
-assert(element('chart-evidence-popup').innerHTML.includes('B · 最终买点'));assert.equal(selectedChipProfile().as_of,dates[0]);
+assert(element('chart-evidence-popup').innerHTML.includes('趋势共识策略 · 方向诊断：B'));assert.equal(selectedChipProfile().as_of,dates[0]);
 assert(element('chart-evidence-popup').innerHTML.includes('data-evidence-date="2026-07-01"'));
 assert(element('chart-evidence-popup').innerHTML.includes('data-evidence-date="2026-07-03"'));
 const dateButton=newElement('button');dateButton.dataset.evidenceDate=dates[0];
 documentListeners.click({target:{closest:()=>dateButton}});assert.equal(selectedChipProfile().as_of,dates[0]);
-assert(element('chart-evidence-popup').innerHTML.includes('B · 最终买点'));
+assert(element('chart-evidence-popup').innerHTML.includes('趋势共识策略 · 方向诊断：B'));
 state.frequency='日线';element('layer-trades').checked=false;delete state.analysis.consensus_decisions;renderAnalysis(false);
 assert.equal(firstSeries.markers.length,0);clicked(dates[0]);hover(dates[0]);assert(element('chart-evidence-popup').hidden);
 assert(element('marker-summary').textContent.includes('没有多 Agent 仲裁'));

@@ -112,7 +112,7 @@ def test_scan_rejects_stale_last_event(manager, monkeypatch, tmp_path):
                "failures": [{"symbol": "600519.SH", "error": "行情缺少扫描日 2026-09-28，标的最后日期为 2026-09-25"}],
                "compute_info": {"selected_device": "cpu", "backend": "numpy", "cuda_work": False, "bars": 1, "tensor_operations": ["comparison"], "cuda_elapsed_ms": None}}
     monkeypatch.setattr(czsc_batch, "iter_replay_batches", batches)
-    job = manager.submit("scan", {"symbols": ["000001.SZ", "600519.SH"], "end": "2026-09-28", "device": "cpu"})
+    job = manager.submit("scan", {"research": False, "symbols": ["000001.SZ", "600519.SH"], "end": "2026-09-28", "device": "cpu"})
     finished = wait_terminal(manager, job["job_id"])
     assert finished["status"] == "succeeded", finished["error"]
     result = finished["result"]
@@ -133,7 +133,7 @@ def test_interactive_analysis_saves_a_reproducible_run(manager, monkeypatch):
                 "as_of": kwargs["as_of"], "frequencies": {}, "events": []}
     monkeypatch.setattr(czsc_analysis, "analyze_stock", calculate)
     with TestClient(create_app(manager)) as client:
-        response = client.post("/api/analysis", json={"symbol": "000001.SZ", "start": "2025-01-01", "as_of": "2025-09-30"})
+        response = client.post("/api/analysis", json={"research": False, "symbol": "000001.SZ", "start": "2025-01-01", "as_of": "2025-09-30"})
         assert response.status_code == 200
         result = response.json()
         assert result["request"]["as_of"] == "2025-09-30"

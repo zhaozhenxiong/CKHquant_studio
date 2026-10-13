@@ -6,12 +6,14 @@ import numpy as np
 import pandas as pd
 
 from my_strategy.core.run_context import stable_hash
-from my_strategy.services.czsc_research_profiles import MA_TREND_COLUMNS, STRUCTURE_COLUMNS
-from my_strategy.services.czsc_wyckoff_features import W_INPUT_COLUMNS
+from my_strategy.services.czsc_market_profiles import MA_TREND_COLUMNS, STRUCTURE_COLUMNS
+from my_strategy.services.czsc_price_volume_features import W_INPUT_COLUMNS
+from my_strategy.services.czsc_trend_contracts import (SPLIT_POLICY, ECONOMIC_WEIGHTING,
+    HELD_SPLIT_POLICY, HELD_ECONOMIC_WEIGHTING, HOLDING_HEADS)
 
-FEATURE_VERSION = "czsc_trend_operation"
-FULL_SCHEMA_VERSION = "czsc_trend_operation_calendar_bound"
-NATIVE_COLUMNS = ("v4_structure_buy_support", "v4_structure_sell_support", "v4_w_demand_score", "v4_w_supply_score")
+FEATURE_VERSION = "czsc_trend_operation_daily_attempt"
+FULL_SCHEMA_VERSION = "czsc_trend_operation_calendar_bound_daily_attempt"
+NATIVE_COLUMNS = ("native_structure_buy_support", "native_structure_sell_support", "native_w_demand_score", "native_w_supply_score")
 L1_OUTPUT_COLUMNS = ("trend_p_up", "trend_p_down", "trend_p_neutral", "trend_probability_available")
 SOURCE_COLUMNS = tuple(f"source_{s}" for s in ("ma", "structure", "wyckoff"))
 SOURCE_AVAILABILITY_COLUMNS = tuple(f"{s}_input_available" for s in ("ma", "structure", "wyckoff"))
@@ -27,12 +29,16 @@ EXIT_FEATURE_COLUMNS = tuple((*ENTRY_FEATURE_COLUMNS, *HOLDING_COLUMNS))
 L1_MA_ENTRY_COLUMNS = tuple(MA_TREND_COLUMNS)
 L1_MA_EXIT_COLUMNS = tuple((*MA_TREND_COLUMNS, *HOLDING_COLUMNS))
 ENTRY_SCHEMA_HASH = stable_hash({"version": FULL_SCHEMA_VERSION, "columns": ENTRY_FEATURE_COLUMNS, "scope": "signal_close_only",
+    "split_policy": SPLIT_POLICY, "economic_weighting": ECONOMIC_WEIGHTING,
+    "population": "actual_flat_pre_gate_daily_attempts;original_opportunity_clock_no_refresh",
     "candidate_risk_fraction": "known_signal_target_weight_times_close_minus_plan_stop_over_close;no_future_fill_or_outcome",
     "source_qualification":"unqualified_MA65_native_structure_or_W_groups_are_missing_values_not_zero"})
 EXIT_SCHEMA_HASH = stable_hash({"version": FULL_SCHEMA_VERSION, "columns": EXIT_FEATURE_COLUMNS, "scope": "actual_holding_observed_prefix_only",
+    "split_policy": HELD_SPLIT_POLICY, "economic_weighting": HELD_ECONOMIC_WEIGHTING,
     "original_entry_schema_hash":ENTRY_SCHEMA_HASH})
 MA_ENTRY_SCHEMA_HASH = stable_hash({"version": FEATURE_VERSION, "columns": L1_MA_ENTRY_COLUMNS, "scope": "independent_ma_entry"})
-MA_EXIT_SCHEMA_HASH = stable_hash({"version": FEATURE_VERSION, "columns": L1_MA_EXIT_COLUMNS, "scope": "independent_ma_actual_holding"})
+MA_EXIT_SCHEMA_HASH = stable_hash({"version": FEATURE_VERSION, "columns": L1_MA_EXIT_COLUMNS, "scope": "independent_ma_actual_holding",
+    "split_policy": HELD_SPLIT_POLICY, "economic_weighting": HELD_ECONOMIC_WEIGHTING})
 
 
 def causal_market_row(feature, date):
@@ -56,15 +62,15 @@ def causal_market_row(feature, date):
                 if pd.isna(stamp) or stamp > cutoff:
                     values.update({k: np.nan for k in columns})
                     break
-    if not feature.get("v4_structure_input_eligible",False):
-        values.update({k:np.nan for k in (*STRUCTURE_COLUMNS,"v4_structure_buy_support","v4_structure_sell_support")})
-    if not feature.get("v4_w_input_eligible",False):
-        values.update({k:np.nan for k in (*W_INPUT_COLUMNS,"v4_w_demand_score","v4_w_supply_score")})
+    if not feature.get("native_structure_input_eligible",False):
+        values.update({k:np.nan for k in (*STRUCTURE_COLUMNS,"native_structure_buy_support","native_structure_sell_support")})
+    if not feature.get("native_w_input_eligible",False):
+        values.update({k:np.nan for k in (*W_INPUT_COLUMNS,"native_w_demand_score","native_w_supply_score")})
     values.update(ma_input_available=float(bool(feature.get("model_input_eligible", False)) and
         np.isfinite([values[k] for k in MA_TREND_COLUMNS]).all()),
-        structure_input_available=float(bool(feature.get("v4_structure_input_eligible",False))
+        structure_input_available=float(bool(feature.get("native_structure_input_eligible",False))
             and any(np.isfinite(values[k]) for k in STRUCTURE_COLUMNS)),
-        wyckoff_input_available=float(bool(feature.get("v4_w_input_eligible",False)) and
+        wyckoff_input_available=float(bool(feature.get("native_w_input_eligible",False)) and
             np.isfinite([values[k] for k in W_INPUT_COLUMNS if k != "w_event_age"]).all()))
     return values
 
@@ -151,11 +157,12 @@ def holding_feature_row(feature, snapshot, *, entry_values, prefix, market_index
 
 
 def bind_frame(frame, *, head, contract, ma_only=False):
-    is_exit = head == "exit"
+    is_exit = head in HOLDING_HEADS
     columns = (L1_MA_EXIT_COLUMNS if is_exit else L1_MA_ENTRY_COLUMNS) if ma_only else (EXIT_FEATURE_COLUMNS if is_exit else ENTRY_FEATURE_COLUMNS)
     schema = (MA_EXIT_SCHEMA_HASH if is_exit else MA_ENTRY_SCHEMA_HASH) if ma_only else (EXIT_SCHEMA_HASH if is_exit else ENTRY_SCHEMA_HASH)
     frame.attrs.update(feature_version=FEATURE_VERSION, schema_hash=schema, feature_columns=list(columns),
-        feature_profile="ma_operation_v1" if ma_only else "high_return_operation_v1",
+        feature_profile="ma_actual_held_episode" if ma_only and is_exit else "ma_operation" if ma_only
+            else "trend_actual_held_episode" if is_exit else "high_return_operation_daily_attempt",
         label_version=contract["label_version"], label_contract=contract,
         data_version=stable_hash({"contract": contract["contract_hash"], "columns": columns}))
     return frame

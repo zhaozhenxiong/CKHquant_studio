@@ -106,7 +106,7 @@ const rows=dates.map((date,i)=>({date,symbol:'600027.SH',reference_close:11+i,re
 const events=['ma','structure','wyckoff'].map((source,i)=>({time:dates[0],available_at:dates[0]+'T15:00:00+08:00',source,action:'BUY',candidate_eligible:true,event_type:'test'+i,symbol:'600027.SH'}));
 events.push({time:dates[0],available_at:dates[0]+'T15:00:00+08:00',source:'ma',action:'SELL',event_type:'exit',symbol:'600027.SH'});
 const consensusRows=dates.map((date,i)=>({date,action:i===0?'BUY':i===2?'SELL':'WAIT',emitted:i!==1,buy_support:i===0?2:0,sell_support:i===2?2:0,reason_codes:[i===1?'insufficient_consensus':'consensus_confirmed'],agents:{ma:{judgment:i===0?'BUY':'WAIT',reason_codes:['saved_model_score']},structure:{judgment:i===2?'SELL':'BUY',reason_codes:['confirmed_structure']},wyckoff:{judgment:'WAIT',reason_codes:['balanced_supply_demand']},high_return:{judgment:'UNAVAILABLE',reason_codes:['no_candidate_signal']},arbiter:{judgment:i===0?'BUY':i===2?'SELL':'WAIT',reason_codes:['independent_evidence_families']}}}));
-const consensus={config:{version:'consensus_v1',min_support:2},rows:consensusRows,events:consensusRows.filter(row=>row.emitted).map(row=>({source:'consensus',date:row.date,evidence_date:row.date,action:row.action,symbol:'600027.SH',event_id:row.date}))};
+const consensus={config:{version:'trend_consensus',min_support:2},rows:consensusRows,events:consensusRows.filter(row=>row.emitted).map(row=>({source:'consensus',date:row.date,evidence_date:row.date,action:row.action,symbol:'600027.SH',event_id:row.date}))};
 state.analysis={symbol:'600027.SH',consensus_decisions:consensus,as_of:dates[2],data_end:dates[2],frequencies:{'日线':{bars,indicators:{rows:bars.map(bar=>({...bar,ma5:11})),chip_profile:latest,chip_profiles:{[dates[0]]:old,[dates[2]]:latest}}}},events,chart_evidence:{rows}};
 state.query={symbol:'600027.SH',start:dates[0],end:dates[2]};state.dates=dates;state.replayIndex=2;
 element('analysis-chart').clientWidth=640;element('view-analysis').hidden=false;
@@ -118,7 +118,7 @@ hover(dates[0]);assert.equal(selectedChipProfile().as_of,dates[0]);
 assert(element('chart-evidence-popup').hidden);assert.equal(interactions.selection().popupOpen,false);
 assert(element('chip-profile-caption').textContent.includes(dates[0]));
 click({time:dates[0],point:{x:750,y:700}});
-assert.equal(interactions.selection().pinned,dates[0]);assert.equal(element('chart-evidence-popup').dataset.pinned,'true');assert(!element('chart-evidence-popup').hidden);assert(element('chart-evidence-popup').innerHTML.includes('B · 最终买点'));assert(element('chart-evidence-popup').innerHTML.includes('仲裁意见：支持买入'));
+assert.equal(interactions.selection().pinned,dates[0]);assert.equal(element('chart-evidence-popup').dataset.pinned,'true');assert(!element('chart-evidence-popup').hidden);assert(element('chart-evidence-popup').innerHTML.includes('趋势共识策略 · 方向诊断：B'));assert(element('chart-evidence-popup').innerHTML.includes('仲裁意见：支持买入'));
 assert(parseFloat(element('chart-evidence-popup').style.left)+460<=907-12);
 assert(parseFloat(element('chart-evidence-popup').style.top)+500<=924-12);
 hover(dates[2]);assert.equal(selectedChipProfile().as_of,dates[0]);

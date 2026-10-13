@@ -122,8 +122,8 @@ def test_reused_preparation_rejects_wrong_cutoff_config_or_decisions(raw_db):
 
 def test_batch_cli_options_and_bounded_settings(monkeypatch):
     args = build_parser().parse_args(["backtest-batch", "--stocks", "000001.SZ", "--start", "2026-01-01",
-                                      "--device", "cuda:1", "--cpu-workers", "4", "--batch-size", "32"])
-    assert (args.device, args.cpu_workers, args.batch_size) == ("cuda:1", 4, 32)
+                                      "--device", "cuda:1", "--cpu-workers", "4"])
+    assert (args.device, args.cpu_workers) == ("cuda:1", 4)
     for command in ("analyze", "scan", "backtest", "backtest-batch"):
         defaults = build_parser().parse_args([command])
         assert defaults.start == "2026-01-01"

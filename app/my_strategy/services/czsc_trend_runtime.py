@@ -11,7 +11,8 @@ import pandas as pd
 
 from my_strategy.core.paths import ARTIFACT_RUNS_ROOT, MY_STRATEGY_ROOT
 from my_strategy.core.run_context import stable_hash
-from my_strategy.services.czsc_trend_contracts import STRATEGY_ID, DISPLAY_NAME, strategy_config
+from my_strategy.services.czsc_trend_contracts import (STRATEGY_ID, DISPLAY_NAME,
+    TRAINING_POPULATION, ATTEMPT_IDENTITY, ECONOMIC_GROUP_IDENTITY, strategy_config)
 
 CURRENT_MODEL_PATH = Path(os.environ.get("KHQUANT_CURRENT_STRATEGY_CONFIG",
     str(MY_STRATEGY_ROOT / "configs/current_strategy.json")))
@@ -24,17 +25,14 @@ PRICING_ASSUMPTIONS = {
 }
 
 
-def load_model_run(model_run_id=None):
+def load_model_run(model_run_id=None, *, as_of=None, scope='research'):
+    """Default inference consumes only a qualified, effective registry selection."""
     from my_strategy.services.czsc_trend_pipeline import read_run
-    if model_run_id is None and not ARTIFACT_RUNS_ROOT.is_dir():
-        return None, None
-    if model_run_id is None and CURRENT_MODEL_PATH.is_file():
-        current = json.loads(CURRENT_MODEL_PATH.read_text(encoding="utf-8"))
-        if current.get("strategy") == STRATEGY_ID and current.get("model_run_id"):
-            # A delivered application uses its deliberately selected run.
-            # Within that run, each forecast still needs a legitimately prior
-            # checkpoint. This is separate from automatic run qualification.
-            model_run_id = current["model_run_id"]
+    if model_run_id is None:
+        from my_strategy.services.model_training_center import TrainingCenter
+        model_run_id = TrainingCenter().active_model_run_id(as_of=as_of, scope=scope)
+        if not model_run_id:
+            return None, None
     return read_run(model_run_id)
 
 
@@ -88,8 +86,8 @@ def runtime_overlay(features, calendar, *, model_run_id=None, model_fold=None, m
     from my_strategy.services.czsc_trend_features import event_prefix_rows, original_evidence_events
     from my_strategy.services.czsc_trend_consensus import prepare_trend_decisions
     from my_strategy.services.czsc_trend_account import replay_trend_account
-    from my_strategy.services.czsc_native_evidence_v4 import build_native_evidence_v4
-    from my_strategy.services.czsc_research_ml import _device
+    from my_strategy.services.czsc_native_evidence import build_native_evidence
+    from my_strategy.services.czsc_trend_math import _device
 
     if model_mode not in {"historical", "production"}:
         raise ValueError("趋势共识策略只支持按时点判断")
@@ -100,8 +98,8 @@ def runtime_overlay(features, calendar, *, model_run_id=None, model_fold=None, m
     frame = frame[frame.date <= cutoff].reset_index(drop=True)
     if frame.empty or frame.symbol.nunique() != 1 or list(frame.date) != sorted(set(frame.date)):
         raise ValueError("趋势共识输入需要单股按日有序唯一行情")
-    root, report = load_model_run(model_run_id)
-    cfg = copy.deepcopy(report["config"]) if report else strategy_config()
+    root, report = load_model_run(model_run_id, as_of=cutoff)
+    cfg = strategy_config(report["config"]) if report else strategy_config()
     label_target = {"min_net_return": float(cfg["high_return"]["min_net_return"]),
                     "min_r_multiple": float(cfg["high_return"]["min_r_multiple"])}
     account_start = str(account_start or cfg["account"].get("start", cfg["feature_start"]))[:10]
@@ -117,7 +115,7 @@ def runtime_overlay(features, calendar, *, model_run_id=None, model_fold=None, m
         cfg["consensus"].update(changed)
     if initial_cash is not None and float(initial_cash) != float(cfg["initial_cash"]):
         raise ValueError("账户初始资金与模型训练契约不匹配，请训练对应资金条件模型")
-    pack = build_native_evidence_v4(frame, cfg, market_dates=calendar)
+    pack = build_native_evidence(frame, cfg, market_dates=calendar)
     frame = bind_trend_inputs(pack["frame"], calendar)
     frame["date"] = pd.to_datetime(frame.date).dt.strftime("%Y-%m-%d")
     trend_session, binary_session = TrendSession(), HeadSession()
@@ -150,7 +148,10 @@ def runtime_overlay(features, calendar, *, model_run_id=None, model_fold=None, m
             "threshold": cfg["consensus"]["high_return_threshold"],
             "target": "actual_complete_fee_net_roundtrip_high_return_and_initial_risk",
             "reason_codes": ([] if passed else ["high_return_below_threshold"]) if status == "scored" else [status],
-            "probability_scope": "actual_flat_account_at_signal_close", "usage_mode": model_mode}
+            "probability_scope": "actual_flat_account_at_signal_close", "usage_mode": model_mode,
+            "training_population": TRAINING_POPULATION,
+            **{key: copy.deepcopy(candidate.get(key)) for key in
+                ("attempt_id", "economic_group_id", "original_opportunity_ids", "reference_state_hash", "flat_state_hash", "entry_plan_hash")}}
         evaluation_by_day[day] = copy.deepcopy(value)
         return value
 
@@ -180,6 +181,7 @@ def runtime_overlay(features, calendar, *, model_run_id=None, model_fold=None, m
             reasons.extend((account_row.get("entry_evaluation") or {}).get("reason_codes") or [])
         account_row["reason_codes"] = list(dict.fromkeys(reasons))
     account_rows = {r["date"]: r for r in account.get("rows", [])}
+    attempts_by_day = {r["date"]: r for r in account.get("entry_diagnostics", [])}
     holding_by_day = {r["date"]: r for r in account.get("holding_snapshots", [])}
     following = dict(zip(calendar[:-1], calendar[1:]))
     rows, counts = [], Counter()
@@ -229,6 +231,12 @@ def runtime_overlay(features, calendar, *, model_run_id=None, model_fold=None, m
         else:
             quality["applied_to_entry"] = quality.get("status") == "scored"
         quality.setdefault("target", "actual_complete_fee_net_roundtrip_high_return_and_initial_risk")
+        attempt = attempts_by_day.get(day) or {}
+        quality.update(training_population=TRAINING_POPULATION,
+            attempt_identity=ATTEMPT_IDENTITY, economic_group_identity=ECONOMIC_GROUP_IDENTITY)
+        for key in ("attempt_id", "economic_group_id", "original_opportunity_ids", "reference_state_hash", "flat_state_hash", "entry_plan_hash"):
+            if key in attempt:
+                quality[key] = copy.deepcopy(attempt[key])
         quality["label_target"] = copy.deepcopy(label_target)
         quality["configured_weight"] = cfg["consensus"]["quality_weight"]
         quality["quality_contribution"] = quality["buy_contribution"] = (
@@ -240,10 +248,16 @@ def runtime_overlay(features, calendar, *, model_run_id=None, model_fold=None, m
         row.update(events=copy.deepcopy(row.get("candidate_evidence", [])), reference_close=row["reference_price"],
             reference_price_date=day, next_market_session=following.get(day),
             high_return_probability=quality["probability"], exit_probability=None,
+            entry_attempt={key: copy.deepcopy(quality.get(key)) for key in
+                ("attempt_id", "economic_group_id", "original_opportunity_ids", "reference_state_hash", "flat_state_hash", "entry_plan_hash")}
+                if attempt else None,
             account_action=copy.deepcopy(account_rows.get(day)), holding=copy.deepcopy(holding_by_day.get(day)),
-            model_resolution={**quality.get("model_identity", {}), "model_family": "high_return",
+            model_resolution={**quality.get("model_identity", {}), "model_family": STRATEGY_ID,
                 "schema_family": STRATEGY_ID, "display_name": DISPLAY_NAME,
-                "probability": quality["probability"], "reason_codes": quality["reason_codes"], "publication_allowed": False})
+                "probability": quality["probability"], "reason_codes": quality["reason_codes"],
+                "training_population": TRAINING_POPULATION,
+                "attempt_id": quality.get("attempt_id"), "economic_group_id": quality.get("economic_group_id"),
+                "original_opportunity_ids": copy.deepcopy(quality.get("original_opportunity_ids")), "publication_allowed": False})
         counts[quality["status"]] += 1
         rows.append(row)
     prepared["rows"] = copy.deepcopy(rows)
@@ -258,7 +272,7 @@ def runtime_overlay(features, calendar, *, model_run_id=None, model_fold=None, m
             position_intent=latest["account_action"].get("action", "WAIT"))
     else:
         latest.update(action="WAIT", position_intent="WAIT")
-    latest.update(model_family="high_return", schema_family=STRATEGY_ID, display_name=DISPLAY_NAME,
+    latest.update(model_family=STRATEGY_ID, schema_family=STRATEGY_ID, display_name=DISPLAY_NAME,
         account_context=account["context"], probability_scope="actual_flat_account_at_signal_close")
     trend_stats = copy.deepcopy(getattr(trend_session, "diagnostics", {}))
     interval_stats = copy.deepcopy(getattr(binary_session, "diagnostics", {}))
@@ -269,7 +283,7 @@ def runtime_overlay(features, calendar, *, model_run_id=None, model_fold=None, m
         "model_gate": (report or {}).get("model_gate", {"passed": False}), "publication_allowed": False,
         "pricing_assumptions": copy.deepcopy(PRICING_ASSUMPTIONS),
         "high_return_target": copy.deepcopy(label_target),
-        "compute_info": {"model_family": "high_return", "display_name": DISPLAY_NAME,
+        "compute_info": {"model_family": STRATEGY_ID, "display_name": DISPLAY_NAME,
             "selected_device": actual_device, "actual_device": "cpu", "model_inference_device": "cpu",
             "research": True, "actual_cuda_inference": False, "actual_mps_inference": False,
             "model_inference_rows": int(trend_stats.get("rows", 0)) + int(interval_stats.get("rows", 0)),

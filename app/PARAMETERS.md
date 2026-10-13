@@ -1,91 +1,103 @@
-# KHQuant 0.1.4 参数与模型选择
+# KHQuant 0.1.5 当前参数与模型训练
 
-当前默认策略为“趋势共识策略 · 有效机会重评”，独立模型族 `czsc_trend_consensus_v2`。协议基线为 `my_strategy/configs/czsc_trend_v2_strategy.json`，候选逐日重评、持续卖方退出、完整依赖重建及冻结状态迁移见[有效机会重评指南](my_strategy/docs/trend_reassessment.md)。均线／结构／量价／高收益质量权重维持40%／20%／30%／10%。
+当前网页仅使用“趋势共识”模型包，内部策略身份为 `trend_consensus`、公开模型体系为 `current`。软件发行不授予模型收益或交易资格；发布准备时全量训练仍在进行，正式独立收益认证为 **pending**。公开资产不含自己的行情、训练权重、研究账本、个人记录或模型选择指针。
 
-公开 `current_strategy.json` 使用 `model_run_id: null`；自动选择同族合格的本地运行，无合格模型明确未训练／不可用。自己的模型选择使用独立配置或显式请求，不能把旧族模型直接当作本版重评模型。修改策略、标签或训练参数需要新来源、标签与模型；已经冻结的运行和旧0.1.3资产保留。完整训练入口为 `python -m my_strategy.scripts.train_trend_reassessment`，必须使用自己的已核验日历和来源。
+当前基准为 [czsc_trend_strategy.json](my_strategy/configs/czsc_trend_strategy.json)，操作流程见 [当前模型训练指南](my_strategy/docs/current_model_training.md)。下面的参数只作用于新的冻结计划，不改已经提交的任务、历史模型或账本。
 
-软件发行不授予模型收益或生产资格。近期入场头仍可能因样本不足不可用，不能通过降低8%且2R标签、放松门槛或关闭质量过滤来声称合格。当前扫描的行业是快照归组历史，通用状态导出未认证此族完整迁移。
+## 网页操作
 
----
+1. 在“参数设置”修改服务实际提供的字段，再“保存个人默认”。保存追加修订，不覆盖旧修订；提示修订冲突时先刷新。旧含股票数量上限或容量阶梯的修订只读归档，不能用作当前训练参数。
+2. 在“模型训练”确认本次日期、设备、CPU进程、流动性资格和股票准备批。这里的修改不自动保存个人默认。
+3. 点击“检查训练计划”。预检冻结参数、实际截止、已核验日历、历史逐日资格、全部合格股票并集、当前对照、窗口与代码身份。截止日留空会冻结预检时最新已核验交易日；明确选择非核验交易日时展示原因及相邻核验日，需修改或留空后重新检查。
+4. 预检通过且参数未改变才可“开始完整训练”。提交使用冻结计划ID；参数改变、提交成功或预检失败都需要新的预检，不能重复使用旧计划。网络提交异常时先刷新任务，确认是否已经创建，避免重复提交。
+5. 展开默认折叠的“训练与复核任务”查看阶段、真实已完成数量、来源和模型ID。没有计数时显示数据准备中，不推算百分比或预计完成时间。取消终止子进程树，已经完成的来源和日志保留。
+6. 完成后分别查看头资格、样本流失诊断、费用后账户比较和自动选择结果。诊断/比较失败而完整模型仍可核验时可“重新核验已完成模型”；复核不重新训练、不改权重。原人口、来源或生成代码与当前不同的模型归档，按钮说明原因，原诊断仍可查看。
 
-以下保留0.1.3旧趋势族及0.1.2旧高收益族指南，供历史运行对照。
+## 可编辑字段、单位与默认值
 
-# KHQuant 0.1.3 参数与模型选择
+网页字段范围由训练能力接口给出，下面是0.1.5内置基准。百分比控件按页面单位显示；API比例值采用0至1，例如8%提交为0.08。成交额页面显示“万元”，API和配置均使用人民币元，例如3000万元提交为30000000。参数必须为有限数，四项权重合计为1；不接受NaN、无穷值或未实现字段。
 
-当前策略名称为“趋势共识策略”。均线、结构、威科夫、高收益质量的权重为40%／20%／30%／10%；最后一项仅过滤已有买入候选。当前协议基线是 `my_strategy/configs/czsc_trend_strategy.json`，完整说明见 [趋势共识策略](my_strategy/docs/trend_consensus.md)。
+| 参数 | 内置默认 | 含义与边界 |
+| --- | ---: | --- |
+| `feature_start` | 2023-01-01 | 历史起点，须早于明确截止日 |
+| `end` | 空 | 预检冻结最新核验日；CLI训练须明确填写截止日 |
+| `liquidity_min_median_amount` | 30000000元 | 完整窗口的日成交额中位数下限；本版不低于3000万元，可提高 |
+| `liquidity_lookback_sessions` | 20 | 完整核验交易日窗口，可设20至120 |
+| `stock_batch_size` | 360股 | 准备分组上限，可设1至10000；不限制全部合格股票人口 |
+| `device` | cpu | 明确选cpu、mps或cuda；按本机能力标注，指定不可用设备会阻断 |
+| `cpu_workers` | 6进程 | CPU准备进程上限，可设1至16；不表示GPU并行数 |
+| `seed` | 42 | 新训练随机种子 |
+| `epochs` | 20轮 | 线性/MLP训练轮数；方向和树模型采用各自固定拟合流程 |
+| `training_batch_size` | 2048行 | 线性/MLP每次训练批的样本行数，与股票分组不同 |
+| `initial_cash` | 100000元 | 每只股票独立研究账户本金，多个股票不是共享现金组合 |
+| `stop_loss` | 0.08（8%） | 保护止损，不得放宽超过8% |
+| `commission` | 0.0003（0.03%） | 佣金，下限保持基准 |
+| `min_commission` | 5元 | 最低佣金，不得低于5元 |
+| `stamp_tax` | 0.0005（0.05%） | 卖出印花税，下限保持基准 |
+| `slippage` | 0.0005（0.05%） | 单边滑点，下限保持基准 |
+| `ma_exit_threshold` | 0.55 | MA持仓退出初始概率；默认在独立政策段选定，修改后新计划固定所填值 |
+| `trend_horizon_sessions` | 10 | 趋势预测周期，可设1至60个核验交易日 |
+| `trend_return_boundary` | 0.01（1%） | 趋势中性边界的最低收益尺度 |
+| `ma_weight` / `structure_weight` / `volume_price_weight` / `quality_weight` | 0.4 / 0.2 / 0.3 / 0.1 | 趋势、结构、量价、质量预算；合计须为1 |
+| `buy_base_threshold` | 0.4 | 基础买方初始门槛；默认在政策段选定，修改后新计划固定所填值 |
+| `buy_total_threshold` | 0.5 | 总买方门槛，冻结到新计划 |
+| `sell_threshold` | 0.4 | 持续卖方初始门槛；默认在政策段选定，修改后新计划固定所填值 |
+| `quality_threshold` | 0.1（10%） | 已有候选的高收益质量概率门槛，与8%净收益标签不同 |
+| `min_train_rows` / `min_calibration_rows` | 100 / 30 | 入场训练/校准最少行数，只能提高；两段仍须均含两类 |
+| `min_net_return` / `min_r_multiple` | 0.08 / 2R | 高收益标签同时要求费用后至少8%且至少2R，只能提高 |
+| `max_holding_sessions` | 60 | 核验交易日的退出意图上限，不保证该日一定能成交，可缩短但不能延长 |
+| `auto_replace` | true | 通过全部研究验收后尝试替换；不是模型收益认证开关 |
 
-公开的 `my_strategy/configs/current_strategy.json` 默认 `model_run_id: null`，按本地模型资格自动选择。新安装不包含开发机器的权重或运行 ID；无模型明确显示未训练／不可用。已有研究模型可复制该文件到自己的状态目录，填写自己的 `model_run_id`，通过 `.env` 的 `KHQUANT_CURRENT_STRATEGY_CONFIG` 指定该文件。使用合法历史检查点仍属于历史重建研究，不自动取得生产资格。
+完整训练涵盖全部历史逐日合格股票的并集，不设60/180/360容量阶梯，也不按未来收益或成交数量选股票。某股票仅在当时已知的完整流动性窗口和其他资格均通过时取得当日资格；截止日合格数、历史并集和实际完成数分别显示。失败股票不能从对照分母静默消失。
 
-## 哪些参数可直接研究
+360不是同时处理360股，CPU进程数决定准备并行；2048是神经样本行批。MPS可以执行支持的线性/MLP训练和明确报告的神经批推理；字典、CZSC、三分类方向、树模型及真实Broker/state继续使用CPU。设备请求与实际阶段执行分别核验，不推断未报告的GPU利用率。设备建议按钮仅修改本次表单并要求重新预检，不保存默认，也不提交auto。
 
-新分析请求的 `consensus_config.high_return_threshold` 与 `buy_total_threshold` 可覆盖质量过滤及买方总分门槛，其余参数继承所选模型已经保存的政策；请求会生成独立账户身份。`require_high_return=false` 仅是显式E1对照。标签中的最低扣费收益8%、最低2R，和概率质量门槛10%是不同参数。
+线性/MLP的X、目标和样本权重驻留预算为512MiB，超过预算按原样本批次搬运到所选设备；这不是模型、优化器、梯度和Metal缓存的总内存上限。设备和搬运方式写入头manifest。
 
-权重、买方基础和卖方门槛、方向差额、证据有效期、候选规则、风险、资金、趋势周期或持仓出口改变，需要新来源、标签与模型；接口拒绝把改变后的协议套在旧模型上。复制协议到自己的JSON中修改，不改已经发行的基线或覆盖历史模型。
+## 哪些改变需要重建
 
-## 重新训练
+改变日期、逐日流动性人口、目标、趋势周期、风险、费用、权重或账户政策，需要新的来源/标签和受影响后代；训练轮数、随机种子等需要新的训练。股票准备批只调整资源分组，不能缩减人口。全部修改仍进入新任务参数身份，不能将新配置套在旧模型上。
 
-先生成与本机行情、核验日历及原生来源依赖匹配的运行，再执行：
+完整、未导入模型或标签的原始/原生来源，可通过预检的显式来源ID请求复用。服务先核验来源、日历、价格与单位、完整人口、物理SHA和生成代码，再冻结证明；提交与任务领取再次检查。复用已完成输入不会复用旧模型、标签、政策账户或费用后比较结果。界面未提供的来源字段不得用旧运行ID冒充。
+
+网页默认参数是扁平字段契约，CLI的`--config`则读取当前策略JSON，不可直接互换。例如网页`training_batch_size`对应策略JSON的`batch_size`，流动性字段对应`liquidity_universe`对象；CLI不读取网页个人默认修订。使用CLI自定义配置时复制完整当前基准到独立路径，并保留真实成交和训练约束；不要覆盖发行基准或既有运行。
+
+## 当前CLI
+
+安装并激活Python3.12环境后使用统一`khquant`入口；也可用`python -m my_strategy.cli`。将占位日期和ID替换为自己的核验输入：
 
 ```sh
-PYTHONPATH=app .venv/bin/python -m my_strategy.scripts.train_trend_consensus \
-  --source-native-run-id YOUR_COMPLETE_NATIVE_SOURCE_RUN \
-  --end YYYY-MM-DD --config /绝对路径/trend-custom.json --cpu-workers 6 --device cpu
+khquant train-trend --end YYYY-MM-DD \
+  --calendar-run-id YOUR_VERIFIED_CALENDAR_RUN \
+  --stock-batch-size 360 --cpu-workers 6 --device mps
+
+khquant train-trend --end YYYY-MM-DD \
+  --calendar-run-id YOUR_VERIFIED_CALENDAR_RUN \
+  --config /绝对路径/trend-custom.json \
+  --stock-batch-size 360 --cpu-workers 6 --device cpu
+
+khquant model-diagnostics --model-run-id YOUR_CURRENT_TRAINING_RUN \
+  --cpu-workers 2 --json
+
+khquant analyze --symbol 600519.SH --usage-mode historical --device cpu --json
+khquant scan --stocks 600519.SH,000001.SZ --usage-mode historical --device cpu --json
+khquant backtest --stocks 600519.SH --start 2026-01-01 --device cpu --json
 ```
 
-`YOUR_COMPLETE_NATIVE_SOURCE_RUN` 是自己的完整原生来源运行。脚本历史默认ID来自开发机，公开程序不带该产物；新机器始终显式传入。训练每次产生新目录，核验来源与校准资格后再选用返回的运行ID。完整新趋势模型跨机器状态迁移尚未认证，不能只复制权重文件。
+CLI训练从自己的原始行情和核验日历冻结完整人口；显式来源复用还必须符合当前完整来源契约。CLI训练只返回新模型及头资格，不能代替网页冻结计划链路的账户比较与选择事件；不要通过手改选择指针强行启用结果。`model-diagnostics`只读冻结输入，生成新诊断运行，不改变权重、账户或门槛。
 
-软件0.1.3发行不代表收益认证：原始行情、本机模型、历史账本与已冻结九项生成模块保留；独立未来收益与生产资格继续pending。
+分析/扫描支持历史研究`historical`和当前时点研究`forward`；当前时点严格核验真实训练完成时间，仍不授予正式生产资格。回测仅支持历史研究。显式模型和检查点必须满足日期及目标身份，不能静默换用其他模型或旧兼容路由。
 
----
+## 样本诊断与资格边界
 
-下面完整保留0.1.2的旧高收益族参数指南，供历史运行对照；它不是当前趋势策略的训练入口。
+网页“查看样本流失诊断”展示每一折训练、校准和政策段的候选行数/正类数、标签可用性、费用后8%与2R通过数、切分和互斥过滤原因、主要退出类型及完整JSON。逐折人口不能合并冒充独立样本。费用复算、输入/报告哈希与parquet审计支持追查：是数据缺口、真实扣费目标未达，还是成熟、质量或依赖门槛造成不足。
 
-# KHQuant 0.1.2 参数使用说明
+高收益二分类保持训练至少100行、校准至少30行且两段都有两类；方向头还须满足各类别及政策段自己的最少数量。标签须真实完整清仓并在段截止前成熟；拒单、未清仓和未成熟配对分支不能变成负样本。保留严格先验与原机会原子依赖清洗。没有正类或关键头时明确阻断，不为凑样本降低标签、关闭质量过滤或伪造概率。
 
-当前实现已作为正式软件版封存。后续修改自己的参数副本即可，原始发布包、默认协议和训练运行可用于对照。
+研究自动选择需要完整冻结人口至少60股、四个开发比较窗口、每窗至少50笔完整往返且合计至少200笔，并通过同人口/时点/成本的规则基线及现任账户比较、费用与滑点加倍压力、回撤和有限指标检查。无合格现任时仍须通过规则基线初始化对照；活动持仓或执行意图阻断切换。通过后按核验交易日生效并追加选择事件，不在真实持仓中途更换退出契约。
 
-默认协议：`my_strategy/configs/czsc_high_return_research.json`（相对本文件所在 app 目录）。独立可编辑副本：`parameter_profiles/high-return-custom.json`。两者在发布时内容完全一致；原始副本另存于 `parameter_profiles/high-return-0.1.2.json`。
+正式收益认证另需实际完整冻结之后的独立前瞻证据：至少三个窗口、每窗480个核验交易日。已读开发窗口、软件版本号、训练完成、目录名production和研究选择均不能代替该资格。
 
-| 参数位置 | 当前值 | 用途 |
-|---|---:|---|
-| `signal_points.ma_entry_threshold` | 0.55 | 均线 ML 入场阈值 |
-| `signal_points.ma_exit_threshold` | 0.55 | 均线 ML 持仓退出阈值 |
-| `signal_points.risk_fraction` | 0.01 | 单次初始风险预算 |
-| `signal_points.atr_stop_multiple` | 2.0 | ATR 止损距离 |
-| `signal_points.ma_cooldown_bars` | 5 | 均线入场冷却 |
-| `high_return.min_net_return` | 0.08 | 完整扣费回合的高收益标签 |
-| `high_return.min_r_multiple` | 2.0 | 高收益标签的初始风险倍数 |
-| `high_return.max_holding_sessions` | 60 | 核验持仓交易日的退出意图上限 |
-| `high_return.exit_advantage_margin` | 0.002 | 退出相对续持优势门槛 |
-| `entry_threshold_grid` | 0.05 / 0.1 / 0.2 / 0.35 / 0.5 | L2 入场阈值搜索 |
-| `exit_threshold_grid` | 0.55 / 0.65 | L2 退出阈值搜索 |
-| `epochs` / `batch_size` | 20 / 2048 | 训练轮数 / 批次 |
+## 历史资料
 
-在项目根目录执行；已安装环境也可用 `khquant` 代替 `python -m my_strategy.cli`。示例沿用当前本机特征源，需先激活已有 Python 3.12 环境：
-
-```bash
-python -m my_strategy.cli research-high-return-train \
-  --source-training-run-id 20261009-190909-196001-20261008-czsc-wyckoff-research-train-NO_GIT \
-  --end 2026-10-08 --device auto --cpu-workers 2 \
-  --config app/parameter_profiles/high-return-custom.json --json
-```
-
-训练完成会返回新的 `run_id`；将下方 `NEW_TRAINING_RUN_ID` 替换为该值，回测自动读取这个新模型保存的冻结参数：
-
-```bash
-python -m my_strategy.cli research-high-return-backtest \
-  --model-run-id NEW_TRAINING_RUN_ID --start 2023-01-01 --end 2026-10-08 \
-  --device auto --cpu-workers 2 --json
-```
-
-信号、止损、标签、持仓退出和模型输入协议会进入模型契约。改这些参数时按上述入口重新训练，再用新运行回测；原始 79 个头及其历史结果保留。训练轮数和搜索参数的修改也需要新训练。已经完成的模型使用训练时冻结的参数；修改副本不会自动重算旧概率或旧账本，也不会自动改变普通网页评分。回测改搜索网格不会重选旧 bundle 的已保存阈值。
-
-本版架构比较固定为 `architectures: ["linear", "tree", "mlp"]`。`publication_allowed` 和 `observed_windows_diagnostic_only` 由实现固定为 `false` / `true`；在 JSON 中修改它们不会授予模型收益认证或改变应用模式。
-
-本版完整回测及持仓契约固定每股账户 `initial_cash: 100000`，保留该值。学习率、MLP 隐藏层和树深度等为源码中的固定设置，并非当前 JSON 的有效旋钮。若覆盖 `strategy`，需放入完整 `czsc_strategy` 对象；局部 `strategy.execution` 不会自动补齐默认项。
-
-`--config` 是高收益训练/回测支持的独立覆盖入口。保留包内默认配置文件原字节，可以继续核验旧运行的 29 项代码/配置冻结身份。直接改包内默认协议会使旧运行的严格冻结检查失败；用独立副本调参更方便保留原始对照。原始版本号及 `ma_entry_alignment` 建议随本版保持，特征源和日期必须与实际数据匹配；后续新数据应先生成新的真实特征源。
-
-本机特征源和模型未附带在公开可分发的程序包中，新机器需自行准备匹配的来源和核验日历。软件正式发布时，新组合扣费收益仍为 −0.4142365082%，独立未来验证待完成；这些状态随基线记录保留。
-
-仅安装 wheel 时，本说明与两个参数 JSON 作为同目录附件提供，未内置于 wheel。将 `--config` 换为附件的绝对路径即可；本机特征源运行仍需可用。普通 CLI 查看高收益评分时显式增加 `--model-family high_return`，网页已默认显示高收益研究；修改普通评分模式与应用研究模型改变订单是各自的入口。
+0.1.4原参数说明按原字节保存于 [历史PARAMETERS.md](release_history/0.1.4/PARAMETERS.md)。原`my_strategy/docs/`中的`agent_consensus.md`、`agent_consensus_validation_v3.md`、`native_agent_v4.md`、`trend_consensus.md`、`trend_reassessment.md`移至 [0.1.4历史文档目录](release_history/0.1.4/docs/)，其中的身份、CLI和运行记录只作历史核验，不是当前入口。旧发布说明保留原文；其中旧相对链接可按这份映射查历史档案。

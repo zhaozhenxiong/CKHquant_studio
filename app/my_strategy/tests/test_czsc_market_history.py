@@ -166,17 +166,12 @@ def test_old_result_database_queries_never_create_new_tables(tmp_path):
     assert db.read_bytes() == before
 
 
-@pytest.mark.parametrize("family", ["czsc_trend_consensus", "czsc_trend_consensus_v2"])
-def test_scan_uses_existing_overlays_once_per_stock_and_persists_bounded_facts(tmp_path, monkeypatch, family):
-    import importlib
+def test_scan_uses_existing_overlays_once_per_stock_and_persists_bounded_facts(tmp_path, monkeypatch):
     import pandas as pd
     from types import SimpleNamespace
-    prefix = "czsc_trend_v2" if family.endswith("_v2") else "czsc_trend"
-    route = importlib.import_module("my_strategy.web_dashboard." +
-        ("trend_v2_strategy" if family.endswith("_v2") else "trend_strategy"))
-    from my_strategy.web_dashboard import high_return
+    from my_strategy.web_dashboard import trend_strategy as route
     from my_strategy.adapters import czsc_adapter
-    runtime = importlib.import_module("my_strategy.services." + prefix + "_runtime")
+    from my_strategy.services import czsc_trend_runtime as runtime, czsc_trend_support
     from my_strategy.storage import czsc_results
     from my_strategy.services import czsc_market_history
 
@@ -185,8 +180,8 @@ def test_scan_uses_existing_overlays_once_per_stock_and_persists_bounded_facts(t
     real_store = czsc_results.ResultStore(db_path=db, runs_root=reports)
     monkeypatch.setattr(czsc_adapter, "latest_market_date", lambda end=None: DATES[-1])
     monkeypatch.setattr(czsc_adapter, "list_symbols", lambda: [{"symbol": "a", "name": "A"}, {"symbol": "b", "name": "B"}])
-    monkeypatch.setattr(high_return, "_calendar", lambda value: (DATES, "calendar"))
-    monkeypatch.setattr(runtime, "load_model_run", lambda value: (None, None))
+    monkeypatch.setattr(czsc_trend_support, "_calendar", lambda value: (DATES, "calendar"))
+    monkeypatch.setattr(runtime, "load_model_run", lambda value, **kwargs: (None, None))
     monkeypatch.setattr(route, "create_run_context", lambda **values: context)
     monkeypatch.setattr(czsc_results, "ResultStore", lambda: real_store)
     monkeypatch.setattr(czsc_market_history, "load_classification", lambda symbols: ({s: {"id": "unknown", "name": "未知行业"} for s in symbols},
@@ -202,8 +197,8 @@ def test_scan_uses_existing_overlays_once_per_stock_and_persists_bounded_facts(t
     result = route.scan_trend_consensus()
     assert calls == ["a", "b"]
     assert result["market_history"]["universe_size"] == 2
-    assert result["strategy_version"] == result["market_history"]["strategy_version"] == family
-    assert result["market_history"]["contract"]["strategy_version"] == family
+    assert result["strategy_version"] == result["market_history"]["strategy_version"] == "trend_consensus"
+    assert result["market_history"]["contract"]["strategy_version"] == "trend_consensus"
     assert len(result["market_history"]["daily"]) == 3
     assert market_history_facts("scan", db_path=db)["total"] == 6
     assert real_store.get("scan")["market_history"] == result["market_history"]

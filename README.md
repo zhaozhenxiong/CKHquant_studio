@@ -1,14 +1,14 @@
 # CZSC量价研究工作台
 
-当前正式软件版：**0.1.4（2026-10-13）**。当前默认策略为“趋势共识策略 · 有效机会重评”，使用均线上涨／下跌／中性概率、结构与威科夫规则强度及高收益候选质量，权重为40%／20%／30%／10%。主图显示绑定研究账户的最终B/S，点击查看多Agent评分；参考价与实际Broker成交分别记录。参数说明见 [当前重评指南](app/my_strategy/docs/trend_reassessment.md) 和 [参数说明](app/PARAMETERS.md)。
+当前正式软件版：**0.1.5（2026-10-13）**，仓库为 [zhaozhenxiong/CKHquant_studio](https://github.com/zhaozhenxiong/CKHquant_studio)。软件发行与模型资格分别记录：本次发布不包含行情、个人记录、研究账本或训练权重；发布准备时本机全量模型训练仍在进行，正式模型收益资格继续 **pending**。
 
-有效原机会逐日重评使用独立 `czsc_trend_consensus_v2` 模型族，账户规则和完整重建入口见[有效机会重评指南](app/my_strategy/docs/trend_reassessment.md)。扫描新增[最近30交易日市场状态](app/my_strategy/docs/market_history.md)，展示覆盖、行业、量价事件、方向与实际研究账户动作，并保留同一运行的股票明细与分析钻取。
+当前只有一个趋势共识模型体系，内部策略为 `trend_consensus`。均线上涨／下跌／中性概率、结构、威科夫量价和高收益候选质量按40%／20%／30%／10%组合；缺失概率不补零。有效原机会在实际空仓且风险合格时逐日重评，质量拒绝不消耗机会；真实持仓固定入场信号时的MA退出头，不在持仓中途升级。主图的参考价与实际Broker成交分别记录。
 
-六个网页入口：结构分析、市场扫描、策略回测、我的关注、我的持仓、数据与任务。当前组合研究使用冻结 CZSC 1.0.1、均线量价和 PyTorch；支持行情更新、研究训练、模型推理、按日期路由及状态打包。
+八个网页入口：结构分析、全市场扫描、策略回测、我的关注、我的持仓、模型训练、参数设置、数据与任务。训练、预检、默认参数、逐层样本诊断与研究模型选择见 [当前训练指南](app/my_strategy/docs/current_model_training.md)；扫描的最近30核验交易日状态见 [市场状态指南](app/my_strategy/docs/market_history.md)。
 
 ## 安装和启动
 
-安装原生 Python **3.12**，克隆仓库或解压 Release。首次安装默认创建 .venv；升级保留已有 .env 配置和环境路径。
+使用原生 Python **3.12**。首次安装默认创建`.venv`；升级保留已有`.env`与本机路径。
 
 Windows x64：
 
@@ -17,7 +17,7 @@ py -3.12 install.py --device auto
 .\khquant-native.bat dashboard
 ~~~
 
-Apple Silicon Mac（原生 ARM64 Python）：
+Apple Silicon Mac（原生ARM64 Python）：
 
 ~~~bash
 python3.12 install.py --device auto
@@ -31,53 +31,52 @@ python3.12 install.py --device cpu
 ./khquant-native.sh dashboard
 ~~~
 
-浏览器打开 <http://127.0.0.1:8124>。安装包含 PyTorch 研究依赖；auto 在 NVIDIA 环境选择 CUDA，在 Apple Silicon 选择 MPS，其余选择 CPU。可以明确使用 --device cpu、--device cuda:0 或 --device mps。明确请求不可用的设备会报错。
+浏览器打开 <http://127.0.0.1:8124>。安装器的auto选择可用Torch后端；训练任务仍冻结自己的明确设备参数。可以明确请求CPU、CUDA或MPS；不可用的明确设备会报错，不静默回退。
 
-安装器只接受经冻结源码校验的 CZSC wheel。Release 应携带目标平台 wheel 和 wheel-index.json；可通过 --wheel-dir 使用单独下载的资产。0.1.4 正式源码 ZIP 携带经过冻结源码及物理 SHA 校验的 Windows x64、macOS ARM64、Linux x64 CPU 原生 wheel。GitHub 自动 Source code 归档没有这些 Release 原生资产，首次安装推荐下载 KHQuant-0.1.4.zip。源码安装缺 wheel 时需要 Rust 与本机编译工具。平台测试状态见 runtime-manifest.json，MPS 验收必须使用真实 Mac。
+首次安装推荐下载`KHQuant-0.1.5.zip`及其SHA256清单。安装器仅接受经附件源码、目标平台与物理SHA核验的CZSC原生wheel；GitHub自动Source code归档不含Release原生资产。缺匹配wheel时需Rust和本机编译工具。0.1.5各平台的实际安装验收以`runtime-manifest.json`及随附验证报告为准，不能沿用0.1.4结果；MPS须有真实Apple Silicon算子证据，CUDA与Intel Mac不自动获得验收资格。
 
-## 首次使用
+## 首次使用与当前CLI
 
-代码包不包含私人行情库、训练模型、关注或持仓。首次运行可用“数据与任务”下载行情，或安装时指定 --raw-db。公开配置自动查找本机具备资格的趋势模型，未训练时明确显示模型不可用；安装不会生成概率、模型或买卖点。研究训练需要已核验的交易日历；可导入包含日历和模型依赖的状态包。软件安装完成与行情、模型资源就绪分别显示。
+代码包不带私人行情库、模型或选择指针。先在“数据与任务”准备行情和已核验交易日历；空模型环境显示缺模型／不可用，安装不会生成模型概率或买卖点。当前研究仅使用经过真实对比并已生效的选择；没有合格选择时保持观察。旧并行模型与兼容入口已退役，不能用历史权重冒充当前模型。
 
-激活环境后，khquant 与 python -m my_strategy.cli 共用入口：
+激活环境后，`khquant`与`python -m my_strategy.cli`共用当前入口：
 
 ~~~bash
 khquant doctor --check-write --strict --json
 khquant update-data --mode local --stocks 600519.SH
-khquant analyze --symbol 600519.SH --model-family high_return --json
-khquant scan --stocks 600519.SH,000001.SZ --model-family high_return --device auto --json
-khquant backtest --stocks 600519.SH --model-family high_return --model-run-id MATCHING_TREND_RUN --start 2026-01-01 --device cpu --json
-python -m my_strategy.scripts.train_trend_reassessment --end YYYY-MM-DD --cohort-size 360 --cpu-workers 6 --device cpu
+khquant analyze --symbol 600519.SH --usage-mode historical --device cpu --json
+khquant scan --stocks 600519.SH,000001.SZ --usage-mode historical --device cpu --json
+khquant backtest --stocks 600519.SH --start 2026-01-01 --device cpu --json
+khquant train-trend --end YYYY-MM-DD --calendar-run-id YOUR_VERIFIED_CALENDAR_RUN --stock-batch-size 360 --cpu-workers 6 --device mps
+khquant model-diagnostics --model-run-id YOUR_CURRENT_TRAINING_RUN --cpu-workers 2 --json
 ~~~
 
-`MATCHING_TREND_RUN` 须替换为与当前模型族匹配的本地运行 ID；显式研究选择仍须逐日兼容校验，训练完成不等于自动选择资格。新机器先生成匹配的核验日历、原生来源运行，再按[当前重评指南](app/my_strategy/docs/trend_reassessment.md)训练；不要使用文档历史中的本机运行 ID。旧 high_return v1-v4 的离线研究使用自身历史入口和身份。
+占位日期和运行ID须替换为自己的核验输入。完整训练默认包含全部历史合格股票：过去20个完整核验交易日成交额中位数至少3000万元。360是准备分组上限，不是360股并行，也不截断股票池；CPU准备进程数控制CPU并行，神经训练行批默认2048行。网页预检冻结实际截止日、历史合格并集和当日资格，修改参数须重新预检。
 
-网页、CLI 和模型推理按本机选择运行设备，模型原训练设备只保留为历史来源记录。MPS 加速神经网络训练和推理；精确结构、价格比较及成交账本由 CPU 执行。任务结果区分设备可用性和实际工作。
+MPS用于支持的线性／MLP训练和神经批推理；字典、CZSC、方向／树模型及真实Broker/state仍在CPU。设备可用、请求设备与实际执行报告分别展示；没有报告时不推断GPU利用率或预计完成时间。网页设备建议只改本次表单，不保存默认或修改已提交任务。
 
-## 分发和迁移
+## 分发与状态迁移
 
-源码 Release，不含业务数据和个人记录：
+源码发行包仅含程序、配置和冻结原生依赖：
 
 ~~~bash
-python app/build_release.py --output-dir dist/releases/0.1.4-rebuild
+python app/build_release.py --output-dir dist/releases/0.1.5-rebuild
 ~~~
 
-在源码仓库或解压的源码 Release 环境中打包研究状态，目标目录须不存在：
+状态导出属于用户自己的操作，默认不进入公开Release：
 
 ~~~bash
+khquant package --target ../khquant-code
 khquant package --target ../khquant-state --include-data --include-artifacts all
+khquant package --verify ../khquant-state
 ~~~
 
-正式 wheel 安装只提供运行代码，不能从 site-packages 导出源码包。先克隆仓库或解压源码 Release，再用 `--from-project /path/to/KHQuant` 指定来源。导出状态采用该来源目录的路径配置；迁移 wheel 的现有状态时，先将来源目录的 `.env` 指向实际数据、模型 artifacts 和 metadata 目录。
+需要迁移关注和手动持仓时显式追加`--include-personal`。wheel用户从源码Release导出时指定`--from-project /path/to/KHQuant`，并将该来源目录的路径配置指向实际状态。缺引用或哈希不一致会阻断核验；历史档案不恢复当前交易资格。跨机器完整模型依赖与路径必须另行验证，软件安装通过不能代替状态包验收。详见 [INSTALL_NATIVE.md](INSTALL_NATIVE.md)。
 
-需要自己迁移关注与手动持仓时，显式追加 --include-personal。既有单模型状态按受支持的依赖契约导出；本版新 dual/Wyckoff/趋势共识嵌套模型状态尚未完成完整迁移验收，不能保证 latest/all 迁移全部新研究状态。模型哈希、历史时间和影子资格保持不变。安装方式及验收详见 [INSTALL_NATIVE.md](INSTALL_NATIVE.md)。
+## 交易、训练与认证边界
 
-## 研究边界
+收盘信号在下一核验且可执行交易日尝试成交；T+1、整手、涨跌停、流动性、真实费用、拒单、每日净值与期末持仓持续核验。多股回测采用等额独立账户；手动持仓不能伪作模型退出的实际Broker账本。未复权行情、历史ST与历史成员资料不足随结果披露。
 
-默认组合研究；--structure-only 选择原生结构对照。收盘信号在下一可执行交易日开盘尝试成交，费用、拒单、每日净值和期末持仓均留存。多股回测采用固定等额独立账户。当前使用未复权行情，历史 ST、分红送转等限制随结果披露。
+高收益标签保持完整清仓后扣费净收益至少8%且至少2R；训练至少100行、校准至少30行且两段均有两类，并保留完整成熟、严格先验与原机会原子依赖清洗。逐折诊断解释数据、目标与过滤流失，不为凑正类降低标准。
 
-训练候选只有通过独立、完整股票池的费用后账本门槛才可晋升。目录名 production 不代表已正式发布；迁移和安装也不会赋予发布资格。旧 V2/Z1 模型与派生仓库已退役。
-
-当前趋势策略的高收益目标要求完整扣费收益至少8%且至少2R，持仓普通退出读取持续卖方共识，保护出口和信号时固定的独立MA退出头优先。独立未来收益验证仍为 pending，软件发行不授予模型生产资格。
-
-以下0.1.2结果保留为历史对照，不是当前0.1.4策略表现：0.1.2 的高收益模型目标是完整实际回合费用后收益至少 8% 且至少 2R，独立持仓退出比较下一核验开盘退出与冻结续持。原固定 10 日模型保留自己的身份和目标。当前新组合连续扣费收益为 −0.4142365082%，候选点并集参考为 −0.2856443810%；独立未来验证待完成。正式软件发布保留这些实证状态，普通分析/扫描/回测继续使用既有影子评分契约；应用模型改变订单使用显式高收益离线研究入口。详见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
+自动替换仅是研究模型选择，要求完整冻结人口至少60股、各开发窗口至少50笔完整往返且总计至少200笔，并通过同口径真实账本、费用压力与实际资产审计。缺正类、关键头或证据时保持阻断。正式独立前瞻认证另需冻结后的真实独立窗口，现状仍为pending；目录名production与软件正式发布均不授予模型生产资格。历史版本及旧研究结果仅保留在 [RELEASE_NOTES.md](RELEASE_NOTES.md) 作为档案。

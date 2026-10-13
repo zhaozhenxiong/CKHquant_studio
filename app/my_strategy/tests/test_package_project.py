@@ -11,7 +11,7 @@ from my_strategy.scripts.snapshot_sqlite_databases import CANONICAL_DATABASE_PAT
 from my_strategy.storage.personal_portfolio import PersonalStore
 from my_strategy.core.run_context import stable_hash
 from my_strategy.scripts.migration_manifest import file_sha256, write_integrity_manifest
-from my_strategy.services.czsc_research_models import checkpoint_catalog, model_hash
+from my_strategy.services.czsc_artifact_integrity import model_hash
 
 
 def source_repo(root: Path) -> Path:
@@ -134,64 +134,79 @@ def write_json(path: Path, value) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def research_state(repo: Path) -> tuple[Path, Path]:
-    from my_strategy.services.czsc_research_ml import MODEL_VERSION, LABEL_VERSION
-    from my_strategy.services.czsc_research_profiles import get_feature_profile
-    profile = get_feature_profile("legacy")
+def current_state(repo: Path) -> tuple[Path, Path]:
+    """Content-closure fixture only; it grants no model serving qualification."""
     runs = repo / "app/my_strategy/artifacts/runs"
-    calendar = {"verified": True, "source": "verified fixture", "dates": ["2026-01-05", "2026-01-06"]}
-    write_json(runs / "calendar/reports/calendar.json", calendar)
-    model = runs / "training/models/production"
-    model.mkdir(parents=True)
-    checkpoint = model / "model.pt"
-    checkpoint.write_bytes(b"immutable CPU checkpoint fixture")
-    schema = {"columns": profile["columns"]}
-    preprocess = {"mean": [0.0] * len(profile["columns"]), "scale": [1.0] * len(profile["columns"])}
-    manifest = {"model_version": MODEL_VERSION, "label_version": LABEL_VERSION,
-                "schema": schema, "schema_sha256": model_hash(schema),
-                "preprocess": preprocess, "preprocess_sha256": model_hash(preprocess),
-                "checkpoint": str(checkpoint.resolve()), "checkpoint_sha256": file_sha256(checkpoint),
-                "available_at": "2026-01-06", "train_label_end": "2026-01-05",
-                "validation_label_end": "2026-01-06", "validation_end": "2026-01-06",
-                "feature_schema_binding": "bound", "feature_profile": profile["name"],
-                "feature_version": profile["version"], "feature_schema_hash": profile["schema_hash"],
-                "label_contract": {"calendar_hash": stable_hash(calendar["dates"])}, "data_version": "fixture-data"}
-    manifest["manifest_sha256"] = model_hash(manifest)
-    write_json(model / "manifest.json", manifest)
-    write_json(runs / "training/reports/research.json", {"run_id": "training", "data_version": "fixture-data",
-               "strategy_version": profile["strategy_version"], "config": {"feature_profile": profile["name"]},
-               "calendar": {"run_id": "calendar", "hash": stable_hash(calendar)}, "evaluation": []})
+    dates = ["2026-01-05", "2026-01-06"]
+    write_json(runs / "calendar/reports/calendar.json", {"verified": True, "source": "verified fixture", "dates": dates})
+    raw_file = runs / "raw/data_snapshots/raw/000001_SZ/raw.parquet"
+    raw_file.parent.mkdir(parents=True); raw_file.write_bytes(b"frozen raw input bytes")
+    raw_record = {"symbol": "000001.SZ", "raw_path": str(raw_file), "raw_sha256": file_sha256(raw_file)}
+    raw = {"run_id": "raw", "strategy_version": "trend_consensus", "calendar_run_id": "calendar",
+           "dates": dates, "calendar_hash": stable_hash(dates), "raw_records": [raw_record]}
+    raw["snapshot_hash"] = stable_hash(raw)
+    write_json(runs / "raw/reports/raw_source.json", raw)
+    native_dir = runs / "native/data_snapshots/native/000001_SZ"; native_dir.mkdir(parents=True)
+    (native_dir / "features.parquet").write_bytes(b"frozen feature bytes")
+    write_json(native_dir / "native.json", {"observed_only": True})
+    record = {**raw_record, "path": str(native_dir / "features.parquet"), "sha256": file_sha256(native_dir / "features.parquet"),
+              "native_path": str(native_dir / "native.json"), "native_sha256": file_sha256(native_dir / "native.json")}
+    lineage = {"raw_source_run_id": "raw", "raw_snapshot_hash": raw["snapshot_hash"],
+               "calendar_run_id": "calendar", "calendar_hash": stable_hash(dates)}
+    write_json(runs / "native/reports/native_source.json", {"run_id": "native", "strategy_version": "trend_consensus",
+        "calendar_dates": dates, "source_snapshot": lineage, "dataset_records": [record]})
+    model = runs / "training/models/production/trend_direction"; model.mkdir(parents=True)
+    (model / "model.joblib").write_bytes(b"immutable CPU checkpoint fixture")
+    target = {"test_fixture": "content integrity, not training qualification"}
+    manifest = {"family": "trend_consensus", "checkpoint": "model.joblib", "checkpoint_sha256": file_sha256(model / "model.joblib"),
+                "target_contract": target, "target_contract_hash": stable_hash(target)}
+    manifest["manifest_sha256"] = stable_hash(manifest); write_json(model / "manifest.json", manifest)
+    source = {"source_native_run_id": "native", "source_report_sha256": file_sha256(runs / "native/reports/native_source.json"),
+              "source_snapshot": lineage, "records_hash": stable_hash([record])}
+    source["snapshot_hash"] = stable_hash(source)
+    cfg = {"version": "trend_consensus", "source_snapshot_hash": source["snapshot_hash"]}
+    freeze = {"config_hash": stable_hash(cfg)}; freeze["freeze_hash"] = stable_hash(freeze)
+    write_json(runs / "training/reports/trend_consensus.json", {"run_id": "training", "strategy_version": "trend_consensus",
+        "automatic_selection_eligible": False, "config": cfg, "protocol_freeze": freeze, "source_snapshot": source, "dataset_records": [record]})
     return runs, model
 
 
-def add_release_database(repo: Path, runs: Path) -> Path:
-    write_json(runs / "independent/reports/evaluation.json", {"training_run_id": "training"})
-    artifacts = [{"path": path.relative_to(runs).as_posix(), "sha256": file_sha256(path)}
-                 for path in [runs / "training/reports/research.json", runs / "calendar/reports/calendar.json",
-                              runs / "training/models/production/manifest.json", runs / "training/models/production/model.pt",
-                              runs / "independent/reports/evaluation.json"]]
-    event = {"event_id": "release-1", "event_type": "promote", "target_release_id": "release-1",
-             "model_run_id": "training", "artifacts": artifacts}
-    db = repo / "app" / CANONICAL_DATABASE_PATHS[1]
-    db.parent.mkdir(parents=True, exist_ok=True)
-    with closing(sqlite3.connect(db)) as connection:
-        connection.executescript("""CREATE TABLE czsc_model_release_events (
-            sequence INTEGER PRIMARY KEY, payload TEXT NOT NULL, payload_sha256 TEXT NOT NULL);
-            CREATE TABLE czsc_model_aliases (alias TEXT,release_id TEXT,event_id TEXT);
-            CREATE TABLE czsc_runs (run_id TEXT PRIMARY KEY,report_path TEXT);
-            CREATE TRIGGER immutable_release BEFORE DELETE ON czsc_model_release_events BEGIN
-                SELECT RAISE(ABORT, 'immutable'); END;""")
-        connection.execute("INSERT INTO czsc_model_release_events VALUES (1,?,?)", (json.dumps(event), model_hash(event)))
-        connection.execute("INSERT INTO czsc_model_aliases VALUES ('production','release-1','release-1')")
-        connection.executemany("INSERT INTO czsc_runs VALUES (?,?)", [("scan", "scan/reports/czsc.json"),
-                               ("unselected", "unselected/reports/czsc.json")])
-        connection.commit()
-    return db
+def add_current_selection_database(repo: Path, runs: Path) -> Path:
+    plan = {"plan_id": "frozen-plan", "calendar_run_id": "calendar", "incumbent_run_id": None, "cohort": ["000001.SZ"]}
+    plan["plan_hash"] = stable_hash(plan)
+    training_db = repo / "app/my_strategy/data/metadata/model_training.db"; training_db.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(training_db)) as conn:
+        conn.executescript("CREATE TABLE training_profiles(profile_id TEXT,revision INTEGER,parameters TEXT,hash TEXT);"
+                           "CREATE TABLE training_default(profile_id TEXT,revision INTEGER);"
+                           "CREATE TABLE training_plans(plan_id TEXT,payload TEXT);")
+        parameters = {"cohort_size": 360}
+        conn.execute("INSERT INTO training_profiles VALUES ('personal',1,?,?)", (json.dumps(parameters), stable_hash(parameters)))
+        conn.execute("INSERT INTO training_default VALUES ('personal',1)")
+        conn.execute("INSERT INTO training_plans VALUES (?,?)", (plan["plan_id"], json.dumps(plan))); conn.commit()
+    evidence = runs / "training/validation/model_comparison/window/candidate.json"
+    write_json(evidence, {"ledger": [], "qualification": "package content fixture only"})
+    comparison = {"run_id": "training", "plan_id": plan["plan_id"], "plan_hash": plan["plan_hash"],
+        "windows": [{"arms": {"candidate": {"assets": [{"path": str(evidence.relative_to(runs / 'training')), "sha256": file_sha256(evidence)}]}}}]}
+    path = runs / "training/validation/model_comparison" / plan["plan_id"] / "comparison.json"; write_json(path, comparison)
+    event = {"run_id": "training", "previous_run_id": None, "comparison_sha256": stable_hash(comparison),
+             "plan_hash": plan["plan_hash"], "effective_from": "2026-01-07"}
+    database = repo / "app" / CANONICAL_DATABASE_PATHS[1]; database.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(database)) as conn:
+        conn.executescript("CREATE TABLE current_model_events(event_id INTEGER,kind TEXT,payload TEXT,created_at TEXT);"
+                           "CREATE TABLE current_model_selection(id INTEGER,run_id TEXT,event_id INTEGER,effective_from TEXT);"
+                           "CREATE TABLE current_model_comparisons(run_id TEXT,report_path TEXT,sha256 TEXT);"
+                           "CREATE TABLE czsc_runs(run_id TEXT PRIMARY KEY,report_path TEXT);"
+                           "CREATE TRIGGER immutable_events BEFORE DELETE ON current_model_events BEGIN SELECT RAISE(ABORT,'immutable'); END;")
+        conn.execute("INSERT INTO current_model_events VALUES (1,'select',?,'2026-01-06')", (json.dumps(event),))
+        conn.execute("INSERT INTO current_model_selection VALUES (1,'training',1,'2026-01-07')")
+        conn.execute("INSERT INTO current_model_comparisons VALUES ('training',?,?)", (str(path.relative_to(runs)), file_sha256(path)))
+        conn.execute("INSERT INTO czsc_runs VALUES ('scan','scan/reports/czsc.json')"); conn.commit()
+    return database
 
 
 def test_code_only_default_carries_installation_and_current_source_without_private_state(tmp_path):
     repo = source_repo(tmp_path)
-    runs, _model = research_state(repo)
+    runs, _model = current_state(repo)
     write_json(repo / "runtime-manifest.json", {"schema": "fixture"})
     for name in ("setup.py", "pyproject.toml", "MANIFEST.in"):
         (repo / name).write_text("fixture", encoding="utf-8")
@@ -216,7 +231,7 @@ def test_code_only_default_carries_installation_and_current_source_without_priva
                      "app/AI_CHANGELOG.md", "app/.env.production", "app/.pytest-old",
                      "app/build", "app/dist", "app/my_strategy/khquant.egg-info"):
         assert not (target / relative).exists()
-    assert (runs / "training/models/production/model.pt").exists()
+    assert (runs / "training/models/production/trend_direction/model.joblib").exists()
 
 
 @pytest.mark.parametrize("missing", ["install.py", "app/AGENTS.md"])
@@ -247,49 +262,48 @@ def test_wheel_layout_cannot_export_site_packages_but_explicit_source_can(tmp_pa
     assert not (target / "app/third_party").exists()
 
 
-def test_research_and_calendar_without_czsc_report_survive_relocation_unchanged(tmp_path):
+def test_current_model_and_sources_survive_relocation_without_rewriting_frozen_hashes(tmp_path):
     repo = source_repo(tmp_path)
-    runs, model = research_state(repo)
-    write_json(runs / "study/metadata.json", {"task": "czsc-executable-entry-study"})
+    runs, model = current_state(repo)
+    write_json(runs / "study/metadata.json", {"task": "model-training-study"})
     write_json(runs / "study/reports/summary.json", {"training_run_id": "training"})
     original = (model / "manifest.json").read_bytes()
     target = tmp_path / "other path/portable"
     manifest = build_package(source=repo, target=target, include_artifacts="all")
-    assert manifest["run_ids"] == ["calendar", "study", "training"]
+    assert manifest["run_ids"] == ["calendar", "native", "raw", "study", "training"]
     copied_runs = target / "app/my_strategy/artifacts/runs"
-    assert (copied_runs / "training/models/production/manifest.json").read_bytes() == original
-    catalog = checkpoint_catalog("training", runs_root=copied_runs)
-    assert Path(catalog[0]["model_dir"]) == (copied_runs / "training/models/production").resolve()
+    assert (copied_runs / "training/models/production/trend_direction/manifest.json").read_bytes() == original
+    assert (copied_runs / "native/data_snapshots/native/000001_SZ/features.parquet").read_bytes() == b"frozen feature bytes"
     assert verify_package(target) == []
 
 
-def test_latest_closes_model_calendar_release_evidence_and_keeps_immutable_events(tmp_path):
+def test_latest_closes_current_sources_selection_plan_and_keeps_immutable_events(tmp_path):
     repo = source_repo(tmp_path)
-    runs, _model = research_state(repo)
+    runs, _model = current_state(repo)
     write_json(runs / "scan/reports/czsc.json", {"run_id": "scan", "model_run_id": "training"})
-    database = add_release_database(repo, runs)
+    database = add_current_selection_database(repo, runs)
     with closing(sqlite3.connect(database)) as connection:
-        original_event = connection.execute("SELECT payload,payload_sha256 FROM czsc_model_release_events").fetchone()
+        original_event = connection.execute("SELECT kind,payload FROM current_model_events").fetchone()
     target = tmp_path / "latest"
     manifest = build_package(source=repo, target=target, include_data=True, include_artifacts="latest")
-    assert manifest["run_ids"] == ["calendar", "independent", "scan", "training"]
-    assert manifest["release_event_count"] == 1
+    assert manifest["run_ids"] == ["calendar", "native", "raw", "scan", "training"]
+    assert manifest["selection_event_count"] == 1
     with closing(sqlite3.connect(target / "app" / CANONICAL_DATABASE_PATHS[1])) as connection:
         assert connection.execute("SELECT run_id FROM czsc_runs").fetchall() == [("scan",)]
-        assert connection.execute("SELECT payload,payload_sha256 FROM czsc_model_release_events").fetchone() == original_event
+        assert connection.execute("SELECT kind,payload FROM current_model_events").fetchone() == original_event
     assert verify_package(target) == []
-    with pytest.raises(ValueError, match="immutable model releases"):
+    with pytest.raises(ValueError, match="current model selection evidence"):
         build_package(source=repo, target=tmp_path / "broken-data-only", include_data=True)
 
 
 @pytest.mark.parametrize("damage", ["calendar", "checkpoint", "manifest", "unsafe-reference"])
-def test_package_rejects_broken_research_state_without_replacing_previous(tmp_path, damage):
+def test_package_rejects_broken_current_state_without_replacing_previous(tmp_path, damage):
     repo = source_repo(tmp_path)
-    runs, model = research_state(repo)
+    runs, model = current_state(repo)
     if damage == "calendar":
         (runs / "calendar/reports/calendar.json").unlink()
     elif damage == "checkpoint":
-        (model / "model.pt").write_bytes(b"damaged")
+        (model / "model.joblib").write_bytes(b"damaged")
     elif damage == "manifest":
         value = json.loads((model / "manifest.json").read_text(encoding="utf-8"))
         value["available_at"] = "2030-01-01"
@@ -304,16 +318,16 @@ def test_package_rejects_broken_research_state_without_replacing_previous(tmp_pa
     assert (target / "keep.txt").read_text(encoding="utf-8") == "previous"
 
 
-def test_verify_reports_release_hash_failure_even_with_rebuilt_outer_manifest(tmp_path):
+def test_verify_reports_current_ledger_tamper_even_with_rebuilt_outer_manifest(tmp_path):
     repo = source_repo(tmp_path)
-    runs, _model = research_state(repo)
+    runs, _model = current_state(repo)
     write_json(runs / "scan/reports/czsc.json", {"run_id": "scan", "model_run_id": "training"})
-    add_release_database(repo, runs)
+    add_current_selection_database(repo, runs)
     target = tmp_path / "released"
     build_package(source=repo, target=target, include_data=True, include_artifacts="all")
-    (target / "app/my_strategy/artifacts/runs/independent/reports/evaluation.json").write_text("{}", encoding="utf-8")
+    (target / "app/my_strategy/artifacts/runs/training/validation/model_comparison/window/candidate.json").write_text("{}", encoding="utf-8")
     write_integrity_manifest(target, source_project_root=repo / "app", filename="image-manifest.json", reject_external_symlinks=True)
-    assert any("release artifact hash mismatch" in issue for issue in verify_package(target))
+    assert any("frozen artifact hash mismatch" in issue for issue in verify_package(target))
 
 
 def test_force_does_not_remove_previous_package_on_build_failure(tmp_path, monkeypatch):
@@ -342,3 +356,47 @@ def test_relative_verify_uses_source_repository_after_cli_changes_directory(tmp_
     build_package(source=repo, target=target, include_data=False, include_artifacts="none")
     monkeypatch.chdir(tmp_path)
     assert main(["--from-project", str(repo), "--verify", "exports/portable"]) == 0
+
+
+@pytest.mark.parametrize("target", ["raw", "native", "plan", "default"])
+def test_rebuilt_outer_manifest_cannot_hide_current_input_or_parameter_drift(tmp_path, target):
+    repo = source_repo(tmp_path)
+    runs, _ = current_state(repo)
+    add_current_selection_database(repo, runs)
+    packaged = tmp_path / "package"
+    build_package(source=repo, target=packaged, include_data=True, include_artifacts="all")
+    copied = packaged / "app/my_strategy/artifacts/runs"
+    if target == "raw":
+        (copied / "raw/data_snapshots/raw/000001_SZ/raw.parquet").write_bytes(b"new prices")
+    elif target == "native":
+        (copied / "native/data_snapshots/native/000001_SZ/features.parquet").write_bytes(b"changed causal inputs")
+    else:
+        database = packaged / "app/my_strategy/data/metadata/model_training.db"
+        with closing(sqlite3.connect(database)) as conn:
+            if target == "default": conn.execute("UPDATE training_default SET revision=99")
+            else:
+                plan = json.loads(conn.execute("SELECT payload FROM training_plans").fetchone()[0])
+                plan["cohort"] = ["600519.SH"]
+                conn.execute("UPDATE training_plans SET payload=?", (json.dumps(plan),))
+            conn.commit()
+    write_integrity_manifest(packaged, source_project_root=repo / "app", filename="image-manifest.json", reject_external_symlinks=True)
+    assert verify_package(packaged), "outer package hash cannot authorize changed frozen source or parameters"
+
+
+def test_pending_activation_copies_same_frozen_comparison_and_rejects_proof_drift(tmp_path):
+    repo = source_repo(tmp_path)
+    runs, _ = current_state(repo)
+    database = add_current_selection_database(repo, runs)
+    with closing(sqlite3.connect(database)) as conn:
+        payload = json.loads(conn.execute("SELECT payload FROM current_model_events WHERE event_id=1").fetchone()[0])
+        payload.update(effective_from="2026-01-08", pending_event_id=1)
+        conn.execute("INSERT INTO current_model_events VALUES (2,'activation',?,'2026-01-07')", (json.dumps(payload),))
+        conn.execute("UPDATE current_model_selection SET event_id=2,effective_from='2026-01-08'"); conn.commit()
+    target = tmp_path / "activated"
+    manifest = build_package(source=repo, target=target, include_data=True, include_artifacts="all")
+    assert manifest["selection_event_count"] == 2 and verify_package(target) == []
+    comparison = target / "app/my_strategy/artifacts/runs/training/validation/model_comparison/frozen-plan/comparison.json"
+    value = json.loads(comparison.read_text()); value["plan_hash"] = "changed"
+    write_json(comparison, value)
+    write_integrity_manifest(target, source_project_root=repo / "app", filename="image-manifest.json", reject_external_symlinks=True)
+    assert any("comparison" in error or "plan" in error for error in verify_package(target))

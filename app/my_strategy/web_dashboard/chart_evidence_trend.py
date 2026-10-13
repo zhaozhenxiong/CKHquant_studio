@@ -74,7 +74,7 @@ def decorate_analysis(result, *, raw, overlay, start=None):
         event.update(reference_price=float(observed[day]["close"]), reference_price_date=day,
             reference_price_source="signal_day_close", reference_price_basis=basis)
     out.update(display_name=display_name, strategy_version=family, research_version=family,
-        model_family="high_return", trend_consensus=direction, consensus_decisions=direction,
+        model_family="current", trend_consensus=direction, consensus_decisions=direction,
         account_actions=account, wyckoff_events=wvisible, publication_allowed=False,
         model_gate=overlay.get("model_gate", {"passed": False}), compute_info=overlay.get("compute_info", {}),
         next_session_decision=copy.deepcopy(overlay["latest_decision"]))
@@ -88,7 +88,7 @@ def decorate_analysis(result, *, raw, overlay, start=None):
             "direction_points": len(direction["events"]), "broker_fills": len(account.get("ledger", []))},
             "full_prefix": {"bars": len(overlay["rows"]), "source_events": sum(len(r.get("events", [])) for r in overlay["rows"]),
                 "wyckoff_events": len(wfull), "final_points": len(all_points)}}}
-    out["research"] = {**out.get("research", {}), "model_family": "high_return", "display_name": display_name,
+    out["research"] = {**out.get("research", {}), "model_family": "current", "display_name": display_name,
         "strategy_version": family, "account_context": copy.deepcopy(account["context"]),
         "usage_mode": overlay.get("usage_mode", "historical"), "publication_allowed": False,
         "pricing_assumptions": copy.deepcopy(overlay.get("pricing_assumptions", {})),

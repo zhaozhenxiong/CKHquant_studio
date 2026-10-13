@@ -357,7 +357,16 @@ def test_akshare_provider_healthcheck_smoke():
     __import__("importlib.util").util.find_spec("baostock") is None,
     reason="baostock not installed",
 )
-def test_baostock_provider_healthcheck_smoke():
+def test_baostock_provider_healthcheck_smoke(monkeypatch):
+    # Routine regression must not depend on a live SDK socket. Its EOF loop
+    # can otherwise hang forever when the upstream closes its connection.
+    from types import SimpleNamespace
+    import baostock as bs
+    monkeypatch.setattr(BaostockProvider, "_global_failed", False)
+    monkeypatch.setattr(bs, "login", lambda: SimpleNamespace(error_code="0", error_msg=""))
+    calls=[]
+    monkeypatch.setattr(bs, "logout", lambda: calls.append("logout"))
     provider = BaostockProvider()
     result = provider.healthcheck()
-    assert isinstance(result, ProviderResult)
+    assert isinstance(result, ProviderResult) and result.ok
+    assert calls == ["logout"]

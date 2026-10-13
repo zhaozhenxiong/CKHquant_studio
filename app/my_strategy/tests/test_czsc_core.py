@@ -59,24 +59,6 @@ def test_future_prices_cannot_change_replay(raw_db):
         assert all(item["confirmed_at"][:10] <= cutoff for item in payload["pens"] if item["is_confirmed"])
 
 
-def test_research_cached_missing_evidence_can_be_saved_as_strict_json(raw_db, tmp_path, monkeypatch):
-    from my_strategy.services import czsc_research_runtime
-    from my_strategy.storage.czsc_results import ResultStore
-    def research_frame(raw, **kwargs):
-        decision = {"action": "WAIT", "agent_evidence": [{"role": "czsc", "confirmed_at": np.nan}],
-                    "probability": np.float32(.5), "eligible": np.bool_(True)}
-        return {"replay": {"events": [{"time": "2020-11-02", "anchor_time": np.nan}],
-                           "latest_decision": decision, "final_state": {}, "agent_evidence": decision["agent_evidence"]},
-                "routes": [{"date": "2020-11-02", "applied_to_entry": False}]}, {"rows": 1}
-    monkeypatch.setattr(czsc_research_runtime, "analyze_research_frame", research_frame)
-    result = analyze_stock("000001", as_of="2020-11-02", db_path=raw_db, research=True)
-    json.dumps(result, allow_nan=False)
-    assert result["events"][0]["anchor_time"] is None
-    assert result["next_session_decision"]["agent_evidence"][0]["confirmed_at"] is None
-    result["run_id"] = "strict-json-research-analysis"
-    store = ResultStore(tmp_path / "results.db", tmp_path / "runs")
-    store.save("analysis", result)
-    assert store.get(result["run_id"])["next_session_decision"] == result["next_session_decision"]
 
 
 def test_unclosed_higher_periods_are_displayed_without_structure_confirmation(raw_db):

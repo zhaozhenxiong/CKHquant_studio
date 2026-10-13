@@ -15,7 +15,7 @@ from my_strategy.core.paths import PROJECT_ROOT
 from my_strategy.core.run_context import stable_hash
 from my_strategy.scripts.migration_manifest import file_sha256, verify_integrity_manifest, write_integrity_manifest
 from my_strategy.scripts.snapshot_sqlite_databases import _canonical_database_pairs, copy_path_consistently, runtime_layout
-from my_strategy.services.czsc_research_models import model_hash
+from my_strategy.services.czsc_artifact_integrity import model_hash
 
 
 ROOT_FILES = (".env.example", ".env.native.example", ".gitignore", "README.md", "INSTALL_NATIVE.md", "RELEASE_NOTES.md",
@@ -23,11 +23,12 @@ ROOT_FILES = (".env.example", ".env.native.example", ".gitignore", "README.md", 
               "LICENSE", "install.py", "install.bat", "install.command", "khquant-native.bat", "khquant-native.sh", "khquant.sh")
 EXCLUDED_NAMES = {".git", ".scratch", ".venv", ".venv-win", "venv", "__pycache__", ".pytest_cache",
                   ".ruff_cache", ".mypy_cache", ".claude", ".codex", ".serena", "node_modules", ".env",
-                  "target", "build", "dist", ".runtime-build", ".runtime-wheels", "AI_CHANGELOG.md"}
+                  "target", "build", "dist", ".runtime-build", ".runtime-wheels", "AI_CHANGELOG.md",
+                  ".DS_Store", "Thumbs.db"}
 
 
 def _ignore(_directory: str, names: list[str]) -> set[str]:
-    return {name for name in names if name in EXCLUDED_NAMES or name.startswith(".venv")
+    return {name for name in names if name in EXCLUDED_NAMES or name.startswith((".venv", "._"))
             or name.startswith((".pytest", "_tmp_pytest", ".env.")) and not name.endswith(".example")
             or name.endswith((".egg-info", ".pyc", ".pyo", ".log", "-wal", "-shm", "-journal"))}
 
@@ -42,7 +43,7 @@ def _copy_application(app: Path, target: Path) -> None:
             def strategy_ignore(directory: str, names: list[str]) -> set[str]:
                 excluded = _ignore(directory, names)
                 if Path(directory) == source:
-                    excluded |= {"data", "artifacts", "logs", "knowledge_base", "knowledge_base_system"}
+                    excluded |= {"data", "artifacts", "logs", "knowledge_base", "knowledge_base_system", "skills"}
                 return excluded
             copy_path_consistently(source, destination, ignore=strategy_ignore)
         else:
@@ -82,166 +83,278 @@ def _artifact_path(runs: Path, relative: str) -> Path:
     return target
 
 
-def _references(value: Any, runs: Path) -> set[str]:
+RUN_REFERENCE_KEYS = frozenset({"model_run_id", "training_run_id", "calendar_run_id", "freeze_run_id",
+    "source_native_run_id", "raw_source_run_id", "source_run_id", "previous_run_id", "incumbent_run_id", "candidate_run_id"})
+CURRENT_REPORTS = ("czsc.json", "trend_consensus.json", "native_source.json", "raw_source.json", "calendar.json")
+TRAINING_DB_RELATIVE = Path("my_strategy/data/metadata/model_training.db")
+
+
+def _saved_path(runs: Path, saved: str, owner: Path | None = None, *, directory=False) -> Path:
+    """Rebase immutable absolute provenance to the package's contained run tree."""
+    raw = str(saved)
+    parts = PureWindowsPath(raw).parts if "\\" in raw else Path(raw).parts
+    if ".." in parts:
+        raise ValueError(f"unsafe frozen artifact path: {raw}")
+    if "runs" in parts:
+        index = len(parts) - 1 - list(reversed(parts)).index("runs")
+        parts = parts[index + 1:]
+        if len(parts) < 2:
+            raise ValueError(f"unsafe frozen artifact path: {raw}")
+        target = _run_path(runs, parts[0]) / Path(*parts[1:])
+    elif Path(raw).is_absolute() or PureWindowsPath(raw).drive:
+        raise ValueError(f"frozen artifact is outside run storage: {raw}")
+    elif owner is not None and (owner / raw).exists():
+        target = owner / raw
+    else:
+        if len(parts) < 2:
+            raise ValueError(f"unsafe artifact path: {raw}")
+        target = _run_path(runs, parts[0]) / Path(*parts[1:])
+    if not target.resolve().is_relative_to(runs.resolve()) or any(node.is_symlink() for node in (target, *target.parents)):
+        raise ValueError(f"artifact path escapes storage: {raw}")
+    if not (target.is_dir() if directory else target.is_file()):
+        raise ValueError(f"missing frozen artifact: {raw}")
+    return target
+
+
+def _references(value: Any, runs: Path, owner: Path | None = None) -> set[str]:
     references: set[str] = set()
     if isinstance(value, dict):
         for key, item in value.items():
-            if key in {"model_run_id", "training_run_id", "calendar_run_id", "freeze_run_id"} and item:
+            if key in RUN_REFERENCE_KEYS and item:
                 references.add(_run_path(runs, str(item)).name)
-            elif key == "calendar" and isinstance(item, dict) and item.get("run_id"):
+            elif key in {"calendar", "parent_calendar"} and isinstance(item, dict) and item.get("run_id"):
                 references.add(_run_path(runs, str(item["run_id"])).name)
             elif key == "report_path" and item:
-                references.add(_artifact_path(runs, str(item)).relative_to(runs).parts[0])
-            references.update(_references(item, runs))
+                references.add(_saved_path(runs, str(item), owner).relative_to(runs).parts[0])
+        for key, digest in (("path", "sha256"), ("raw_path", "raw_sha256"), ("native_path", "native_sha256"),
+                            ("ledger_path", "ledger_sha256"), ("manifest_path", "manifest_sha256")):
+            if value.get(key) and value.get(digest):
+                target = _saved_path(runs, str(value[key]), owner)
+                if file_sha256(target) != value[digest]:
+                    raise ValueError(f"frozen artifact hash mismatch: {value[key]}")
+                references.add(target.relative_to(runs).parts[0])
+        references.update(set().union(*(_references(item, runs, owner) for item in value.values())) if value else set())
     elif isinstance(value, list):
-        for item in value:
-            references.update(_references(item, runs))
+        references.update(set().union(*(_references(item, runs, owner) for item in value)) if value else set())
     return references
 
 
 def _czsc_runs(artifacts: Path, selection: str) -> list[Path]:
-    if selection == "none":
-        return []
+    if selection == "none": return []
     runs = artifacts / "runs"
-    if not runs.is_dir():
-        return []
+    if not runs.is_dir(): return []
     candidates = []
     for run in runs.iterdir():
-        if not run.is_dir():
-            continue
-        reports = [run / "reports" / name for name in ("czsc.json", "research.json", "calendar.json")]
+        if not run.is_dir(): continue
+        supported = any((run / "reports" / name).is_file() for name in CURRENT_REPORTS)
         metadata = run / "metadata.json"
-        supported = any(path.is_file() for path in reports)
         if metadata.is_file():
-            supported |= str(_read_json(metadata).get("task", "")).startswith("czsc-")
-        if supported:
-            _run_path(runs, run.name)
-            candidates.append(run)
-    # Preserve the existing latest CZSC-report selection when one is available.
+            task = str(_read_json(metadata).get("task", ""))
+            supported |= task.startswith(("trend-", "high-return-sample-diagnostics", "model-training", "czsc-verified-calendar"))
+        if supported: candidates.append(_run_path(runs, run.name))
     if selection == "latest":
         candidates = [run for run in candidates if (run / "reports/czsc.json").is_file()] or candidates
-    candidates.sort(key=lambda run: ((run / "reports/czsc.json").stat().st_mtime_ns
-                                    if (run / "reports/czsc.json").is_file() else run.stat().st_mtime_ns, run.name))
+    candidates.sort(key=lambda run: (run.stat().st_mtime_ns, run.name))
     return candidates[-1:] if selection == "latest" else candidates
 
 
-def _release_events(database: Path) -> list[dict[str, Any]]:
-    if not database.is_file():
-        return []
+def _selection_state(database: Path) -> dict:
+    result = {"events": [], "comparisons": [], "selection": None}
+    if not database.is_file(): return result
     with closing(sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True)) as connection:
+        connection.row_factory = sqlite3.Row
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        if "czsc_model_release_events" not in tables:
-            return []
-        events = []
-        for raw, digest in connection.execute("SELECT payload,payload_sha256 FROM czsc_model_release_events ORDER BY sequence"):
-            event = json.loads(raw)
-            if model_hash(event) != digest:
-                raise ValueError("release event integrity mismatch")
-            events.append(event)
-        promotions = {event["event_id"] for event in events if event["event_type"] == "promote"}
-        for event in events:
-            if event.get("target_release_id") and event["target_release_id"] not in promotions:
-                raise ValueError("release event references unknown promotion")
-        if "czsc_model_aliases" in tables:
-            for release_id, event_id in connection.execute("SELECT release_id,event_id FROM czsc_model_aliases"):
-                if (not events or event_id != events[-1]["event_id"]
-                        or release_id != events[-1].get("target_release_id")):
-                    raise ValueError("release alias does not match the latest event")
-        return events
+        if "current_model_events" in tables:
+            result["events"] = [{**dict(row), "payload": json.loads(row["payload"])}
+                for row in connection.execute("SELECT * FROM current_model_events ORDER BY event_id")]
+        if "current_model_comparisons" in tables:
+            result["comparisons"] = [dict(row) for row in connection.execute("SELECT * FROM current_model_comparisons")]
+        if "current_model_selection" in tables:
+            row = connection.execute("SELECT * FROM current_model_selection WHERE id=1").fetchone()
+            result["selection"] = dict(row) if row else None
+        selected = result["selection"]
+        if selected:
+            event = next((row for row in result["events"] if row["event_id"] == selected["event_id"]), None)
+            if not event or event["payload"].get("run_id") != selected["run_id"]:
+                raise ValueError("current selection does not match its immutable event")
+            if event["kind"] in {"select", "activation"} and event["payload"].get("effective_from") != selected["effective_from"]:
+                raise ValueError("current selection effective time differs from event")
+    return result
 
 
-def _artifact_closure(runs: Path, selected: list[Path], events: list[dict[str, Any]]) -> list[Path]:
+def _training_plans(database: Path) -> dict:
+    plans = {}
+    if not database.is_file(): return plans
+    with closing(sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True)) as conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "training_profiles" in tables:
+            for parameters, digest in conn.execute("SELECT parameters,hash FROM training_profiles"):
+                if stable_hash(json.loads(parameters)) != digest: raise ValueError("training profile hash mismatch")
+        if "training_default" in tables:
+            for profile, revision in conn.execute("SELECT profile_id,revision FROM training_default"):
+                if (profile, revision) != ("builtin", 0) and not conn.execute(
+                    "SELECT 1 FROM training_profiles WHERE profile_id=? AND revision=?", (profile, revision)).fetchone():
+                    raise ValueError("training default points to a missing immutable profile")
+        if "training_plans" in tables:
+            for identity, text in conn.execute("SELECT plan_id,payload FROM training_plans"):
+                plan = json.loads(text)
+                if plan.get("plan_id") != identity or plan.get("plan_hash") != stable_hash({k:v for k,v in plan.items() if k != "plan_hash"}):
+                    raise ValueError("training plan hash mismatch")
+                plans[identity] = plan
+    return plans
+
+
+def _event_comparison(runs: Path, payload: dict, state: dict, plans: dict) -> tuple[Path, dict]:
+    plan = next((p for p in plans.values() if p["plan_hash"] == payload.get("plan_hash")), None)
+    if not plan: raise ValueError("current selection requires its frozen training plan")
+    root = _run_path(runs, payload["run_id"])
+    path = root / "validation/model_comparison" / plan["plan_id"] / "comparison.json"
+    if not path.is_file():
+        row = next((r for r in state["comparisons"] if r["run_id"] == payload["run_id"]), None)
+        if not row: raise ValueError("current selection comparison is missing")
+        path = _artifact_path(runs, row["report_path"])
+    value = _read_json(path)
+    if stable_hash(value) != payload.get("comparison_sha256") or value.get("plan_hash") != plan["plan_hash"]:
+        raise ValueError("current selection immutable comparison binding mismatch")
+    return path, value
+
+
+def _artifact_closure(runs: Path, selected: list[Path], state: dict, plans: dict | None = None) -> list[Path]:
     identities = {run.name for run in selected}
-    for event in events:
-        identities.update(_references(event, runs))
-        for artifact in event.get("artifacts", []):
-            path = _artifact_path(runs, artifact["path"])
-            if file_sha256(path) != artifact["sha256"]:
-                raise ValueError(f"release artifact hash mismatch: {artifact['path']}")
-            identities.add(path.relative_to(runs).parts[0])
+    for row in state["events"]:
+        identities.update(_references(row["payload"], runs))
+        if row["kind"] in {"select", "activation"}:
+            path, value = _event_comparison(runs, row["payload"], state, plans or {})
+            identities.update(_references(value, runs, _run_path(runs, row["payload"]["run_id"])))
+    for row in state["comparisons"]:
+        path = _artifact_path(runs, row["report_path"])
+        if file_sha256(path) != row["sha256"]: raise ValueError("current comparison report hash mismatch")
+        owner = _run_path(runs, path.relative_to(runs).parts[0])
+        value = _read_json(path)
+        plan = (plans or {}).get(value.get("plan_id"))
+        if not plan or value.get("plan_hash") != plan["plan_hash"]:
+            raise ValueError("current comparison requires its frozen training plan")
+        identities.update(_references(value, runs, owner))
+        identities.update(_references(plan, runs, owner))
+        identities.add(owner.name)
     pending, visited = list(sorted(identities)), set()
     while pending:
         identity = pending.pop()
-        if identity in visited:
-            continue
-        run = _run_path(runs, identity)
-        visited.add(identity)
-        reports = list((run / "reports").glob("*.json"))
-        metadata = run / "metadata.json"
-        if metadata.is_file():
-            reports.append(metadata)
-        for report in reports:
-            # Row-level datasets do not route to model or calendar artifacts.
-            if report.name == "dataset.json":
-                continue
-            references = _references(json.loads(report.read_text(encoding="utf-8")), runs)
-            identities.update(references)
-            pending.extend(references - visited)
+        if identity in visited: continue
+        run = _run_path(runs, identity); visited.add(identity)
+        files = list((run / "reports").glob("*.json")) + list((run / "validation").glob("*.json"))
+        if (run / "metadata.json").is_file(): files.append(run / "metadata.json")
+        for path in files:
+            value = _read_json(path)
+            references = _references(value, runs, run)
+            if value.get("plan_id") and "plan_hash" in value:
+                plan = (plans or {}).get(value["plan_id"])
+                if not plan or plan["plan_hash"] != value["plan_hash"]:
+                    raise ValueError("current comparison requires its frozen training plan")
+                references.update(_references(plan, runs, run))
+            identities.update(references); pending.extend(references - visited)
     return [_run_path(runs, identity) for identity in sorted(identities)]
 
 
-def _verify_artifact_state(runs: Path, database: Path, selected: list[Path] | None = None) -> None:
-    events = _release_events(database)
-    if selected is None:
-        selected = sorted(path for path in runs.iterdir() if path.is_dir()) if runs.exists() else []
-    _artifact_closure(runs, selected, events)
-    for run in selected:
-        czsc_report = run / "reports/czsc.json"
-        if czsc_report.is_file() and _read_json(czsc_report).get("run_id") != run.name:
-            raise ValueError(f"CZSC report identity mismatch: {run.name}")
-        model_directories = {path.parent for filename in ("manifest.json", "model.pt")
-                             for path in (run / "models").glob(f"*/{filename}")}
-        for directory in sorted(model_directories):
-            path = directory / "manifest.json"
-            manifest = _read_json(path)
-            integrity = dict(manifest)
-            recorded = integrity.pop("manifest_sha256", None)
-            if (recorded != model_hash(integrity)
-                    or manifest.get("schema_sha256") != model_hash(manifest.get("schema"))
-                    or manifest.get("preprocess_sha256") != model_hash(manifest.get("preprocess"))):
-                raise ValueError(f"model manifest/schema/preprocess integrity mismatch: {path}")
-            checkpoint = path.parent / "model.pt"
-            if not checkpoint.is_file() or file_sha256(checkpoint) != manifest.get("checkpoint_sha256"):
-                raise ValueError(f"model checkpoint hash mismatch: {checkpoint}")
-        report = run / "reports/research.json"
-        if report.is_file():
-            research = _read_json(report)
-            if research.get("run_id") != run.name:
-                raise ValueError(f"research report identity mismatch: {run.name}")
-            calendar = research.get("calendar", {})
-            calendar_root = _run_path(runs, str(calendar.get("run_id", "")))
-            value = _read_json(calendar_root / "reports/calendar.json")
-            dates = value.get("dates", [])
-            if (not value.get("verified") or not value.get("source")
-                    or stable_hash(value) != calendar.get("hash") or dates != sorted(set(dates))):
-                raise ValueError(f"verified model trading calendar hash mismatch: {run.name}")
-            for name in dict.fromkeys(["production", *[item["fold"]["name"] for item in research.get("evaluation", [])]]):
-                model = _run_path(run / "models", name)
-                manifest = _read_json(model / "manifest.json")
-                if (manifest.get("label_contract", {}).get("calendar_hash") != stable_hash(dates)
-                        or manifest.get("data_version") != research.get("data_version")):
-                    raise ValueError(f"checkpoint/research/calendar binding mismatch: {run.name}/{name}")
+def _verify_current_run(run: Path, runs: Path):
+    for name in CURRENT_REPORTS:
+        path = run / "reports" / name
+        if not path.is_file(): continue
+        value = _read_json(path)
+        if name != "calendar.json" and value.get("run_id") != run.name:
+            raise ValueError(f"current report identity mismatch: {run.name}/{name}")
+        if name in {"trend_consensus.json", "native_source.json", "raw_source.json"} and value.get("strategy_version") != "trend_consensus":
+            raise ValueError(f"retired model identity is not current: {run.name}")
+        if name == "raw_source.json" and value.get("snapshot_hash") != stable_hash({k:v for k,v in value.items() if k != "snapshot_hash"}):
+            raise ValueError("raw source snapshot hash mismatch")
+        if name == "trend_consensus.json":
+            freeze, source = value["protocol_freeze"], value["source_snapshot"]
+            if freeze["freeze_hash"] != stable_hash({k:v for k,v in freeze.items() if k != "freeze_hash"}):
+                raise ValueError("current protocol freeze hash mismatch")
+            if source["snapshot_hash"] != stable_hash({k:v for k,v in source.items() if k != "snapshot_hash"}):
+                raise ValueError("current source snapshot hash mismatch")
+            if stable_hash(value["config"]) != freeze["config_hash"] or value["config"].get("source_snapshot_hash") != source["snapshot_hash"]:
+                raise ValueError("current config/source freeze binding mismatch")
+            if stable_hash(value["dataset_records"]) != source["records_hash"]:
+                raise ValueError("current dataset catalogue hash mismatch")
+            if "models_catalog_hash" in freeze:
+                catalogs = {"trend":value["trend_bundles"], "ma_exit":value["ma_exit_bundles"], "architecture":value["architecture_bundles"]}
+                if stable_hash(catalogs) != freeze["models_catalog_hash"]: raise ValueError("current model catalogue freeze hash mismatch")
+                for bundle in [*value["trend_bundles"], *value["ma_exit_bundles"], *value["architecture_bundles"]]:
+                    for asset in bundle["heads"].values():
+                        model_dir = _saved_path(runs, asset["path"], run, directory=True)
+                        manifest = _read_json(model_dir / "manifest.json")
+                        if manifest["manifest_sha256"] != asset["manifest_sha256"]:
+                            raise ValueError("current served head catalogue hash mismatch")
+            native = _read_json(_run_path(runs, source["source_native_run_id"]) / "reports/native_source.json")
+            if file_sha256(_run_path(runs, source["source_native_run_id"]) / "reports/native_source.json") != source["source_report_sha256"]:
+                raise ValueError("current native source report hash mismatch")
+            if native["source_snapshot"] != source["source_snapshot"]:
+                raise ValueError("current native source lineage mismatch")
+        if name == "native_source.json":
+            raw = _read_json(_run_path(runs, value["source_snapshot"]["raw_source_run_id"]) / "reports/raw_source.json")
+            if raw["snapshot_hash"] != value["source_snapshot"]["raw_snapshot_hash"]:
+                raise ValueError("current raw-to-native source binding mismatch")
+        if name in {"native_source.json", "raw_source.json"}:
+            calendar_id = value.get("calendar_run_id") or value["source_snapshot"]["calendar_run_id"]
+            calendar = _read_json(_run_path(runs, calendar_id) / "reports/calendar.json")
+            dates = value.get("dates") or value["calendar_dates"]
+            if calendar.get("verified") is not True or not calendar.get("source") or dates != sorted(set(dates)) or calendar["dates"][:len(dates)] != dates:
+                raise ValueError("current source verified calendar binding mismatch")
+            digest = value.get("calendar_hash") or value["source_snapshot"]["calendar_hash"]
+            if digest != stable_hash(dates): raise ValueError("current source calendar hash mismatch")
+    for path in (run / "models").rglob("manifest.json"):
+        value = _read_json(path); body = {k:v for k,v in value.items() if k != "manifest_sha256"}
+        if value.get("manifest_sha256") != stable_hash(body): raise ValueError("current head manifest hash mismatch")
+        checkpoint = (path.parent / str(value.get("checkpoint", ""))).resolve()
+        if not checkpoint.is_relative_to(path.parent.resolve()) or not checkpoint.is_file() or file_sha256(checkpoint) != value.get("checkpoint_sha256"):
+            raise ValueError("current head checkpoint hash mismatch")
+        if value.get("target_contract_hash") != stable_hash(value.get("target_contract", {})):
+            raise ValueError("current head target contract hash mismatch")
+        if value.get("export_sha256") and file_sha256(path.parent / "linear-layers.json") != value["export_sha256"]:
+            raise ValueError("current head export hash mismatch")
+    # Saved calendar source artifacts carry actual source hashes and are rebased,
+    # never rewritten to make a historical hash appear valid.
+    calendar = run / "reports/calendar.json"
+    if calendar.is_file():
+        value = _read_json(calendar)
+        for artifact in value.get("source_artifacts", []):
+            target = _saved_path(runs, artifact["path"], run)
+            if file_sha256(target) != artifact["sha256"]: raise ValueError("verified calendar source artifact hash mismatch")
+        if value.get("artifact") and value.get("sha256"):
+            if file_sha256(_saved_path(runs, value["artifact"], run)) != value["sha256"]:
+                raise ValueError("verified calendar date artifact hash mismatch")
+
+
+def _verify_artifact_state(runs: Path, database: Path, selected: list[Path] | None = None, *, training_database=None) -> None:
+    state = _selection_state(database); plans = _training_plans(Path(training_database)) if training_database else {}
+    selected = selected if selected is not None else sorted(path for path in runs.iterdir() if path.is_dir()) if runs.exists() else []
+    selected = _artifact_closure(runs, selected, state, plans)
+    for run in selected: _verify_current_run(run, runs)
+    for row in state["events"]:
+        if row["kind"] in {"select", "activation"}: _event_comparison(runs, row["payload"], state, plans)
     if database.is_file():
-        with closing(sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True)) as connection:
-            if connection.execute("SELECT 1 FROM sqlite_master WHERE name='czsc_runs'").fetchone():
-                columns = {row[1] for row in connection.execute("PRAGMA table_info(czsc_runs)")}
+        with closing(sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True)) as conn:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE name='czsc_runs'").fetchone():
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(czsc_runs)")}
                 if "report_path" in columns:
-                    for run_id, relative in connection.execute("SELECT run_id,report_path FROM czsc_runs"):
+                    for identity, relative in conn.execute("SELECT run_id,report_path FROM czsc_runs"):
                         report = _artifact_path(runs, relative)
-                        if report.relative_to(runs).parts[0] != run_id or _read_json(report).get("run_id") != run_id:
-                            raise ValueError(f"result index/report identity mismatch: {run_id}")
+                        if report.relative_to(runs).parts[0] != identity or _read_json(report).get("run_id") != identity:
+                            raise ValueError(f"result index/report identity mismatch: {identity}")
 
 
 def verify_package(package_root: Path, *, allow_runtime_additions: bool = False) -> list[str]:
     """Verify immutable payloads, allowing databases to change after installation."""
     root = package_root.resolve()
-    mutable = [f"app/{relative}" for _source, relative in _canonical_database_pairs(root)] if allow_runtime_additions else []
+    mutable = [f"app/{relative}" for _source, relative in _canonical_database_pairs(root)] + [f"app/{TRAINING_DB_RELATIVE.as_posix()}"] if allow_runtime_additions else []
     issues = verify_integrity_manifest(root, filename="image-manifest.json", check_sqlite=True,
                                        check_unexpected=not allow_runtime_additions, mutable_paths=mutable)
     if not issues:
         try:
             _verify_artifact_state(root / "app/my_strategy/artifacts/runs",
-                                   root / "app/my_strategy/data/processed/czsc/results.db")
+                                   root / "app/my_strategy/data/processed/czsc/results.db",
+                                   training_database=root / "app" / TRAINING_DB_RELATIVE)
         except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as exc:
             issues.append(f"artifact state invalid: {exc}")
     return issues
@@ -276,10 +389,15 @@ def _contents(source: Path, target: Path, include_data: bool, include_artifacts:
             if is_personal and not include_personal or not is_personal and not include_data:
                 continue
             copy_path_consistently(database, target / "app" / relative)
-    events = _release_events(copied_results)
-    if events and include_artifacts == "none":
-        raise ValueError("data contains immutable model releases; use --include-artifacts latest or all")
-    selected_runs = _artifact_closure(layout["artifact_root"] / "runs", selected_runs, events)
+    training_source = layout["metadata_root"] / "model_training.db"
+    training_copy = target / "app" / TRAINING_DB_RELATIVE
+    if (include_data or include_artifacts != "none") and training_source.is_file():
+        copy_path_consistently(training_source, training_copy)
+    state = _selection_state(copied_results)
+    if (state["events"] or state["comparisons"] or state["selection"]) and include_artifacts == "none":
+        raise ValueError("data contains current model selection evidence; use --include-artifacts latest or all")
+    plans = _training_plans(training_copy)
+    selected_runs = _artifact_closure(layout["artifact_root"] / "runs", selected_runs, state, plans)
     if include_data:
         if copied_results.is_file():
             with closing(sqlite3.connect(copied_results)) as connection:
@@ -290,6 +408,9 @@ def _contents(source: Path, target: Path, include_data: bool, include_artifacts:
                     else:
                         connection.execute("DELETE FROM czsc_runs")
                     connection.commit()
+                for retired in ("czsc_model_aliases", "czsc_model_release_events"):
+                    connection.execute("DROP TABLE IF EXISTS " + retired)
+                connection.commit()
     for run in selected_runs:
         copy_path_consistently(run, target / "app/my_strategy/artifacts/runs" / run.name, ignore=_ignore)
     (target / "RUNBOOK.md").write_text(
@@ -303,8 +424,8 @@ def _contents(source: Path, target: Path, include_data: bool, include_artifacts:
                                     reject_external_symlinks=True, metadata={"architecture": "czsc",
                                     "include_data": include_data, "include_artifacts": include_artifacts,
                                      "include_personal": include_personal,
-                                     "artifact_selection": "czsc_dependency_closure_v1",
-                                     "release_event_count": len(events),
+                                     "artifact_selection": "current_model_dependency_closure",
+                                     "selection_event_count": len(state["events"]),
                                     "run_ids": [run.name for run in selected_runs]})
 
 
@@ -363,7 +484,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Source checkout or extracted source Release; required for export from a wheel installation.")
     parser.add_argument("--include-data", action="store_true")
     parser.add_argument("--include-artifacts", choices=["none", "latest", "all"], default="none",
-                        help="Optional CZSC/research/calendar state with model and release evidence dependencies.")
+                        help="Optional current model/source/calendar state with selection and comparison evidence dependencies.")
     parser.add_argument("--include-personal", action="store_true",
                         help="Explicitly include saved watchlist and manual holdings (private by default).")
     parser.add_argument("--force", action="store_true")

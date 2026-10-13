@@ -45,19 +45,20 @@ def load_verified_calendar(calendar_run_id, *, runs_root=None, require_sources=F
     if (value.get("verified") is not True or not isinstance(value.get("source"), str)
             or not value["source"].strip() or not _valid_sessions(dates)):
         raise ValueError("研究需要有序、唯一且已核验的独立交易日历")
+    from my_strategy.services.czsc_trend_support import resolve_frozen_asset
     sources = value.get("source_artifacts", [])
     if require_sources and (value.get("independent_from_market_bars") is not True or not sources):
         raise ValueError("执行日历扩展需要独立来源及冻结来源哈希")
     for artifact in sources:
-        if _file_hash(artifact["path"]) != artifact["sha256"]:
+        if _file_hash(resolve_frozen_asset(artifact["path"], runs_root=root)) != artifact["sha256"]:
             raise ValueError("verified calendar source artifact hash mismatch")
-    if value.get("artifact") and value.get("sha256") and _file_hash(value["artifact"]) != value["sha256"]:
+    if value.get("artifact") and value.get("sha256") and _file_hash(resolve_frozen_asset(value["artifact"], runs_root=root)) != value["sha256"]:
         raise ValueError("verified calendar date artifact hash mismatch")
     ancestors = []
     parent = value.get("parent_calendar")
     if parent:
         parent_dates, parent_meta = load_verified_calendar(parent["run_id"], runs_root=root, _seen=seen)
-        if (Path(parent["path"]).resolve() != Path(parent_meta["path"]).resolve()
+        if (resolve_frozen_asset(parent["path"], runs_root=root) != Path(parent_meta["path"]).resolve()
                 or parent["file_sha256"] != parent_meta["file_sha256"]
                 or parent["hash"] != parent_meta["hash"]
                 or not calendar_prefix_compatible(parent_dates, dates)):

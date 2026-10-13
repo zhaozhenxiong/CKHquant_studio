@@ -27,6 +27,7 @@ def create_app(task_manager: TaskManager | None = None, personal_store: Personal
 
     app = FastAPI(title="KHQuant CZSC 结构研究", version="1.0.1", lifespan=lifespan)
     app.state.tasks = manager
+    app.state.training = manager.training
     app.state.personal = personal_store or PersonalStore(manager.db_path.parent / "personal_portfolio.db")
 
     @app.middleware("http")
@@ -70,6 +71,8 @@ def create_app(task_manager: TaskManager | None = None, personal_store: Personal
     @app.get("/data")
     @app.get("/watchlist")
     @app.get("/holdings")
+    @app.get("/training")
+    @app.get("/parameters")
     def shell():
         return FileResponse(STATIC_ROOT / "index.html", headers={"Cache-Control": "no-store"})
 

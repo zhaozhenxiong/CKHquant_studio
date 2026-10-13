@@ -43,8 +43,8 @@ def validate(node: str | None = None) -> dict[str, object]:
     parser.feed((root / "index.html").read_text(encoding="utf-8"))
     if len(parser.ids) != len(set(parser.ids)):
         raise ValueError("Duplicate shell element id")
-    if set(parser.routes) != {"analysis", "scan", "backtest", "watchlist", "holdings", "data"}:
-        raise ValueError("The workbench must have its six routes")
+    if set(parser.routes) != {"analysis", "scan", "backtest", "watchlist", "holdings", "data", "training", "parameters"}:
+        raise ValueError("The workbench must have its eight routes")
     for name in ("analysis-start", "scan-start", "backtest-start"):
         if parser.date_inputs.get(name) != "2026-01-01":
             raise ValueError(f"Incorrect research date default: {name}")

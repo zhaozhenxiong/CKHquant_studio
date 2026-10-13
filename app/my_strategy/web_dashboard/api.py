@@ -21,43 +21,34 @@ def clean_symbol(value: str) -> str:
 
 
 class AnalysisRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
     symbol: str
     start: date | None = date(2026, 1, 1)
     end: date | None = None
     as_of: str | None = None
     research: bool = Field(default=True, strict=True)
-    model_family: Literal["ma_trend", "dual", "wyckoff", "high_return"] = "ma_trend"
-    usage_mode: Literal["production", "historical", "retrospective"] = "historical"
-    model_policy: Literal["auto", "pinned"] = "auto"
-    entry_policy: Literal["legacy", "fresh", "risk"] = "legacy"
+    model_family: Literal['current'] = 'current'
+    usage_mode: Literal['forward', 'historical'] = 'historical'
+    model_policy: Literal['auto', 'pinned'] = 'auto'
+    entry_policy: Literal['risk', 'legacy'] = 'risk'
     model_run_id: str | None = None
     model_fold: str | None = None
     calendar_run_id: str | None = None
     device: str | None = None
     consensus_config: dict[str, Any] | None = None
-    consensus_version: Literal["czsc_agent_consensus_v1", "czsc_agent_consensus_v2", "czsc_agent_consensus_v3", "czsc_agent_consensus_v4", "czsc_trend_consensus", "czsc_trend_consensus_v2"] | None = None
+    consensus_version: Literal['trend_consensus'] | None = None
     account_start: date | None = None
     account_initial_cash: float | None = Field(default=None, gt=0, le=1e12, allow_inf_nan=False)
-    _symbol = field_validator("symbol")(clean_symbol)
+    _symbol = field_validator('symbol')(clean_symbol)
 
-    @model_validator(mode="after")
-    def arbitration_parameters(self):
-        from my_strategy.web_dashboard.trend_routes import resolve_analysis_consensus
-        self.consensus_version, self.consensus_config = resolve_analysis_consensus(
-            research=self.research, model_family=self.model_family, model_run_id=self.model_run_id,
-            config=self.consensus_config, version=self.consensus_version)
-        if self.consensus_version in {"czsc_trend_consensus", "czsc_trend_consensus_v2"}:
-            self.entry_policy = "risk"
-        return self
-
-    @field_validator("model_run_id", "model_fold", "calendar_run_id")
+    @field_validator('model_run_id', 'model_fold', 'calendar_run_id')
     @classmethod
     def identity(cls, value):
-        if value is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,179}", value):
-            raise ValueError("研究运行标识不合法")
+        if value is not None and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,179}', value):
+            raise ValueError('运行标识不合法')
         return value
 
-    @field_validator("device")
+    @field_validator('device')
     @classmethod
     def compute_device(cls, value):
         if value is not None:
@@ -65,41 +56,26 @@ class AnalysisRequest(BaseModel):
             return requested_torch_device(value)
         return value
 
-    @model_validator(mode="after")
+    @model_validator(mode='after')
     def dates(self):
-        if (self.account_start is not None or self.account_initial_cash is not None) and self.consensus_version not in {"czsc_trend_consensus", "czsc_trend_consensus_v2"}:
-            raise ValueError("账户研究参数需要趋势共识策略入口")
         if self.start and self.end and self.start > self.end:
-            raise ValueError("开始日期不得晚于结束日期")
-        if self.research and self.model_family == "high_return" and self.usage_mode == "retrospective":
-            raise ValueError("高收益区间研究只支持前向历史检查点，不能使用事后模型研究历史图")
+            raise ValueError('开始日期不得晚于结束日期')
         if self.model_fold:
-            self.model_policy = "pinned"
-        if self.model_policy == "pinned" and not self.model_run_id:
-            raise ValueError("固定模型需要研究运行标识")
-        if self.model_policy == "pinned" and not self.model_fold:
-            self.model_fold = "production"
-        if self.usage_mode == "retrospective" and self.model_policy != "pinned":
-            raise ValueError("事后研究需要明确固定模型检查点")
-        if self.entry_policy == "risk" and self.usage_mode == "production" and self.model_family != "high_return":
-            raise ValueError("价格与风险入场尚为实验，请使用历史研究模式")
-        if not self.research and self.entry_policy != "legacy":
-            raise ValueError("新入场计划需要组合研究模式")
+            self.model_policy = 'pinned'
+        if self.model_policy == 'pinned' and not self.model_run_id:
+            raise ValueError('固定模型需要完整当前模型运行')
+        if self.model_policy == 'pinned' and not self.model_fold:
+            self.model_fold = 'production'
+        from my_strategy.web_dashboard.trend_routes import resolve_analysis_consensus
+        self.consensus_version, self.consensus_config = resolve_analysis_consensus(
+            research=self.research, model_family=self.model_family, model_run_id=self.model_run_id,
+            config=self.consensus_config, version=self.consensus_version)
+        self.entry_policy = 'risk' if self.research else 'legacy'
         return self
 
 
-class ReplayHoldingRequest(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-    replay_run_id: str = Field(pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,179}$')
-    window: str = Field(pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$')
-    arm: Literal['reference','full','entry_only','exit_only','ma','structure','wyckoff'] = 'full'
-    symbol: str
-    as_of: date
-    usage_mode: Literal['production','historical'] = 'production'
-    _symbol = field_validator('symbol')(clean_symbol)
-
-
 class TaskSpec(BaseModel):
+    model_config = ConfigDict(extra='forbid')
     symbols: list[str] = Field(default_factory=list, max_length=10000)
     start: date | None = None
     end: date | None = None
@@ -107,113 +83,84 @@ class TaskSpec(BaseModel):
     device: str | None = None
     cpu_workers: int | None = Field(default=None, ge=1, le=16, strict=True)
     batch_size: int | None = Field(default=None, ge=1, le=128, strict=True)
-    research: bool = Field(default=False, strict=True)
-    model_family: Literal["ma_trend", "dual", "wyckoff", "high_return"] = "ma_trend"
+    research: bool = Field(default=True, strict=True)
+    model_family: Literal['current'] = 'current'
     consensus_config: dict[str, Any] | None = None
-    consensus_version: Literal["czsc_agent_consensus_v1", "czsc_agent_consensus_v2", "czsc_agent_consensus_v3", "czsc_agent_consensus_v4", "czsc_trend_consensus", "czsc_trend_consensus_v2"] | None = None
-
-    @model_validator(mode="after")
-    def arbitration_parameters(self):
-        if self.consensus_config is not None or self.consensus_version is not None:
-            from my_strategy.web_dashboard.trend_routes import validate_consensus_config as validate_config
-            self.consensus_config = validate_config(self.consensus_config, version=self.consensus_version,
-                model_run_id=self.model_run_id, model_family=self.model_family)
-        return self
-    source_training_run_id: str | None = None
-    research_config: dict[str, Any] | None = None
+    consensus_version: Literal['trend_consensus'] | None = None
     model_run_id: str | None = None
     model_fold: str | None = None
     calendar_run_id: str | None = None
-    usage_mode: Literal["production", "historical", "retrospective"] = "historical"
-    model_policy: Literal["auto", "pinned"] = "auto"
-    entry_policy: Literal["legacy", "fresh", "risk"] = "legacy"
+    usage_mode: Literal['forward', 'historical'] = 'historical'
+    model_policy: Literal['auto', 'pinned'] = 'auto'
+    entry_policy: Literal['risk', 'legacy'] = 'risk'
+    _identity = field_validator('model_run_id', 'model_fold', 'calendar_run_id')(AnalysisRequest.identity.__func__)
+    _device = field_validator('device')(AnalysisRequest.compute_device.__func__)
 
-    @field_validator("model_run_id", "model_fold", "calendar_run_id")
-    @classmethod
-    def research_identity(cls, value):
-        if value is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,179}", value):
-            raise ValueError("研究运行标识不合法")
-        return value
-
-    @field_validator("source_training_run_id")
-    @classmethod
-    def source_identity(cls, value):
-        if value is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,179}", value):
-            raise ValueError("冻结来源运行标识不合法")
-        return value
-
-    @field_validator("device")
-    @classmethod
-    def compute_device(cls, value):
-        if value is not None:
-            from my_strategy.core.device import requested_torch_device
-            return requested_torch_device(value)
-        return value
-
-    @field_validator("symbols")
+    @field_validator('symbols')
     @classmethod
     def stocks(cls, values):
         return list(dict.fromkeys(clean_symbol(value) for value in values))
 
-    @model_validator(mode="after")
+    @model_validator(mode='after')
     def dates(self):
         if self.start and self.end and self.start > self.end:
-            raise ValueError("开始日期不得晚于结束日期")
-        if self.model_fold:
-            self.model_policy = "pinned"
-        if self.model_policy == "pinned" and self.model_run_id and not self.model_fold:
-            self.model_fold = "production"
-        if self.entry_policy == "risk" and self.usage_mode == "production" and self.model_family != "high_return":
-            raise ValueError("价格与风险入场尚为实验，请使用历史研究模式")
-        if not self.research and self.entry_policy != "legacy":
-            raise ValueError("新入场计划需要组合研究模式")
+            raise ValueError('开始日期不得晚于结束日期')
+        if self.model_policy == 'pinned' and not self.model_run_id:
+            raise ValueError('固定模型需要完整当前模型运行')
+        if self.model_fold and not self.model_run_id:
+            raise ValueError('固定检查点需要模型运行')
+        from my_strategy.web_dashboard.trend_routes import validate_consensus_config
+        self.consensus_config = validate_consensus_config(self.consensus_config,
+            version=self.consensus_version, model_run_id=self.model_run_id, model_family=self.model_family)
+        self.consensus_version = 'trend_consensus'
+        self.entry_policy = 'risk' if self.research else 'legacy'
         return self
 
 
 class TaskRequest(BaseModel):
-    kind: Literal["scan", "backtest", "update", "research_train", "dual_research_train", "wyckoff_research_train", "high_return_points_build", "high_return_episodes_build", "high_return_train", "high_return_backtest"]
+    model_config = ConfigDict(extra='forbid')
+    kind: Literal['scan', 'backtest', 'update']
     spec: TaskSpec = Field(default_factory=TaskSpec)
 
-    @model_validator(mode="after")
-    def research_start(self):
-        if self.spec.model_fold is not None and (self.kind not in {"scan", "backtest", "high_return_backtest"} or not self.spec.research or self.spec.model_run_id is None):
-            raise ValueError("模型检查点需要研究模式及模型运行")
-        if self.spec.model_policy == "pinned" and not self.spec.model_run_id:
-            raise ValueError("固定模型需要研究运行标识")
-        if self.spec.usage_mode == "retrospective" and self.kind in {"scan", "backtest", "high_return_backtest"}:
-            raise ValueError("事后模型研究仅用于结构分析，不用于策略扫描或回测认证")
-        if self.kind == "research_train" and (self.spec.end is None or self.spec.calendar_run_id is None):
-            raise ValueError("研究训练需要明确截止日及已核验交易日历运行")
-        if self.kind == "dual_research_train" and (self.spec.end is None or self.spec.source_training_run_id is None):
-            raise ValueError("双专家研究需要明确截止日及冻结来源运行")
-        if self.kind == "dual_research_train":
-            self.spec.model_family = "dual"
-        if self.kind == "wyckoff_research_train":
-            if self.spec.end is None or self.spec.source_training_run_id is None:
-                raise ValueError("威科夫研究需要明确截止日及冻结来源运行")
-            self.spec.model_family = "wyckoff"
-        if self.kind in {"high_return_points_build", "high_return_episodes_build", "high_return_train"}:
-            if self.spec.source_training_run_id is None:
-                raise ValueError("高收益区间研究需要明确的冻结来源运行")
-            self.spec.model_family = "high_return"
-            self.spec.research = True
-        if self.kind == "high_return_backtest":
-            if self.spec.model_run_id is None:
-                raise ValueError("高收益区间离线回测需要明确的高收益模型运行")
-            if self.spec.model_policy != "auto" or self.spec.model_fold is not None:
-                raise ValueError("高收益区间离线回测按日期自动匹配检查点，不能固定检查点")
-            if self.spec.usage_mode != "historical":
-                raise ValueError("高收益区间离线回测只支持历史滚动研究，尚未取得当前生产资格")
-            self.spec.model_family = "high_return"
-            self.spec.research = True
-        if self.kind in {"scan", "backtest", "high_return_backtest"} and self.spec.start is None:
+    @model_validator(mode='after')
+    def start_date(self):
+        if self.kind == 'backtest' and (self.spec.usage_mode != 'historical' or self.spec.model_policy == 'pinned' or self.spec.model_fold is not None):
+            raise ValueError('回测只支持历史按日期匹配，固定检查点与当前时点研究请使用分析入口')
+        if self.kind in {'scan', 'backtest'} and self.spec.start is None:
             self.spec.start = date(2026, 1, 1)
             self.spec.dates()
-        if self.kind in {"high_return_points_build", "high_return_episodes_build", "high_return_train", "high_return_backtest"}:
-            from my_strategy.web_dashboard.trend_routes import reject_legacy_operation as reject_native_legacy_operation
-            reject_native_legacy_operation(self.kind, run_id=self.spec.model_run_id or self.spec.source_training_run_id,
-                consensus_version=self.spec.consensus_version, research_config=self.spec.research_config)
         return self
+
+
+class TrainingParametersRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+class TrainingPreflightRequest(TrainingParametersRequest):
+    source_native_run_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,179}$')
+
+
+class DefaultProfileRequest(TrainingParametersRequest):
+    expected_revision: int = Field(ge=0, strict=True)
+
+
+class TrainingJobRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    plan_id: str = Field(pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,179}$')
+    parameters: dict[str, Any] | None = None
+
+
+class ModelValidationJobRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    plan_id: str = Field(pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,179}$')
+    model_run_id: str = Field(pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,179}$')
+
+
+class SelectionRollbackRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    expected_run_id: str | None = None
+    target_run_id: str | None = None
 
 
 class WatchlistRequest(BaseModel):
@@ -269,7 +216,7 @@ def remove_holding(symbol: str, request: Request):
 
 @router.get("/health")
 def health():
-    return {"status": "ok", "method": "CZSC", "version": "1.0.1"}
+    return {"status": "ok", "method": "CZSC", "strategy": "trend_consensus"}
 
 
 @router.get("/data/status")
@@ -293,68 +240,90 @@ async def compute(device: str | None = None):
     return await asyncio.to_thread(compute_status, device)
 
 
-@router.get("/research/status")
-async def research_status():
-    from my_strategy.services.czsc_research import research_status as inspect_research
-    return await asyncio.to_thread(inspect_research)
+@router.api_route('/research/{retired_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
+async def retired_research(retired_path: str):
+    raise HTTPException(status_code=410, detail='旧研究和发布接口已退役，请使用模型训练中心')
 
 
-@router.get("/research/dual-status")
-async def dual_status():
-    from my_strategy.services.czsc_dual_runtime import dual_research_status
-    return await asyncio.to_thread(dual_research_status)
+@router.get('/training/capabilities')
+async def training_capabilities(request: Request):
+    return await asyncio.to_thread(request.app.state.training.capabilities)
 
 
-@router.get("/research/wyckoff-status")
-async def wyckoff_status():
-    from my_strategy.services.czsc_wyckoff_runtime import wyckoff_research_status
-    return await asyncio.to_thread(wyckoff_research_status)
+@router.get('/training/profiles')
+async def training_profiles(request: Request):
+    return await asyncio.to_thread(request.app.state.training.profiles)
 
 
-@router.get("/research/high-return-status")
-async def high_return_status():
-    from my_strategy.web_dashboard.trend_routes import status_high_return
-    return await asyncio.to_thread(status_high_return)
+@router.put('/training/default-profile')
+async def save_default(spec: DefaultProfileRequest, request: Request):
+    return await asyncio.to_thread(request.app.state.training.save_default, spec.parameters, spec.expected_revision)
 
 
-@router.get("/research/high-return-forward-status")
-async def high_return_forward_status(model_run_id: str = Query(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,179}$")):
-    from my_strategy.web_dashboard.trend_routes import reject_legacy_operation as reject_native_legacy_operation
-    reject_native_legacy_operation('forward', run_id=model_run_id)
-    from my_strategy.services.czsc_high_return_forward import forward_status
-    return await asyncio.to_thread(forward_status, model_run_id)
+@router.post('/training/preflight')
+async def training_preflight(spec: TrainingPreflightRequest, request: Request):
+    if spec.source_native_run_id is None:
+        return await asyncio.to_thread(request.app.state.training.preflight, spec.parameters)
+    return await asyncio.to_thread(request.app.state.training.preflight, spec.parameters,
+        source_native_run_id=spec.source_native_run_id)
 
 
-@router.post('/research/high-return-holding')
-async def high_return_holding(spec: ReplayHoldingRequest):
-    from my_strategy.web_dashboard.holding_evidence import holding_exit_research
-    return await asyncio.to_thread(holding_exit_research, **spec.model_dump(mode='json'))
+@router.post('/training/jobs', status_code=202)
+async def training_job(spec: TrainingJobRequest, request: Request):
+    await asyncio.to_thread(request.app.state.training.validate_plan, spec.plan_id, spec.parameters)
+    return request.app.state.tasks.submit('model_training', spec.model_dump(exclude_none=True))
 
 
-class ModelPromotionRequest(BaseModel):
-    model_run_id: str
-    checkpoint: str = "production"
-    reason: str = Field(min_length=1, max_length=1000)
-    _identity = field_validator("model_run_id", "checkpoint")(AnalysisRequest.identity.__func__)
+@router.post('/training/validation-jobs', status_code=202)
+async def model_validation_job(spec: ModelValidationJobRequest, request: Request):
+    await asyncio.to_thread(request.app.state.training.validate_plan, spec.plan_id)
+    return request.app.state.tasks.submit('model_validation', spec.model_dump())
 
 
-class ModelRollbackRequest(BaseModel):
-    release_id: str | None = None
-    reason: str = Field(min_length=1, max_length=1000)
+@router.get('/training/status')
+async def training_status(request: Request):
+    status = await asyncio.to_thread(request.app.state.training.status)
+    status['jobs'] = [job for job in request.app.state.tasks.list() if job['kind'] in {'model_training', 'model_validation'}]
+    return status
 
 
-@router.post("/research/promote")
-async def promote_model(spec: ModelPromotionRequest, request: Request):
-    from my_strategy.storage.czsc_model_releases import ModelReleaseStore
-    store = ModelReleaseStore(request.app.state.tasks.results.db_path, request.app.state.tasks.results.runs_root)
-    return await asyncio.to_thread(store.promote, spec.model_run_id, spec.checkpoint, reason=spec.reason)
+@router.get('/training/selection-events')
+async def selection_events(request: Request):
+    return await asyncio.to_thread(request.app.state.training.selection_events)
 
 
-@router.post("/research/rollback")
-async def rollback_model(spec: ModelRollbackRequest, request: Request):
-    from my_strategy.storage.czsc_model_releases import ModelReleaseStore
-    store = ModelReleaseStore(request.app.state.tasks.results.db_path, request.app.state.tasks.results.runs_root)
-    return await asyncio.to_thread(store.rollback, spec.release_id, reason=spec.reason)
+@router.get('/training/runs/{run_id}/comparison')
+async def model_comparison(run_id: str, request: Request):
+    return await asyncio.to_thread(request.app.state.training.comparison, run_id)
+
+
+@router.get('/training/diagnostics/{run_id}')
+async def sample_diagnostics(run_id: str, request: Request,
+    expected_sha256: str | None = Query(default=None, pattern=r'^[a-f0-9]{64}$')):
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,179}', run_id):
+        raise HTTPException(status_code=422, detail='诊断运行标识不合法')
+    def read():
+        import json
+        from my_strategy.services.czsc_trend_support import _file_hash
+        base = request.app.state.tasks.results.runs_root.resolve()
+        path = (base / run_id / 'reports/high_return_sample_diagnostics.json').resolve()
+        if not path.is_relative_to(base):
+            raise ValueError('诊断路径越界')
+        if expected_sha256 and _file_hash(path) != expected_sha256:
+            raise ValueError('诊断文件与任务核验哈希不同')
+        report = json.loads(path.read_text())
+        if report.get('family') != 'trend_consensus' or report.get('artifact_integrity_passed') is not True:
+            raise ValueError('诊断不是已核验的当前模型证据')
+        model = (base / report['model_run_id'] / 'reports/trend_consensus.json').resolve()
+        if not model.is_relative_to(base) or _file_hash(model) != report['source_report_sha256']:
+            raise ValueError('诊断来源模型报告已改变')
+        return report
+    return await asyncio.to_thread(read)
+
+
+@router.post('/training/rollback')
+async def selection_rollback(spec: SelectionRollbackRequest, request: Request):
+    return await asyncio.to_thread(request.app.state.training.rollback, spec.expected_run_id, spec.target_run_id)
 
 
 @router.get("/symbols")
@@ -372,21 +341,18 @@ async def analysis(spec: AnalysisRequest, request: Request):
         calculation_query = {key: value for key, value in query.items()
                              if key not in {"consensus_config", "consensus_version"}}
         settings = strategy_config()
-        if spec.research and spec.model_family == "high_return":
-            from my_strategy.web_dashboard.high_return import analyze_high_return
-            result = analyze_high_return(**calculation_query, config=settings, consensus_config=spec.consensus_config,
+        if spec.research:
+            from my_strategy.web_dashboard.trend_strategy import analyze_trend_consensus
+            result = analyze_trend_consensus(**calculation_query, config=settings, consensus_config=spec.consensus_config,
                                          consensus_version=spec.consensus_version)
         else:
-            result = analyze_stock(**calculation_query, config=settings)
-        if "chart_evidence" not in result:
-            from my_strategy.web_dashboard.chart_evidence import decorate_analysis
-            result = decorate_analysis(result, consensus_config=spec.consensus_config,
-                                       consensus_version=spec.consensus_version)
+            baseline_query = {key: calculation_query[key] for key in ("symbol", "start", "end", "as_of") if key in calculation_query}
+            result = analyze_stock(**baseline_query, config=settings, research=False)
         consensus = result.get("consensus_decisions") or {}
         if consensus.get("config"):
             query["consensus_config"] = consensus["config"]
             query["consensus_version"] = consensus["version"]
-        if result.get("strategy_version") in {"czsc_trend_consensus", "czsc_trend_consensus_v2"}:
+        if result.get("strategy_version") == "trend_consensus":
             research_context = result.get("research", {})
             selected_model = research_context.get("model_run_id")
             if selected_model:
@@ -584,7 +550,7 @@ def compact_scan_view(result):
                                 view["request"] = dict(result["request"])
                             if view["request"].get(key) is None:
                                 view["request"][key] = values[0]
-    view["scan_view"] = {"version": "czsc_scan_view_v1", "compact": True,
+    view["scan_view"] = {"schema": "current_scan_view", "compact": True,
                          "account_context_status": status, "raw_evidence": "per_stock_analysis"}
     return view
 

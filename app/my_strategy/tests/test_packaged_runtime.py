@@ -46,21 +46,21 @@ def test_platform_wheel_provenance_is_bound_to_frozen_source(monkeypatch, tmp_pa
     source.mkdir(parents=True)
     (source / "engine.py").write_bytes(b"frozen algorithm")
     digest = hashlib.sha256(b"frozen algorithm").hexdigest()
-    manifest = {"archive_sha256": czsc_adapter.SOURCE_SHA256, "built_wheel_sha256": "windows-wheel",
+    manifest = {"package": "czsc", "version": "9.2", "archive_sha256": "historical-archive-is-not-a-gate", "built_wheel_sha256": "windows-wheel",
                 "files": [{"path": "engine.py", "sha256": digest}]}
     (tmp_path / "czsc-source-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     wheels = tmp_path / "vendor" / "wheels"
     wheels.mkdir()
     source_digest = hashlib.sha256(f"engine.py {digest}".encode()).hexdigest()
-    index = {"package": "czsc", "version": "1.0.1", "source_tree_sha256": source_digest,
+    index = {"package": "czsc", "version": "9.2", "source_tree_sha256": source_digest,
              "wheels": [{"filename": "mac.whl", "sha256": "mac-wheel"}]}
     index_path = wheels / "wheel-index.json"
     index_path.write_text(json.dumps(index), encoding="utf-8")
-    distribution = SimpleNamespace(version="1.0.1", read_text=lambda _: json.dumps(
+    distribution = SimpleNamespace(version="9.2", read_text=lambda _: json.dumps(
         {"url": "file:///mac.whl", "archive_info": {"hashes": {"sha256": "mac-wheel"}}}))
     monkeypatch.setattr(czsc_adapter.importlib.metadata, "distribution", lambda _: distribution)
     monkeypatch.setattr(czsc_adapter, "runtime_resource_root", lambda: tmp_path)
-    expected = SimpleNamespace(__version__="1.0.1")
+    expected = SimpleNamespace(__version__="9.2")
     monkeypatch.setitem(sys.modules, "czsc", expected)
     czsc_adapter.native_runtime.cache_clear()
     try:

@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from my_strategy.services.czsc_market_history import MarketHistoryBuilder, stock_facts
-from my_strategy.services.czsc_native_evidence_v4 import build_native_evidence_v4
+from my_strategy.services.czsc_native_evidence import build_native_evidence
 from my_strategy.services.czsc_trend_consensus import prepare_trend_decisions
 
 
@@ -36,7 +36,7 @@ def causal_bars():
 
 def native_overlay(frame):
     calendar = frame.attrs["verified_market_dates"]
-    pack = build_native_evidence_v4(frame, market_dates=calendar)
+    pack = build_native_evidence(frame, market_dates=calendar)
     prepared = prepare_trend_decisions(pack["frame"], calendar, native_pack=pack, mode="E0")
     return {**prepared, "native_pack": pack}, pack
 

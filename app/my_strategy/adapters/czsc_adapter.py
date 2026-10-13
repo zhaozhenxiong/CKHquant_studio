@@ -22,6 +22,37 @@ CZSC_VERSION = "1.0.1"
 SOURCE_SHA256 = "ab0e52644fe8936e0641372cb00a15e4b9d0bd93bb2c8d36402299e0d1af18c3"
 
 
+def engine_contract() -> dict[str, Any]:
+    """Identity of the current installed build, without historical version admission.
+
+    The manifest is current build evidence. Its actual source files must match;
+    replacing an engine requires a new manifest and fresh feature/model runs.
+    Historical archive identifiers do not grant application qualifications.
+    """
+    resources = runtime_resource_root()
+    path = resources / "czsc-source-manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    files = manifest.get("files") or []
+    if manifest.get("package") != "czsc" or not files:
+        raise RuntimeError("当前结构引擎缺少完整构建来源清单")
+    source_root = (resources / "vendor" / "czsc").resolve()
+    observed = []
+    for entry in files:
+        relative = Path(entry["path"])
+        target = (source_root / relative).resolve()
+        if relative.is_absolute() or not target.is_relative_to(source_root):
+            raise RuntimeError("结构引擎来源文件越过构建目录")
+        actual = hashlib.sha256(target.read_bytes()).hexdigest()
+        if actual != entry["sha256"]:
+            raise RuntimeError(f"当前结构引擎源码校验失败：{entry['path']}")
+        observed.append({"path": relative.as_posix(), "sha256": actual})
+    body = json.dumps(observed, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return {"engine": "confirmed_structure", "source_tree_sha256": hashlib.sha256(body.encode()).hexdigest(),
+            "manifest_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "package": manifest["package"], "build_version": manifest.get("version"),
+            "capabilities": ["causal_finished_pens", "confirmed_zones", "native_signal_calls"]}
+
+
 def legacy_fuyao_source(value: Any) -> bool:
     source = str(value).lower()
     return "fuyao" in source and source != "fuyao_unadjusted_v1"
@@ -172,31 +203,25 @@ def native_runtime():
         version = distribution.version
     except ImportError as error:
         raise RuntimeError("CZSC 原生运行时未安装；请使用冻结的 CZSC 任务环境") from error
-    if version != CZSC_VERSION:
-        raise RuntimeError(f"需要 CZSC {CZSC_VERSION}，当前为 {version}")
     resources = runtime_resource_root()
     manifest_path = resources / "czsc-source-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     origin = json.loads(distribution.read_text("direct_url.json") or "{}")
     source_install = origin.get("url", "").replace("\\", "/").rstrip("/").endswith("/vendor/czsc")
     wheel_hash = origin.get("archive_info", {}).get("hashes", {}).get("sha256")
+    verified_engine = engine_contract()
+    if version != verified_engine["build_version"]:
+        raise RuntimeError("已安装结构引擎与当前构建来源清单不一致")
     allowed_hashes = {manifest.get("built_wheel_sha256")}
     index_path = resources / "vendor" / "wheels" / "wheel-index.json"
     if index_path.is_file():
         index = json.loads(index_path.read_text(encoding="utf-8"))
         source_hash = hashlib.sha256("\n".join(f"{entry['path']} {entry['sha256']}" for entry in manifest["files"]).encode()).hexdigest()
-        if index.get("source_tree_sha256") != source_hash or index.get("package") != "czsc" or index.get("version") != CZSC_VERSION:
-            raise RuntimeError("CZSC 平台 wheel 来源索引与冻结源码不匹配")
+        if index.get("source_tree_sha256") != source_hash or index.get("package") != "czsc" or index.get("version") != version:
+            raise RuntimeError("结构引擎平台 wheel 来源索引与当前源码不匹配")
         allowed_hashes.update(entry["sha256"] for entry in index["wheels"])
     if not source_install and (not wheel_hash or wheel_hash not in allowed_hashes):
         raise RuntimeError("CZSC 安装来源不是冻结附件构建；同版本 PyPI 核心与附件不一致")
-    if manifest.get("archive_sha256") != SOURCE_SHA256:
-        raise RuntimeError("CZSC 源码冻结标识不匹配")
-    source_root = resources / "vendor" / "czsc"
-    for entry in manifest["files"]:
-        path = source_root / entry["path"]
-        if hashlib.sha256(path.read_bytes()).hexdigest() != entry["sha256"]:
-            raise RuntimeError(f"CZSC 冻结源码校验失败：{entry['path']}")
     os.environ.setdefault("CZSC_HOME", str(ARTIFACT_ROOT / "czsc-cache"))
     import czsc
     return czsc

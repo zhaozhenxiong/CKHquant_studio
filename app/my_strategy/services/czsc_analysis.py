@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 
-from my_strategy.adapters.czsc_adapter import SOURCE_SHA256, load_bars, native_runtime, normalize_symbol, to_raw_bar
+from my_strategy.adapters.czsc_adapter import engine_contract, load_bars, native_runtime, normalize_symbol, to_raw_bar
 from my_strategy.core.config_loader import apply_env_overrides, load_config
 from my_strategy.core.paths import ARTIFACT_RUNS_ROOT
 from my_strategy.core.run_context import stable_hash
@@ -17,9 +17,12 @@ FREQUENCIES = ("日线", "周线", "月线")
 
 
 def strategy_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
-    result = dict(config) if config is not None else apply_env_overrides(load_config("czsc_strategy"))
-    if result.get("czsc_version") != "1.0.1" or result.get("source_sha256") != SOURCE_SHA256 or result.get("higher_period_closure") != "next_period_observed":
-        raise ValueError("CZSC 版本或高周期闭合协议不受支持")
+    result = {**apply_env_overrides(load_config("czsc_strategy")), **(config or {})}
+    current_engine = engine_contract()
+    result.update(strategy_version="confirmed_structure", czsc_version=current_engine["build_version"],
+                  source_sha256=current_engine["source_tree_sha256"], engine_contract=current_engine)
+    if result.get("higher_period_closure") != "next_period_observed":
+        raise ValueError("高周期必须在下一周期被实际观测后闭合")
     if tuple(result.get("frequencies", [])) != FREQUENCIES:
         raise ValueError("只支持日线、周线、月线")
     if int(result.get("warmup_bars", 0)) < 60 or int(result.get("min_bi_len", 0)) < 3:
@@ -327,11 +330,10 @@ def _next_session_decision(frame: pd.DataFrame, session: CzscSession) -> dict[st
 
 def analyze_stock(symbol: str, start: str | None = None, end: str | None = None, as_of: str | None = None,
                   *, db_path: str | Path | None = None, config: dict[str, Any] | None = None,
-                  research: bool = False, usage_mode: str = "historical", model_policy: str = "auto",
-                  model_run_id: str | None = None, model_fold: str | None = None,
-                  calendar_run_id: str | None = None, device: str | None = None,
-                  entry_policy: str = "legacy", model_family: str = "ma_trend") -> dict[str, Any]:
-    """Rebuild observable bars; planned research starts its flat Position at start."""
+                  research: bool = False) -> dict[str, Any]:
+    """Rebuild observable native structures; current model routing has its own entry."""
+    if research:
+        raise ValueError("旧研究模型入口已退役；请使用当前趋势共识入口")
     settings = strategy_config(config)
     frame = load_bars(symbol, end=end, as_of=as_of, db_path=db_path)
     session = run_session(frame, settings)
@@ -339,7 +341,8 @@ def analyze_stock(symbol: str, start: str | None = None, end: str | None = None,
     if lower and lower > _day(frame.iloc[-1]["date"]):
         raise ValueError("起始日期晚于可用行情截止日")
     result = {"symbol": normalize_symbol(symbol), "data_end": _day(frame.iloc[-1]["date"]), "as_of": as_of or end or _day(frame.iloc[-1]["date"]),
-            "config_hash": stable_hash(settings), "strategy_version": settings["strategy_version"], "czsc_version": "1.0.1", "source_sha256": SOURCE_SHA256,
+            "config_hash": stable_hash(settings), "strategy_version": settings["strategy_version"], "czsc_version": settings["czsc_version"], "source_sha256": settings["source_sha256"],
+            "engine_contract": settings["engine_contract"],
             "data_version": frame.attrs["data_version"], "data_range": {"start": _day(frame.iloc[0]["date"]), "end": _day(frame.iloc[-1]["date"]), "bars": len(frame)},
             "price_basis": frame.attrs["price_basis"], "input_quality": {"legacy_fuyao_bars": frame.attrs["legacy_fuyao_bars"], "unverified_trade_price_bars": frame.attrs["unverified_trade_price_bars"]},
             "frequencies": session.payload(lower), "events": [event for event in session.events if not lower or event["time"] >= lower],
@@ -348,37 +351,4 @@ def analyze_stock(symbol: str, start: str | None = None, end: str | None = None,
                          "包含旧fuyao来源，复权口径未核验（has_trade_price=1不足以证明未复权）；保留原bar，相关成交拒单。" if frame.attrs["legacy_fuyao_bars"] else "使用未复权价格；除权除息跳空会影响结构。",
                          f"未核验真实交易价格的bar：{frame.attrs['unverified_trade_price_bars']}。", "as_of截断当前行情库快照；未重建当时的数据修订版本。", "事件为下一交易时点的研究意图，真实成交以回测账本为准。"],
             "warmup": {"required": settings["warmup_bars"], "available": len(frame), "eligible": len(frame) >= settings["warmup_bars"]}}
-    if research:
-        from my_strategy.services.czsc_research_runtime import analyze_research_frame, route_segments
-        item, compute = analyze_research_frame(frame, usage_mode=usage_mode, model_policy=model_policy,
-                                               model_run_id=model_run_id, model_fold=model_fold,
-                                               calendar_run_id=calendar_run_id, device=device, db_path=db_path,
-                                               entry_policy=entry_policy, position_start=lower, model_family=model_family)
-        replay = item["replay"]
-        result["structure_baseline"] = {"events": result["events"], "next_session_decision": result["next_session_decision"]}
-        result.update(strategy_version=compute.get("strategy_version", "czsc_price_volume_mlp_v1"),
-                      feature_profile=compute.get("feature_profile", "legacy"),
-                      model_family=model_family,
-                      events=[e for e in replay["events"] if not lower or e["time"] >= lower],
-                      next_session_decision=replay["latest_decision"], compute_info=compute,
-                      research={"usage_mode": usage_mode, "model_policy": model_policy,
-                                "model_family": model_family,
-                                "entry_policy": entry_policy, "position_start": lower if entry_policy != "legacy" else None,
-                                "entry_parameters": compute.get("entry_parameters"), "entry_plan_config_hash": compute.get("entry_plan_config_hash"),
-                                "model_routes": route_segments(item["routes"], start=lower),
-                                "final_state": replay["final_state"], "agent_evidence": replay["agent_evidence"]})
-        if model_family == "wyckoff":
-            result["wyckoff_events"] = [{"event": row.wyckoff_event, "state": row.wyckoff_state,
-                "anchor_at": row.wyckoff_anchor_at, "observed_at": row.wyckoff_observed_at,
-                "available_at": row.wyckoff_available_at,
-                "buy_candidate": bool(row.wyckoff_rule_buy), "sell_evidence": bool(row.wyckoff_rule_sell)}
-                for row in item["features"].itertuples()
-                if row.wyckoff_event in {"Spring", "Test", "SOS", "LPS", "Upthrust", "SOW", "LPSY"}
-                and (not lower or str(row.wyckoff_available_at)[:10] >= lower)]
-        if entry_policy != "legacy":
-            result["config_hash"] = stable_hash({"strategy": settings, "entry_plan_config_hash": compute["entry_plan_config_hash"]})
-        if usage_mode == "retrospective":
-            result["warnings"].append("当前模型事后研究历史特征，可能与训练/验证重叠；不计入样本外认证，ML不改变生产意图。")
-        from my_strategy.services.czsc_research import _json
-        result = _json(result)
     return result

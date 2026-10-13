@@ -1,6 +1,6 @@
 """One causal Broker account for consensus entry and independent exits.
 
-Ordinary sells come only from the final direction engine. Hard risk and the
+Ordinary sells use qualified continuous sell evidence while actually held. Hard risk and the
 signal-pinned MA holding model have separate, audited exit channels. There is
 no old source-union exit and no theoretical inventory in this adapter.
 """
@@ -21,10 +21,10 @@ from my_strategy.execution.ledger import LedgerEntry
 from my_strategy.execution.order import Order
 from my_strategy.services.czsc_backtest import _guard, _planned_entry_rejection
 from my_strategy.services.czsc_trend_contracts import STRATEGY_ID, DISPLAY_NAME, strategy_config
-from my_strategy.services.czsc_trend_consensus import prepare_trend_decisions, finite, day, observable, _identity_reasons, _strategy_config
+from my_strategy.services.czsc_trend_consensus import prepare_trend_decisions, finite, day, observable, _identity_reasons, _strategy_config, _risk_plan
 
 
-def prepare_account_context(frame, market_dates):
+def prepare_account_context(frame, market_dates, config=None):
     """Read-only quote/calendar snapshot reusable by many causal label clones."""
     keys = ("date", "symbol", "open", "high", "low", "close", "volume", "amount", "source", "has_trade_price")
     raw = frame[list(key for key in keys if key in frame)].to_dict("records") if isinstance(frame, pd.DataFrame) else copy.deepcopy(list(frame))
@@ -36,12 +36,22 @@ def prepare_account_context(frame, market_dates):
     if dates != sorted(set(dates)) or calendar != sorted(set(calendar)) or not set(dates).issubset(set(calendar)):
         raise ValueError("prepared account quote/calendar alignment mismatch")
     by_day = {row["date"]: row for row in records}
+    from my_strategy.services.czsc_liquidity import daily_eligibility, annotate_liquidity, liquidity_policy
+    policy = liquidity_policy((config or {}).get('liquidity_universe'))
+    observed = frame if isinstance(frame, pd.DataFrame) else pd.DataFrame(records)
+    # Frozen native fields are checked against their original observations;
+    # ad-hoc/runtime quotes use this same daily rule, never a latest pool list.
+    if 'liquidity_pool_eligible' in observed:
+        annotate_liquidity(observed, calendar, policy, verify_existing=True)
+    membership = daily_eligibility(observed, calendar, policy)
+    liquidity_by_day = {day(row['date']): row for row in membership.to_dict('records')}
     digest = hashlib.sha256(); prefix_hashes = {}
     for session in calendar:
         digest.update(stable_hash(by_day.get(session, {"missing_verified_session": session})).encode("ascii"))
         prefix_hashes[session] = digest.hexdigest()
     return {"frame_object": frame, "calendar": calendar, "records": records, "dates": dates,
-        "by_day": by_day, "prefix_hashes": prefix_hashes}
+        "by_day": by_day, "prefix_hashes": prefix_hashes,
+        'liquidity_by_day': liquidity_by_day, 'liquidity_policy_hash': stable_hash(policy)}
 
 
 def candidate_from_row(opinion):
@@ -49,8 +59,15 @@ def candidate_from_row(opinion):
     plan = copy.deepcopy(opinion.get("entry_plan") or opinion.get("raw_risk_plan"))
     ma = (opinion.get("agents") or {}).get("ma") or {}
     identifiers = copy.deepcopy(opinion.get("fresh_candidate_ids") or (plan or {}).get("source_event_ids") or [])
+    originals = sorted(set(opinion.get("original_opportunity_ids") or (plan or {}).get("original_opportunity_ids") or
+        [event.get("opportunity_id") or event.get("original_event_id") or event.get("event_id")
+         for event in opinion.get("active_candidates", []) if event.get("side") == "BUY"] or identifiers))
+    if plan is not None:
+        plan.setdefault("original_opportunity_ids", originals)
     return {"date": opinion["date"], "symbol": opinion["symbol"], "entry_plan": plan, "raw_risk_plan": plan,
         "candidate_event_ids": identifiers, "source_event_ids": identifiers,
+        "original_opportunity_ids": originals,
+        "economic_group_id": stable_hash({"family": STRATEGY_ID, "symbol": opinion["symbol"], "original_opportunity_ids": originals}),
         "sources": copy.deepcopy((plan or {}).get("sources") or sorted({e["source"] for e in opinion.get("active_candidates", []) if e.get("side") == "BUY"})),
         "trend_probability": {"p_up": ma.get("p_up"), "p_down": ma.get("p_down"), "p_neutral": ma.get("p_neutral"),
             "model_available": ma.get("status") == "scored", "input_eligible": ma.get("status") == "scored",
@@ -58,7 +75,28 @@ def candidate_from_row(opinion):
         "p_up": ma.get("p_up"), "p_down": ma.get("p_down"), "p_neutral": ma.get("p_neutral"),
         "reference_price": opinion.get("reference_price"), "stop_price": (plan or {}).get("stop_price"),
         "candidate_id": stable_hash({"plan_id": (plan or {}).get("plan_id"), "events": sorted(identifiers), "date": opinion["date"]}),
-        "candidate_policy": "confirmed_native_and_first_trend_cross", "consensus": copy.deepcopy(opinion)}
+        "candidate_policy": "valid_original_opportunity_daily_reassessment", "consensus": copy.deepcopy(opinion)}
+
+
+def _unreserved_opinion(opinion, reserved, bar, index, bars, cfg):
+    """A used source cannot lend its frozen stop to a different new opportunity."""
+    candidate = candidate_from_row(opinion)
+    originals = set(candidate["original_opportunity_ids"])
+    if not originals or originals.issubset(reserved):
+        return None
+    if not originals.intersection(reserved):
+        return opinion
+    active = [event for event in opinion.get("active_candidates", []) if event.get("side") == "BUY"
+        and (event.get("opportunity_id") or event.get("original_event_id") or event.get("event_id")) not in reserved]
+    if not active:
+        return None
+    current = copy.deepcopy(opinion)
+    quote = {key: value for key, value in bar.items() if key not in {"entry_plan", "raw_risk_plan"}}
+    current["entry_plan"] = current["raw_risk_plan"] = _risk_plan(quote, active, index, bars, cfg)
+    current["active_candidates"] = active
+    current["fresh_candidate_ids"] = [event["event_id"] for event in active]
+    current["original_opportunity_ids"] = current["entry_plan"]["original_opportunity_ids"]
+    return current
 
 
 def _call(callback, snapshot, candidate=None):
@@ -98,14 +136,33 @@ def _settings(cfg, initial_cash):
 
 
 def _state(broker, position, pending, last_buy_date, holding_prefix, last_close, last_mark, seasoned, used,
-           *, symbol, context_hash, mode, entry_diagnostics, current_snapshot=None):
+           *, symbol, context_hash, mode, entry_diagnostics, current_snapshot=None, reserved_opportunity_ids=()):
     return {"version": STRATEGY_ID, "symbol": symbol, "initial_cash": broker.initial_cash, "cash": broker.cash,
         "shares": broker.shares(symbol), "positions": copy.deepcopy(broker.positions), "avg_cost": copy.deepcopy(broker.avg_cost),
         "ledger": [e.to_dict() for e in broker.ledger.entries], "actual_position": copy.deepcopy(position),
         "pending_intent": copy.deepcopy(pending), "last_buy_date": last_buy_date, "holding_prefix": copy.deepcopy(holding_prefix),
         "last_close_date": last_close, "last_mark": last_mark, "seasoned_bars": seasoned,
         "consumed_plan_ids": sorted(used), "series_context_hash": context_hash, "mode": mode,
+        "reserved_opportunity_ids": sorted(reserved_opportunity_ids),
         "entry_diagnostics": copy.deepcopy(entry_diagnostics), "current_snapshot": copy.deepcopy(current_snapshot)}
+
+
+def _flat_state_hash(state):
+    """Hash economic observations; future run/catalog/calendar lineage stays separate."""
+    if state.get("shares") != 0 or state.get("pending_intent"):
+        raise ValueError("entry attempt identity requires a flat account without pending orders")
+    state_keys = ("version", "symbol", "initial_cash", "cash", "shares", "positions", "avg_cost",
+        "actual_position", "last_buy_date", "holding_prefix", "last_close_date", "last_mark",
+        "seasoned_bars", "consumed_plan_ids", "reserved_opportunity_ids", "observed_prefix_hash")
+    ledger_keys = ("date", "symbol", "action", "shares", "price", "notional", "fee", "cash_flow",
+        "cash_after", "position_after", "reason", "signal_date", "target_weight", "applied_slippage",
+        "equity_before", "equity_after")
+    snapshot_keys = ("date", "available_at", "cash", "shares", "equity", "initial_cash",
+        "actual_cost_per_share", "close", "bar_index", "ledger_entries_seen")
+    value = {key: state.get(key) for key in state_keys}
+    value["ledger"] = [{key: row.get(key) for key in ledger_keys} for row in state.get("ledger", [])]
+    value["current_snapshot"] = {key: (state.get("current_snapshot") or {}).get(key) for key in snapshot_keys}
+    return stable_hash(value)
 
 
 def _restore(state, broker, symbol):
@@ -208,9 +265,11 @@ def replay_trend_account(frame, market_dates, decisions=None, *, evidence_pack=N
         raise ValueError("unsupported account continuation policy")
     cash = float(initial_cash if initial_cash is not None else (initial_state or {}).get("initial_cash", cfg["account"]["initial_cash"]))
     settings = _settings(cfg, cash)
-    cache = account_context or prepare_account_context(frame, market_dates)
+    cache = account_context or prepare_account_context(frame, market_dates, cfg)
     if cache["frame_object"] is not frame or cache["calendar"] != list(market_dates):
         raise ValueError("prepared quote context belongs to another frame/calendar")
+    if cache['liquidity_policy_hash'] != stable_hash(cfg['liquidity_universe']):
+        raise ValueError('prepared liquidity context belongs to another frozen policy')
     records, dates, calendar = cache["records"], cache["dates"], cache["calendar"]
     if not records or dates != sorted(set(dates)) or calendar != sorted(set(calendar)) or not set(dates).issubset(set(calendar)):
         raise ValueError("account requires unique ascending bars and independently verified calendar")
@@ -218,6 +277,7 @@ def replay_trend_account(frame, market_dates, decisions=None, *, evidence_pack=N
     if len(symbols) != 1:
         raise ValueError("one explicit account must own one symbol")
     symbol = next(iter(symbols)); by_day = cache["by_day"]
+    observed_index = {date: index for index, date in enumerate(dates)}
     prepared = decisions or prepare_trend_decisions(frame, calendar, evidence_pack, trend_probabilities, cfg, native_pack=native_pack, mode="E0")
     direction_rows = prepared["rows"] if isinstance(prepared, Mapping) else list(prepared)
     direction = {day(row["date"]): row for row in direction_rows}
@@ -241,6 +301,7 @@ def replay_trend_account(frame, market_dates, decisions=None, *, evidence_pack=N
         "model_identity": copy.deepcopy(model_identity), "exit_recipe_hash": getattr(exit_policy, "recipe_hash", None),
         "entry_recipe_hash": getattr(entry_evaluator or quality_filter, "recipe_hash", None)}
     context.update(consensus=copy.deepcopy(cfg["consensus"]), account=copy.deepcopy(cfg["account"]),
+        liquidity_policy=copy.deepcopy(cfg['liquidity_universe']), liquidity_policy_hash=cache['liquidity_policy_hash'],
         risk_policy=cfg["risk_policy"], risk_semantics=copy.deepcopy(cfg.get("risk_semantics")),
         signal_points=copy.deepcopy(cfg["signal_points"]), candidate_policy=cfg["candidate_policy"],
         costs={"version": "flat_v1", "commission": settings["commission"], "min_commission": settings["min_commission"],
@@ -250,13 +311,14 @@ def replay_trend_account(frame, market_dates, decisions=None, *, evidence_pack=N
     cost = CostModel(commission=settings["commission"], stamp_tax=settings["stamp_tax"], slippage=settings["slippage"],
         min_commission=settings["min_commission"], version="flat_v1", impact_tiers=())
     broker = BrokerSimulator(cash, cost, run_id)
-    position, pending, last_buy, prefix, seasoned, used = None, None, None, {}, 0, set()
+    position, pending, last_buy, prefix, seasoned, used, reserved = None, None, None, {}, 0, set(), set()
     last_mark, resume_after, history_count = None, None, 0
     if initial_state:
         _restore(initial_state, broker, symbol)
         position = copy.deepcopy(initial_state.get("actual_position")); pending = copy.deepcopy(initial_state.get("pending_intent"))
         last_buy = initial_state.get("last_buy_date"); prefix = copy.deepcopy(initial_state.get("holding_prefix") or {})
         seasoned = int(initial_state.get("seasoned_bars", 0)); used = set(initial_state.get("consumed_plan_ids") or [])
+        reserved = set(initial_state.get("reserved_opportunity_ids") or [])
         last_mark = finite(initial_state.get("last_mark")); resume_after = day(initial_state["last_close_date"])
         history_count = len(broker.ledger.entries)
     history_ledger = [e.to_dict() for e in broker.ledger.entries]
@@ -266,6 +328,9 @@ def replay_trend_account(frame, market_dates, decisions=None, *, evidence_pack=N
     if exit_policy is not None and hasattr(exit_policy, "new_replay"):
         exit_policy = exit_policy.new_replay()
     evaluator = entry_evaluator or quality_filter
+    def liquidity_at(signal_day):
+        return cache['liquidity_by_day'].get(signal_day) or {'liquidity_pool_eligible': False,
+            'liquidity_status': 'signal_outside_verified_calendar', 'liquidity_policy_hash': cache['liquidity_policy_hash']}
     if forced_entry:
         if not initial_state or broker.shares(symbol) != 0 or pending and pending.get("side") == "SELL":
             raise ValueError("candidate clone requires a genuinely flat reference account")
@@ -274,6 +339,8 @@ def replay_trend_account(frame, market_dates, decisions=None, *, evidence_pack=N
             raise ValueError("candidate clone plan is not the known close plan")
         pending = _intent(symbol, signal, "BUY", "candidate_clone_admission", context_hash, plan=forced_entry)
         pending["intended_session"] = next_day.get(signal)
+        pending["original_opportunity_ids"] = sorted(forced_entry.get("original_opportunity_ids") or forced_entry.get("source_event_ids") or [])
+        reserved.update(pending["original_opportunity_ids"])
         actions.append(copy.deepcopy(pending))
     if forced_exit_at and resume_after and day(forced_exit_at) == resume_after:
         if broker.shares(symbol) <= 0:
@@ -350,6 +417,9 @@ def replay_trend_account(frame, market_dates, decisions=None, *, evidence_pack=N
                 reason = _guard(symbol, pd.Series(bar), pd.Series(previous), intent["side"], seasoned, settings)
             plan = intent.get("entry_plan")
             if intent["side"] == "BUY":
+                signal_liquidity = liquidity_at(day(intent['original_signal_at']))
+                if signal_liquidity.get('liquidity_pool_eligible') is not True:
+                    reason = reason or 'historical_liquidity_ineligible'
                 if broker.shares(symbol) > 0:
                     reason = reason or "actual_position_already_open"
                 check_intent = {"date": day(intent["original_signal_at"])}
@@ -480,7 +550,7 @@ def replay_trend_account(frame, market_dates, decisions=None, *, evidence_pack=N
                 broken = mark <= boundary["price"] if boundary["source"] == "structure" else mark < boundary["price"]
                 if broken:
                     schedule_exit(date, "holding_confirmed_boundary", 85)
-            if opinion.get("action") == "SELL":
+            if opinion.get("sell_pass") is True or opinion.get("sell_base_qualified") is True:
                 schedule_exit(date, "ordinary_consensus_sell", 70, event=opinion)
             if mode in {"E1", "final"} and exit_policy is not None:
                 response = _call(exit_policy, snapshot)
@@ -503,50 +573,87 @@ def replay_trend_account(frame, market_dates, decisions=None, *, evidence_pack=N
                     "applied": bool(valid and not (pending and pending["priority"] >= 90))})
                 if valid and not (pending and pending["priority"] >= 90):
                     schedule_exit(date, "signal_pinned_ma_exit", 80, response=response)
-        elif opinion.get("action") == "BUY" and not pending and not stop_after_flat:
-            candidate = candidate_from_row(opinion)
-            allowed, reason, evaluation = True, None, {}
-            plan = candidate["entry_plan"]
-            reason = _close_plan_reason(plan, symbol, date, mark, cfg)
-            if reason:
-                allowed = False
-                evaluation = {"status": reason, "probability": None}
-            elif mode == "final" and cfg["consensus"]["require_high_return"]:
-                evaluation = _call(evaluator, base_snapshot, candidate)
-                probability = finite(evaluation.get("probability"))
-                identity_errors = _identity_reasons(evaluation, close_at, head="entry")
-                total = float(opinion["buy_base_score"]) + cfg["consensus"]["quality_weight"] * (probability or 0.)
-                if evaluation.get("status") != "scored" or probability is None:
-                    reason = evaluation.get("status") if evaluation.get("status") not in {None, "scored"} else "model_unavailable"
-                elif not 0 <= probability <= 1:
-                    reason = "high_return_probability_invalid"
-                elif identity_errors:
-                    reason = "identity_error"
-                    evaluation["reason_codes"] = identity_errors
-                elif evaluation.get("in_scope") is not True:
-                    reason = "high_return_population_out_of_scope"
-                elif probability < cfg["consensus"]["high_return_threshold"]:
-                    reason = "high_return_below_threshold"
-                elif total + 1e-12 < cfg["consensus"]["buy_total_threshold"]:
-                    reason = "buy_total_support_below_threshold"
-                else:
-                    reason = None
-                allowed = reason is None
-                if not allowed and probability is not None:
-                    evaluation["evaluation_status"] = "identity_error" if reason == "identity_error" else "scored_rejected"
-                    evaluation.setdefault("reason_codes", []).append(reason)
-            entry_diagnostics.append({"date": date, "snapshot": copy.deepcopy(base_snapshot), "candidate": copy.deepcopy(candidate),
-                "evaluation": evaluation, "allowed": allowed, "reason": reason, "series_context_hash": context_hash})
-            current_entry = evaluation
-            if allowed:
-                pending = _intent(symbol, date, "BUY", "continuous_consensus_buy", context_hash, event=opinion, plan=opinion.get("entry_plan"))
-                pending["intended_session"] = next_day.get(date)
-                pending["entry_evaluation"] = evaluation
-                actions.append(copy.deepcopy(pending))
+        elif (opinion.get("entry_eligible") is True or ("entry_eligible" not in opinion and opinion.get("action") == "BUY")) and not pending and not stop_after_flat:
+            eligible_opinion = _unreserved_opinion(opinion, reserved, bar, observed_index[date], records, cfg)
+            candidate = candidate_from_row(eligible_opinion) if eligible_opinion is not None else None
+            if candidate is not None:
+                plan = candidate["entry_plan"]
+                current_state = _state(broker, position, pending, last_buy, prefix, date, mark, seasoned + 1, used,
+                    symbol=symbol, context_hash=context_hash, mode=mode, entry_diagnostics=[],
+                    current_snapshot=base_snapshot, reserved_opportunity_ids=reserved)
+                current_state.update(source_context_hash=source_hash, account_id=context["account_id"],
+                    observed_prefix_hash=prefix_hashes[date])
+                state_hash, flat_hash, plan_hash = stable_hash(current_state), _flat_state_hash(current_state), stable_hash(plan)
+                attempt = stable_hash({"family": STRATEGY_ID, "symbol": symbol, "date": date,
+                    "original_opportunity_ids": candidate["original_opportunity_ids"], "flat_state_hash": flat_hash,
+                    "entry_plan_hash": plan_hash})
+                candidate.update(candidate_id=attempt, attempt_id=attempt, reference_state_hash=state_hash,
+                    flat_state_hash=flat_hash, entry_plan_hash=plan_hash)
+                allowed, reason, evaluation = True, None, {}
+                reason = _close_plan_reason(plan, symbol, date, mark, cfg)
+                risk_qualified = reason is None
+                membership = liquidity_at(date)
+                liquidity_qualified = membership.get('liquidity_pool_eligible') is True
+                candidate['liquidity_qualified'] = liquidity_qualified
+                if reason:
+                    allowed = False
+                    evaluation = {"status": reason, "probability": None}
+                elif not liquidity_qualified:
+                    allowed, reason = False, 'historical_liquidity_ineligible'
+                    evaluation = {'status': reason, 'probability': None, 'liquidity': copy.deepcopy(membership)}
+                elif mode == "final" and cfg["consensus"]["require_high_return"]:
+                    evaluation = _call(evaluator, base_snapshot, candidate)
+                    if not evaluation:
+                        evaluation = {"status": "model_unavailable", "probability": None,
+                            "reason_codes": ["entry_evaluator_unavailable"]}
+                    probability = finite(evaluation.get("probability"))
+                    identity_errors = _identity_reasons(evaluation, close_at, head="entry")
+                    total = float(opinion["buy_base_score"]) + cfg["consensus"]["quality_weight"] * (probability or 0.)
+                    if evaluation.get("status") != "scored" or probability is None:
+                        reason = evaluation.get("status") if evaluation.get("status") not in {None, "scored"} else "model_unavailable"
+                    elif not 0 <= probability <= 1:
+                        reason = "high_return_probability_invalid"
+                    elif identity_errors:
+                        reason = "identity_error"
+                        evaluation["reason_codes"] = identity_errors
+                    elif evaluation.get("in_scope") is not True:
+                        reason = "high_return_population_out_of_scope"
+                    elif probability < cfg["consensus"]["high_return_threshold"]:
+                        reason = "high_return_below_threshold"
+                    elif total + 1e-12 < cfg["consensus"]["buy_total_threshold"]:
+                        reason = "buy_total_support_below_threshold"
+                    else:
+                        reason = None
+                    allowed = reason is None
+                    if reason == "model_unavailable" and evaluation.get("status") == "scored":
+                        evaluation.update(status="model_unavailable", evaluation_status="model_unavailable")
+                    if not allowed and probability is not None:
+                        evaluation["evaluation_status"] = "identity_error" if reason == "identity_error" else "scored_rejected"
+                if reason and reason not in evaluation.setdefault("reason_codes", []):
+                    evaluation["reason_codes"].append(reason)
+                entry_diagnostics.append({"date": date, "snapshot": copy.deepcopy(base_snapshot), "candidate": copy.deepcopy(candidate),
+                    "pre_gate_state": copy.deepcopy(current_state), "reference_state": copy.deepcopy(current_state),
+                    "attempt_id": attempt, "economic_group_id": candidate["economic_group_id"],
+                    "original_opportunity_ids": copy.deepcopy(candidate["original_opportunity_ids"]),
+                    "reference_state_hash": state_hash, "flat_state_hash": flat_hash,
+                    "entry_plan_hash": plan_hash, "risk_qualified": risk_qualified,
+                    'liquidity_qualified': liquidity_qualified, 'liquidity': copy.deepcopy(membership),
+                    "evaluation": evaluation, "allowed": allowed, "reason": reason, "series_context_hash": context_hash,
+                    "account_id": context["account_id"]})
+                current_entry = evaluation
+                if allowed:
+                    pending = _intent(symbol, date, "BUY", "continuous_consensus_buy", context_hash, event=eligible_opinion, plan=plan)
+                    pending["intended_session"] = next_day.get(date)
+                    pending["entry_evaluation"] = evaluation
+                    pending.update(attempt_id=attempt, economic_group_id=candidate["economic_group_id"],
+                        original_opportunity_ids=copy.deepcopy(candidate["original_opportunity_ids"]))
+                    reserved.update(candidate["original_opportunity_ids"])
+                    actions.append(copy.deepcopy(pending))
         if bar.get("has_trade_price") == 1 and bar.get("source") in cfg["account"]["valid_sources"] and finite(bar.get("volume")) and finite(bar.get("amount")):
             seasoned += 1
         state = _state(broker, position, pending, last_buy, prefix, date, mark, seasoned, used,
-            symbol=symbol, context_hash=context_hash, mode=mode, entry_diagnostics=[], current_snapshot=base_snapshot)
+            symbol=symbol, context_hash=context_hash, mode=mode, entry_diagnostics=[], current_snapshot=base_snapshot,
+            reserved_opportunity_ids=reserved)
         state["source_context_hash"] = source_hash
         state["account_id"] = context["account_id"]
         account_snapshots.append(state)
@@ -573,7 +680,8 @@ def replay_trend_account(frame, market_dates, decisions=None, *, evidence_pack=N
         "fees": sum(row["fee"] for row in ledger), "open_shares": broker.shares(symbol), "days": len(daily),
         "annualized_volatility": volatility, "sharpe": float(returns.mean() * 252 / volatility) if volatility else 0.}
     terminal = _state(broker, position, pending, last_buy, prefix, daily[-1]["date"], last_mark, seasoned, used,
-        symbol=symbol, context_hash=context_hash, mode=mode, entry_diagnostics=entry_diagnostics)
+        symbol=symbol, context_hash=context_hash, mode=mode, entry_diagnostics=entry_diagnostics,
+        reserved_opportunity_ids=reserved)
     terminal.update(source_context_hash=source_hash, account_id=context["account_id"])
     for collection in (actions, rejections, daily, holding_snapshots, fills, ledger):
         for row in collection:

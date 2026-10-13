@@ -163,10 +163,10 @@ assert(popup.details.every(node=>node.open),'a new date starts with useful agent
 
 def test_scan_history_before_display_start_drills_without_resetting_account_context():
     run_js(r'''
-const source={strategy_version:'czsc_trend_consensus',request:{start:'2026-10-01',research:true,model_family:'high_return',
+const source={strategy_version:'trend_consensus',request:{start:'2026-10-01',research:true,model_family:'current',
   model_run_id:'saved-model',usage_mode:'historical',model_policy:'auto',calendar_run_id:'verified-calendar',
-  account_start:'2023-01-01',account_initial_cash:100000,consensus_version:'czsc_trend_consensus',
-  consensus_config:{version:'czsc_trend_consensus',quality_weight:.1}},
+  account_start:'2023-01-01',account_initial_cash:100000,consensus_version:'trend_consensus',
+  consensus_config:{version:'trend_consensus',quality_weight:.1}},
   data_range:{start:'2026-10-01',end:'2026-10-12'},market_history:{window_start:'2026-09-01'}};
 await workbench.analyzeSymbol('002436.SZ','2026-09-15',source);
 assert.equal(lastAnalysisQuery.start,'2026-09-01');assert.equal(lastAnalysisQuery.end,'2026-09-15');
@@ -183,19 +183,19 @@ assert.equal(lastAnalysisQuery.start,'2026-09-15','an older run without a window
 
 def test_auto_checkpoint_controls_send_selected_new_family_and_saved_account():
     run_js(r'''
-workbench.state.research={calendar_run_id:'calendar',high_return:{default_consensus_version:'czsc_trend_consensus',
- models:[{run_id:'new-run',schema_family:'czsc_trend_consensus_v2'}]}};
-workbench.state.pendingResearchContexts.analysis={model_run_id:'new-run',consensus_version:'czsc_trend_consensus_v2',
- account_start:'2023-01-01',account_initial_cash:150000,consensus_config:{version:'czsc_trend_consensus_v2'}};
-element('analysis-mode').value='research';element('analysis-model-family').value='high_return';
+workbench.state.research={calendar_run_id:'calendar',default_consensus_version:'trend_consensus',
+ models:[{run_id:'new-run',schema_family:'trend_consensus'}]};
+workbench.state.pendingResearchContexts.analysis={model_run_id:'new-run',consensus_version:'trend_consensus',
+ account_start:'2023-01-01',account_initial_cash:150000,consensus_config:{version:'trend_consensus'}};
+element('analysis-mode').value='research';element('analysis-model-family').value='current';
 element('analysis-model').value='new-run';element('analysis-model-policy').value='auto';element('analysis-usage-mode').value='historical';
 const actual=workbench.researchSpec('analysis');
-assert.equal(actual.consensus_version,'czsc_trend_consensus_v2');assert.equal(actual.model_run_id,'new-run');
+assert.equal(actual.consensus_version,'trend_consensus');assert.equal(actual.model_run_id,'new-run');
 assert.equal(actual.account_start,'2023-01-01');assert.equal(actual.account_initial_cash,150000);
-assert.equal(actual.consensus_config.version,'czsc_trend_consensus_v2');
-const context=workbench.resultResearchContext({strategy_version:'czsc_trend_consensus_v2',research:{model_run_id:'new-run'},
- request:{consensus_version:'czsc_trend_consensus_v2',account_start:'2023-01-01',account_initial_cash:150000}});
-assert.equal(context.consensus_version,'czsc_trend_consensus_v2');assert.equal(context.account_initial_cash,150000);
+assert.equal(actual.consensus_config.version,'trend_consensus');
+const context=workbench.resultResearchContext({strategy_version:'trend_consensus',research:{model_run_id:'new-run'},
+ request:{consensus_version:'trend_consensus',account_start:'2023-01-01',account_initial_cash:150000}});
+assert.equal(context.consensus_version,'trend_consensus');assert.equal(context.account_initial_cash,150000);
 ''')
 
 
@@ -207,11 +207,11 @@ Object.defineProperty(select,'innerHTML',{configurable:true,get(){return html;},
  html=String(value);this.options=[...html.matchAll(/<option value="([^"]*)"/g)].map(match=>({value:match[1]}));selected='';}});
 Object.defineProperty(select,'value',{configurable:true,get(){return selected;},set(value){
  selected=this.options.some(option=>option.value===value) ? value : '';}});
-workbench.state.research={calendar_run_id:'calendar',high_return:{default_consensus_version:'czsc_trend_consensus_v2',
- models:[{run_id:'recent-run',schema_family:'czsc_trend_consensus_v2'}]}};
-const context={research:true,model_family:'high_return',model_run_id:'old-explicit-run',model_policy:'auto',
- usage_mode:'historical',consensus_version:'czsc_trend_consensus_v2',account_start:'2023-01-01',
- account_initial_cash:150000,consensus_config:{version:'czsc_trend_consensus_v2',high_return_threshold:.1}};
+workbench.state.research={calendar_run_id:'calendar',default_consensus_version:'trend_consensus',
+ models:[{run_id:'recent-run',schema_family:'trend_consensus'}]};
+const context={research:true,model_family:'current',model_run_id:'old-explicit-run',model_policy:'auto',
+ usage_mode:'historical',consensus_version:'trend_consensus',account_start:'2023-01-01',
+ account_initial_cash:150000,consensus_config:{version:'trend_consensus',high_return_threshold:.1}};
 workbench.applyResearchContext('analysis',context);
 assert.equal(select.value,'old-explicit-run');
 assert(select.options.some(option=>option.value==='old-explicit-run'));
@@ -220,9 +220,7 @@ const actual=workbench.researchSpec('analysis');
 assert.equal(actual.model_run_id,'old-explicit-run');assert.equal(actual.consensus_version,context.consensus_version);
 assert.equal(actual.account_start,context.account_start);assert.equal(actual.account_initial_cash,150000);
 assert.deepEqual(actual.consensus_config,context.consensus_config);
-element('analysis-model-family').value='ma_trend';await fire('analysis-model-family','change');
-assert.equal(select.value,'','changing family does not inject an unrelated restored model');
-assert.equal(workbench.state.pendingResearchContexts.analysis,undefined,'a later refresh cannot replay the previous family');
+assert.throws(()=>workbench.applyResearchContext('analysis',{...context,model_family:'retired_family'}),/已退役/);
 workbench.applyResearchContext('analysis',context);
 select.value='recent-run';await fire('analysis-model','change');
 assert.equal(workbench.state.pendingResearchContexts.analysis,undefined,'the new manual model does not inherit the previous account');
@@ -241,10 +239,10 @@ for(const id of ['analysis-model','analysis-checkpoint']){
  Object.defineProperty(select,'value',{configurable:true,get(){return selected;},set(value){
   selected=this.options.some(option=>option.value===value) ? value : '';}});
 }
-workbench.state.research={high_return:{default_consensus_version:'czsc_trend_consensus_v2',models:[]}};
+workbench.state.research={default_consensus_version:'trend_consensus',models:[]};
 element('analysis-end').value='2026-10-12';
-for(const version of ['czsc_agent_consensus_v4','czsc_trend_consensus_v2']){
- const saved={research:true,model_family:'high_return',model_run_id:'older-'+version,model_policy:'pinned',
+for(const version of ['trend_consensus']){
+ const saved={research:true,model_family:'current',model_run_id:'older-'+version,model_policy:'pinned',
   model_fold:'2026Q3',usage_mode:'historical',consensus_version:version,consensus_config:{version}};
  workbench.applyResearchContext('analysis',saved);
  assert.equal(element('analysis-model').value,saved.model_run_id);
@@ -256,17 +254,22 @@ for(const version of ['czsc_agent_consensus_v4','czsc_trend_consensus_v2']){
 ''')
 
 
-def test_new_default_filters_old_models_but_explicit_old_saved_context_still_works():
+def test_retired_saved_context_is_rejected_without_changing_current_model():
     run_js(r'''
-workbench.state.research={high_return:{default_consensus_version:'czsc_trend_consensus_v2',
- models:[{run_id:'old-v1',schema_family:'czsc_trend_consensus'}]}};
-element('analysis-model-family').value='high_return';element('analysis-mode').value='research';
+workbench.state.research={models:[{run_id:'active-current',model_family:'current',strategy_version:'trend_consensus'}]};
+element('analysis-model-family').value='current';element('analysis-mode').value='research';
 workbench.populateResearchModels('analysis');
-assert(!element('analysis-model').innerHTML.includes('old-v1'));
-assert(element('analysis-model').innerHTML.includes('暂无此版本的已完成模型'));
-workbench.applyResearchContext('analysis',{research:true,model_family:'high_return',model_run_id:'old-v1',
- model_policy:'auto',consensus_version:'czsc_trend_consensus',usage_mode:'historical'});
-assert(element('analysis-model').innerHTML.includes('old-v1'));
-const actual=workbench.researchSpec('analysis');
-assert.equal(actual.model_run_id,'old-v1');assert.equal(actual.consensus_version,'czsc_trend_consensus');
+assert.throws(()=>workbench.applyResearchContext('analysis',{research:true,model_family:'high_return',model_run_id:'retired',consensus_version:'czsc_trend_consensus'}),/已退役/);
+assert.equal(workbench.state.pendingResearchContexts.analysis,undefined);
+assert(!element('analysis-model').innerHTML.includes('retired'));
+assert(workbench.researchSpec('analysis').model_family==='current');
+const currentContext={research:true,model_family:'current',consensus_version:'trend_consensus',model_run_id:'active-current',usage_mode:'forward'};
+workbench.applyResearchContext('analysis',currentContext);
+assert.equal(workbench.researchSpec('analysis').usage_mode,'forward');
+const savedPending=workbench.state.pendingResearchContexts.analysis;
+assert.throws(()=>workbench.applyResearchContext('analysis',{...currentContext,usage_mode:'production'}),/旧用途已退役，不恢复资格/);
+assert.equal(workbench.state.pendingResearchContexts.analysis,savedPending);
+assert.equal(element('analysis-usage-mode').value,'forward');
+element('analysis-usage-mode').value='production';
+assert.throws(()=>workbench.researchSpec('analysis'),/旧用途已退役/);
 ''')

@@ -26,13 +26,13 @@ app/my_strategy/storage/access_layer.py -text whitespace=blank-at-eol,blank-at-e
 app/my_strategy/storage/db_paths.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 app/my_strategy/storage/raw_repository.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 
-# Preserve current z1 source identities after retirement.
+# Preserve existing platform source byte identities after retirement.
 app/my_strategy/web_dashboard/app.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 app/my_strategy/data_manager/external_market.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 app/my_strategy/storage/warehouse_schema.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 app/my_strategy/validation/__init__.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 
-# Preserve byte identity of the high-return v2 frozen training core.
+# Preserve byte identity of archived training source records.
 app/my_strategy/adapters/czsc_adapter.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 app/my_strategy/configs/czsc_high_return_research.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 app/my_strategy/services/czsc_analysis.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
@@ -58,3 +58,29 @@ app/my_strategy/services/czsc_research_profiles.py -text whitespace=blank-at-eol
 app/my_strategy/services/czsc_signal_points.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 app/my_strategy/services/czsc_trade_episodes.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 app/my_strategy/services/czsc_wyckoff_features.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+
+# Current training and execution files retain their exact frozen bytes on every platform.
+app/my_strategy/services/czsc_trend_contracts.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+app/my_strategy/services/czsc_trend_model.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+app/my_strategy/services/czsc_trend_features.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+app/my_strategy/services/czsc_trend_labels.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+app/my_strategy/services/czsc_trend_interval_model.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+app/my_strategy/services/czsc_trend_dataset.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+app/my_strategy/services/czsc_trend_pipeline.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+app/my_strategy/services/czsc_trend_consensus.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+app/my_strategy/services/czsc_trend_account.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+app/my_strategy/services/czsc_trend_runtime.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+app/my_strategy/services/czsc_trend_finalization.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+app/my_strategy/services/czsc_trend_source.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+app/my_strategy/services/czsc_native_evidence.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+app/my_strategy/services/czsc_trend_support.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+app/my_strategy/services/czsc_trend_math.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+app/my_strategy/services/czsc_liquidity.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+app/my_strategy/configs/czsc_trend_strategy.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+app/my_strategy/services/czsc_market_features.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+app/my_strategy/services/czsc_market_profiles.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+app/my_strategy/services/czsc_price_volume_features.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+app/my_strategy/services/czsc_price_volume_events.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+app/my_strategy/configs/czsc_strategy.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+app/my_strategy/services/model_training_center.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+app/my_strategy/web_dashboard/api.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

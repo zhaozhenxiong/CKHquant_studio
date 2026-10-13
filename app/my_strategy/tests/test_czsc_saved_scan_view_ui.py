@@ -21,13 +21,13 @@ def run_js(script):
 
 
 SCAN = r'''
-const version='czsc_trend_consensus_v2';
-const scan={run_id:'final-scan',strategy_version:version,model_family:'high_return',research:true,
+const version='trend_consensus';
+const scan={run_id:'final-scan',strategy_version:version,model_family:'current',research:true,
  model_run_id:'final-360',model_policy:'auto',calendar_run_id:'verified-calendar',
  account_start:'2023-01-01',account_initial_cash:100000,
  consensus_config:{version,sell_threshold:.35},data_range:{start:'2026-01-01',end:'2026-10-12'},
- scan_view:{version:'czsc_scan_view_v1',compact:true,account_context_status:'consistent'},
- rows:[{symbol:'002675.SZ',name:'东诚药业',strategy_version:version,model_family:'high_return',category:'exit',
+ scan_view:{schema:'current_scan_view',compact:true,account_context_status:'consistent'},
+ rows:[{symbol:'002675.SZ',name:'东诚药业',strategy_version:version,model_family:'current',category:'exit',
   data_end:'2026-10-12',available_at:'2026-10-12T15:00:00+08:00',reason_codes:['actual_held'],
   account_context:{account_id:'research:real-held-prefix',account_start:'2023-01-01',initial_cash:100000},
   account_action:{action:'SELL',emitted:true,holding_shares:600},
@@ -62,7 +62,7 @@ assert.equal(scan.rows[0].account_context.account_id,'research:real-held-prefix'
 
 def test_partial_saved_request_keeps_compact_top_level_account_and_pinned_policy():
     run_js(SCAN + r'''
-scan.request={start:'2026-01-01',research:true,model_family:'high_return',model_run_id:'final-360'};
+scan.request={start:'2026-01-01',research:true,model_family:'current',model_run_id:'final-360'};
 scan.account_start='2021-01-01';scan.account_initial_cash=150000;
 scan.model_policy='pinned';scan.model_fold='trend_2025Q2';
 scan.consensus_config={version,sell_threshold:.48};

@@ -1,13 +1,14 @@
 """Continuous, causal direction evidence for the trend consensus strategy.
 
-This module owns opportunities and direction points, never cash or inventory.
-The account adapter alone resolves a direction into an executable intent.
+This module owns immutable opportunities and daily eligibility, never reservations.
+The account adapter alone reserves an original opportunity after entry admission.
 """
 from __future__ import annotations
 
 import copy
 import math
 from collections.abc import Mapping
+from functools import lru_cache
 
 import pandas as pd
 
@@ -16,8 +17,7 @@ from my_strategy.services.czsc_trend_contracts import STRATEGY_ID, DISPLAY_NAME,
 
 CONSENSUS_VERSION = STRATEGY_ID
 SOURCES = ("ma", "structure", "wyckoff")
-NATIVE_VERSIONS = {"czsc_native_evidence_v4_20261012", "pure_confirmed_czsc_v4_20261012",
-                   "wyckoff_current_pv_v4_20261012", "czsc_trend_native_evidence"}
+
 
 
 def consensus_config(config=None):
@@ -65,18 +65,53 @@ def finite(value):
         return None
 
 
+def _stable_iso(value):
+    # Cache only complete ISO date prefixes. Values such as None, 'now' and
+    # 'today', or mutable/custom date objects retain the original dynamic path.
+    return (type(value) is str and len(value) >= 10 and value[4] == '-'
+        and value[7] == '-' and value[:4].isdigit() and value[5:7].isdigit()
+        and value[8:10].isdigit() and (len(value) == 10 or value[10] in {'T', ' '}))
+
+
+@lru_cache(maxsize=65536)
+def _iso_timestamp(value):
+    return pd.Timestamp(value)
+
+
+def _timestamp(value):
+    return _iso_timestamp(value) if _stable_iso(value) else pd.Timestamp(value)
+
+
+@lru_cache(maxsize=65536)
+def _iso_day(value):
+    return _iso_timestamp(value).date().isoformat()
+
+
 def day(value):
-    return pd.Timestamp(value).date().isoformat()
+    return _iso_day(value) if _stable_iso(value) else pd.Timestamp(value).date().isoformat()
 
 
 def observable(value, cutoff):
+    if _stable_iso(value) and _stable_iso(cutoff):
+        return _iso_observable(value, cutoff)
+    return _observable(value, cutoff)
+
+
+@lru_cache(maxsize=131072)
+def _iso_observable(value, cutoff):
+    # The full value AND cutoff are the key. No decisions, labels, predictions,
+    # source availability or account state are cached here.
+    return _observable(value, cutoff)
+
+
+def _observable(value, cutoff):
     try:
-        stamp = pd.Timestamp(value)
+        stamp = _timestamp(value)
         if pd.isna(stamp):
             return False
         if stamp.tzinfo is None:
             stamp = stamp.tz_localize("Asia/Shanghai")
-        return stamp <= pd.Timestamp(cutoff)
+        return stamp <= _timestamp(cutoff)
     except (ValueError, TypeError):
         return False
 
@@ -171,7 +206,7 @@ def _native(item, source, close_at, price, permanently_invalidated=(), symbol=No
     reasons = []
     if item.get("input_eligible") is not True:
         reasons.append("native_input_ineligible")
-    if item.get("version") not in NATIVE_VERSIONS or not result["snapshot_id"]:
+    if not result["snapshot_id"]:
         reasons.append("native_identity_missing")
     if item.get("date") and day(item["date"]) != day(close_at):
         reasons.append("native_snapshot_date_mismatch")
@@ -281,6 +316,8 @@ def _risk_plan(row, events, index, bars, config):
     if floor is not None and floor > ceiling:
         errors.append("risk_execution_band_invalid")
     identifiers = sorted(str(event["event_id"]) for event in events)
+    originals = sorted({str(event.get("opportunity_id") or
+        event["source"] + ":" + str(event["pattern_id"]) + ":" + event["side"]) for event in events})
     boundaries = [{"symbol": row["symbol"], "source": event["source"], "event_id": event["event_id"],
         "original_event_id": event["original_event_id"], "pattern_id": event["pattern_id"],
         "price": finite(event.get("invalidation_price")), "first_available_at": event.get("first_available_at", event["available_at"])}
@@ -292,7 +329,8 @@ def _risk_plan(row, events, index, bars, config):
         "valid_for_sessions": 1, "stop_price": stop, "price_floor": floor, "price_ceiling": ceiling,
         "reference_price": close, "atr14": atr,
         "target_weight": min(config["account"]["max_weight"], params["risk_fraction"] * close / (close - stop)) if not errors else 0.,
-        "source_event_ids": identifiers, "sources": sorted({event["source"] for event in events}),
+        "source_event_ids": identifiers, "original_opportunity_ids": originals,
+        "sources": sorted({event["source"] for event in events}),
         "holding_boundaries": boundaries, "reason_codes": errors}
 
 
@@ -304,7 +342,8 @@ def _long_confirmation(bar, side):
 
 
 def prepare_trend_decisions(frame, market_dates, evidence_pack=None, trend_probabilities=None, config=None,
-                            *, quality=None, mode="E0", native_pack=None, allow_policy_validation=False):
+                            *, quality=None, mode="E0", native_pack=None, allow_policy_validation=False,
+                            _policy_base_rows=None):
     """Build immutable daily opportunities and continuous direction decisions.
 
     E0/E1 are training continuation policies and do not inspect quality scores.
@@ -327,10 +366,11 @@ def prepare_trend_decisions(frame, market_dates, evidence_pack=None, trend_proba
         if event.get("source") == "ma" and not event.get("auxiliary") and event.get("event_type") not in {"trend_probability_cross", "trend_confirmed_activation"}:
             continue
         events_by_day.setdefault(day(event["date"]), []).append(copy.deepcopy(event))
-    output, emitted, known, consumed, permanently_invalidated = [], [], {}, set(), set()
-    last_emit = {"BUY": -100000, "SELL": -100000}
+    output, emitted, known, permanently_invalidated = [], [], {}, set()
+    market_index = {session: index for index, session in enumerate(market_dates)}
     previous_trend, previous_bar = None, None
     c = cfg["consensus"]
+    frozen_config_hash = stable_hash(cfg)
     for index, original in enumerate(rows):
         bar = copy.deepcopy(original); bar["date"] = dates[index]
         date, symbol = bar["date"], bar["symbol"]
@@ -385,17 +425,27 @@ def prepare_trend_decisions(frame, market_dates, evidence_pack=None, trend_proba
                 continue
             opportunity = fact["source"] + ":" + str(fact["pattern_id"]) + ":" + fact["side"]
             if opportunity not in known:
-                known[opportunity] = {"event": fact, "index": index}
+                original_day = day(fact.get("first_available_at") or fact["available_at"])
+                if original_day not in market_index:
+                    reasons.append("candidate_original_clock_unavailable")
+                    continue
+                known[opportunity] = {"event": fact, "index": market_index[original_day]}
         active = []
         for opportunity, entry in known.items():
             fact = entry["event"]; source = fact["source"]
-            if opportunity in consumed or index - entry["index"] >= c["signal_valid_bars"]:
+            if market_index[date] - entry["index"] >= c["signal_valid_bars"]:
                 continue
             if fact["event_id"] in invalid or fact["original_event_id"] in invalid:
-                consumed.add(opportunity)
                 continue
             if agents[source]["status"] != "scored":
                 continue
+            boundary = finite(fact.get("invalidation_price"))
+            if source in {"structure", "wyckoff"} and boundary is not None and price is not None:
+                broken = ((price <= boundary if fact["side"] == "BUY" else price >= boundary)
+                    if source == "structure" else (price < boundary if fact["side"] == "BUY" else price > boundary))
+                if broken:
+                    permanently_invalidated.update((fact["event_id"], fact["original_event_id"]))
+                    continue
             if source == "ma":
                 valid = _long_confirmation(bar, fact["side"])
             else:
@@ -436,41 +486,103 @@ def prepare_trend_decisions(frame, market_dates, evidence_pack=None, trend_proba
         agents["high_return"].update(configured_weight=c["quality_weight"], buy_contribution=quality_contribution,
             sell_contribution=0., quality_contribution=quality_contribution)
         buy_total = buy_base + (quality_contribution or 0.)
-        buy_pass = buy_base + 1e-12 >= c["buy_base_threshold"] and buy_base - sell_base + 1e-12 >= c["margin"] and len(families["BUY"]) >= c["min_independent"]
-        sell_pass = sell_base + 1e-12 >= c["sell_threshold"] and sell_base - buy_base + 1e-12 >= c["margin"] and len(families["SELL"]) >= c["min_independent"]
-        proposed = "BUY" if buy_pass else "SELL" if sell_pass else "WAIT"
-        action = proposed
-        selected = [fact for fact in active if fact["side"] == proposed]
-        if not selected:
-            action = "WAIT"; reasons.append("no_live_unconsumed_opportunity")
-        if index - last_emit.get(proposed, -100000) < c["cooldown"]:
-            action = "WAIT"; reasons.append("opportunity_cooldown")
-        if proposed == "BUY":
-            if not plan or plan.get("status") != "active" or plan.get("entry_allowed") is not True:
-                action = "WAIT"; reasons.extend((plan or {}).get("reason_codes") or ["risk_plan_unavailable"])
-            if mode == "final" and c["require_high_return"]:
-                if quality_strength is None or quality_strength < c["high_return_threshold"] or buy_total + 1e-12 < c["buy_total_threshold"]:
-                    action = "WAIT"; reasons.append("high_return_or_total_support_not_qualified")
-        row = {"version": STRATEGY_ID, "display_name": DISPLAY_NAME, "date": date, "available_at": close_at,
-            "symbol": symbol, "reference_price": price, "agents": agents, "action": action, "direction": proposed,
+        base = {"version": STRATEGY_ID, "display_name": DISPLAY_NAME, "date": date, "available_at": close_at,
+            "symbol": symbol, "reference_price": price, "agents": agents,
             "buy_base_score": buy_base, "sell_base_score": sell_base, "buy_total_score": buy_total,
             "buy_quality_bonus": quality_contribution, "buy_independent_families": families["BUY"],
             "sell_independent_families": families["SELL"], "candidate_evidence": facts,
-            "active_candidates": active, "fresh_candidate_ids": [fact["event_id"] for fact in selected],
-            "entry_plan": plan, "raw_risk_plan": plan, "reason_codes": sorted(set(reasons)), "mode": mode,
-            "emitted": action in {"BUY", "SELL"}, "config_hash": stable_hash(cfg)}
-        if row["emitted"]:
-            row["event_id"] = stable_hash({"strategy": STRATEGY_ID, "symbol": symbol, "date": date,
-                "side": action, "opportunities": sorted(fact["opportunity_id"] for fact in selected), "config": row["config_hash"]})
-            consumed.update(fact["opportunity_id"] for fact in selected)
-            last_emit[action] = index
-            emitted.append({"event_id": row["event_id"], "date": date, "available_at": close_at,
-                "symbol": symbol, "side": action, "source": "consensus", "source_event_ids": row["fresh_candidate_ids"],
-                "reason_codes": row["reason_codes"], "reference_price": price, "consensus": copy.deepcopy(row)})
+            "active_candidates": active,
+            "original_opportunity_ids": sorted({fact["opportunity_id"] for fact in buy_candidates}),
+            "entry_plan": plan, "raw_risk_plan": plan, "mode": mode}
+        if _policy_base_rows is not None:
+            _policy_base_rows.append((base, tuple(reasons)))
+        row, event = _arbitrate_prepared_row(base, reasons, cfg, frozen_config_hash)
+        if event is not None:
+            emitted.append(event)
         output.append(row)
     return {"version": STRATEGY_ID, "display_name": DISPLAY_NAME, "rows": output, "events": emitted,
-            "direction_points": emitted, "config": cfg["consensus"], "config_hash": stable_hash(cfg),
+            "direction_points": emitted, "config": cfg["consensus"], "config_hash": frozen_config_hash,
             "candidate_policy": cfg["candidate_policy"], "mode": mode}
+
+
+
+def _arbitrate_prepared_row(base, source_reasons, cfg, frozen_config_hash):
+    """Reassess every threshold against causal inputs, with a fresh decision."""
+    c = cfg["consensus"]
+    buy_base, sell_base = base["buy_base_score"], base["sell_base_score"]
+    buy_pass = buy_base + 1e-12 >= c["buy_base_threshold"] and buy_base - sell_base + 1e-12 >= c["margin"] and len(base["buy_independent_families"]) >= c["min_independent"]
+    sell_pass = sell_base + 1e-12 >= c["sell_threshold"] and sell_base - buy_base + 1e-12 >= c["margin"] and len(base["sell_independent_families"]) >= c["min_independent"]
+    proposed = "BUY" if buy_pass else "SELL" if sell_pass else "WAIT"
+    action = proposed
+    selected = [fact for fact in base["active_candidates"] if fact["side"] == proposed]
+    reasons = list(source_reasons)
+    plan = base["entry_plan"]
+    if proposed == "BUY":
+        if not selected:
+            action = "WAIT"; reasons.append("no_live_original_buy_opportunity")
+        if not plan or plan.get("status") != "active" or plan.get("entry_allowed") is not True:
+            action = "WAIT"; reasons.extend((plan or {}).get("reason_codes") or ["risk_plan_unavailable"])
+        if base["mode"] == "final" and c["require_high_return"]:
+            quality_strength = base["agents"]["high_return"]["buy_strength"]
+            if quality_strength is None or quality_strength < c["high_return_threshold"] or base["buy_total_score"] + 1e-12 < c["buy_total_threshold"]:
+                action = "WAIT"; reasons.append("high_return_or_total_support_not_qualified")
+    row = {**base, "action": action, "direction": proposed,
+        "fresh_candidate_ids": [fact["event_id"] for fact in selected],
+        "buy_pass": buy_pass, "sell_pass": sell_pass,
+        "buy_base_qualified": buy_pass, "sell_base_qualified": sell_pass,
+        "entry_eligible": bool(buy_pass and base["original_opportunity_ids"] and plan and plan.get("status") == "active"
+            and plan.get("entry_allowed") is True),
+        "reason_codes": sorted(set(reasons)), "emitted": action in {"BUY", "SELL"},
+        "config_hash": frozen_config_hash}
+    event = None
+    if row["emitted"]:
+        row["event_id"] = stable_hash({"strategy": STRATEGY_ID, "symbol": row["symbol"], "date": row["date"],
+            "side": action, "opportunities": sorted(fact["opportunity_id"] for fact in selected), "config": frozen_config_hash})
+        event = {"event_id": row["event_id"], "date": row["date"], "available_at": row["available_at"],
+            "symbol": row["symbol"], "side": action, "source": "consensus", "source_event_ids": row["fresh_candidate_ids"],
+            "reason_codes": row["reason_codes"], "reference_price": row["reference_price"], "consensus": copy.deepcopy(row)}
+    return row, event
+
+
+_POLICY_THRESHOLD_KEYS = ("buy_base_threshold", "sell_threshold", "margin")
+
+
+def _policy_invariant_hash(cfg):
+    frozen = copy.deepcopy(cfg)
+    for key in _POLICY_THRESHOLD_KEYS:
+        frozen["consensus"][key] = None
+    return stable_hash(frozen)
+
+
+def prepare_policy_base(frame, market_dates, evidence_pack, trend_probabilities, config):
+    """One local causal base for an unchanged source/cross/config in E0 only.
+
+    It contains no chosen direction or account state. It is owned by one policy
+    worker, never cached globally or persisted, and never reused across folds.
+    """
+    cfg = _strategy_config(config)
+    rows = []
+    prepare_trend_decisions(frame, market_dates, evidence_pack=evidence_pack,
+        trend_probabilities=trend_probabilities, config=cfg, mode="E0",
+        allow_policy_validation=True, _policy_base_rows=rows)
+    return {"rows": rows, "invariant_hash": _policy_invariant_hash(cfg), "mode": "E0"}
+
+
+def apply_policy_thresholds(base, config):
+    """Rebuild all policy rows/events; only three arbitration thresholds vary."""
+    cfg = _strategy_config(config)
+    if base.get("mode") != "E0" or base.get("invariant_hash") != _policy_invariant_hash(cfg):
+        raise ValueError("policy base belongs to another frozen causal configuration")
+    frozen_config_hash = stable_hash(cfg)
+    output, emitted = [], []
+    for row_base, reasons in base["rows"]:
+        row, event = _arbitrate_prepared_row(row_base, reasons, cfg, frozen_config_hash)
+        output.append(row)
+        if event is not None:
+            emitted.append(event)
+    return {"version": STRATEGY_ID, "display_name": DISPLAY_NAME, "rows": output, "events": emitted,
+        "direction_points": emitted, "config": cfg["consensus"], "config_hash": frozen_config_hash,
+        "candidate_policy": cfg["candidate_policy"], "mode": "E0"}
 
 
 def build_consensus(rows, *, symbol=None, config=None, version=None, **kwargs):

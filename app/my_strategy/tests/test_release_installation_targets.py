@@ -11,9 +11,8 @@ import pytest
 def no_model_installation_probe(monkeypatch):
     import verify_installation
 
-    status = {"default_consensus_version": "czsc_trend_consensus_v2", "current_model_run_id": None,
-              "models": [], "model_selection": "automatic_qualified_runs"}
-    result = {"strategy_version": "czsc_trend_consensus_v2", "research": {"model_run_id": None},
+    status = {"mode": "rule_observation_no_model", "current_selection": None, "active_model": None, "models": []}
+    result = {"strategy_version": "trend_consensus", "research": {"model_run_id": None},
               "run_id": "installation-analysis", "publication_allowed": False,
               "chart_evidence": {"rows": [{"agents": {
                   "ma": {"model_available": False, "p_up": None, "p_down": None, "p_neutral": None},
@@ -22,7 +21,7 @@ def no_model_installation_probe(monkeypatch):
 
     def request(base, path, method="GET", body=None):
         calls.append((base, path, method, body))
-        if path == "/api/research/high-return-status":
+        if path == "/api/training/status":
             return status
         assert path == "/api/analysis" and method == "POST"
         return result
@@ -31,24 +30,24 @@ def no_model_installation_probe(monkeypatch):
     return verify_installation.verify_no_model_trend, status, result, calls
 
 
-def test_installation_verifier_accepts_only_public_v2_untrained_default(no_model_installation_probe):
+def test_installation_verifier_accepts_only_current_untrained_default(no_model_installation_probe):
     verify, _, _, calls = no_model_installation_probe
     result = verify("http://isolated", "fixture-calendar", "2024-12-30")
-    assert result["status"] == "passed" and result["strategy"] == "czsc_trend_consensus_v2"
+    assert result["status"] == "passed" and result["strategy"] == "trend_consensus"
     assert result["model_run_id"] is None and result["probabilities"] is None
     assert result["publication_allowed"] is False and result["analysis_rows"] == 1
     body = calls[1][3]
     assert body == {"symbol": "000001.SZ", "start": "2024-01-01", "end": "2024-12-30",
-                    "research": True, "model_family": "high_return", "calendar_run_id": "fixture-calendar",
+                    "model_family": "current", "calendar_run_id": "fixture-calendar",
                     "device": "cpu"}
     assert "consensus_version" not in body  # Exercise the actual public default.
 
 
 @pytest.mark.parametrize("key,value", [
-    ("default_consensus_version", "czsc_trend_consensus"),
-    ("current_model_run_id", "workstation-model"),
+    ("mode", "configured_run_auto_prior_heads"),
+    ("current_selection", {"run_id": "workstation-model"}),
     ("models", [{"run_id": "workstation-model"}]),
-    ("model_selection", "configured_run_auto_prior_heads"),
+    ("active_model", {"run_id": "workstation-model"}),
 ])
 def test_installation_verifier_rejects_wrong_default_or_workstation_model(no_model_installation_probe, key, value):
     verify, status, _, calls = no_model_installation_probe

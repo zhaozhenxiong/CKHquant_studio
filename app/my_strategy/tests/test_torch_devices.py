@@ -57,10 +57,10 @@ def test_mps_selection_keeps_float64_structure_stage_on_cpu(monkeypatch):
     assert compute.compute_status("cuda:99")["available"] is False
 
 
-def test_cli_and_api_accept_mps_and_train_defaults_to_auto():
+def test_cli_and_api_accept_mps_and_training_preserves_current_script_default():
     from my_strategy.cli import build_parser
     from my_strategy.web_dashboard.api import AnalysisRequest, TaskSpec
-    assert build_parser().parse_args(["research-train", "--end", "2026-09-30"]).device == "auto"
+    assert build_parser().parse_args(["train-trend", "--end", "2026-09-30"]).device is None
     assert AnalysisRequest(symbol="000001.SZ", device="mps").device == "mps"
     assert TaskSpec(device="mps").device == "mps"
 
