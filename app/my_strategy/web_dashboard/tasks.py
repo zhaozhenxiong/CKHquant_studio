@@ -180,14 +180,14 @@ class TaskManager:
             return self.training.run_training_job(spec, **callbacks)
         if kind == "model_validation":
             return self.training.run_validation_job(spec, **callbacks)
-        if spec.get("research", True):
+        if kind == "scan" or spec.get("research", True):
             from my_strategy.web_dashboard.trend_strategy import scan_trend_consensus, backtest_trend_consensus
             params = {key: spec.get(key) for key in ("symbols", "start", "end", "model_run_id", "model_fold",
                 "usage_mode", "calendar_run_id", "device", "cpu_workers", "consensus_config") if spec.get(key) is not None}
             params['symbols'] = spec.get('symbols') or None
             params.setdefault('start', '2026-01-01')
             if kind == 'scan':
-                return scan_trend_consensus(**params, **callbacks)
+                return scan_trend_consensus(**params, structure_only=not spec.get('research', True), **callbacks)
             return backtest_trend_consensus(**params, initial_cash=spec.get('initial_cash', 100000), **callbacks)
         symbols = spec.get("symbols") or [row["symbol"] for row in list_symbols()]
         if not symbols:

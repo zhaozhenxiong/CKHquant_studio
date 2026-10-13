@@ -93,34 +93,33 @@ def test_optional_token_does_not_expose_secret(manager, monkeypatch):
         assert "test-secret" not in response.text
 
 
-def test_scan_rejects_stale_last_event(manager, monkeypatch, tmp_path):
-    from my_strategy.adapters import czsc_adapter
-    from my_strategy.services import czsc_batch
-    from my_strategy.core import paths
-    monkeypatch.setattr(paths, "ARTIFACT_RUNS_ROOT", tmp_path / "artifacts")
-    monkeypatch.setattr(czsc_adapter, "data_status", lambda: {"latest_date": "2026-09-28"})
-    monkeypatch.setattr(czsc_adapter, "latest_market_date", lambda end: "2026-09-28")
-    def batches(symbols, **kwargs):
-        assert kwargs["require_latest"] and kwargs["end"] == "2026-09-28"
+def test_structure_reference_scan_preserves_failures(manager, monkeypatch):
+    from my_strategy.web_dashboard import trend_strategy
+    def scan(**kwargs):
+        assert kwargs["structure_only"] is True and kwargs["end"] == "2026-09-28"
         assert kwargs["device"] == "cpu"
-        kwargs["check_cancel"]()
-        kwargs["progress"](2, 2, 1)
-        frame = pd.DataFrame([{"date": "2026-09-28"}])
-        frame.attrs["data_version"] = "fixture"
-        yield {"prepared": [SimpleNamespace(symbol="000001.SZ", frame=frame)],
-               "sessions": [SimpleNamespace(events=[{"available_at": "2026-09-28", "action": "buy"}])],
-               "failures": [{"symbol": "600519.SH", "error": "行情缺少扫描日 2026-09-28，标的最后日期为 2026-09-25"}],
-               "compute_info": {"selected_device": "cpu", "backend": "numpy", "cuda_work": False, "bars": 1, "tensor_operations": ["comparison"], "cuda_elapsed_ms": None}}
-    monkeypatch.setattr(czsc_batch, "iter_replay_batches", batches)
-    job = manager.submit("scan", {"research": False, "symbols": ["000001.SZ", "600519.SH"], "end": "2026-09-28", "device": "cpu"})
-    finished = wait_terminal(manager, job["job_id"])
-    assert finished["status"] == "succeeded", finished["error"]
-    result = finished["result"]
-    assert result["coverage"] == {"requested": 2, "success": 1, "failed": 1}
-    assert [row["symbol"] for row in result["rows"]] == ["000001.SZ"]
-    assert "行情缺少扫描日" in result["failures"][0]["error"]
-    assert result["compute_info"]["cuda_work"] is False
-    assert result["compute_info"]["selected_device"] == "cpu"
+        kwargs["check_cancel"](); kwargs["progress"]("reference",2,2,1)
+        return {"run_id":"reference-scan-fixture", "analysis_mode":"reference", "account_scope":"none",
+                "coverage":{"requested":2,"success":1,"failed":1},
+                "rows":[{"symbol":"000001.SZ"}],
+                "failures":[{"symbol":"600519.SH","error":"行情缺少扫描日 2026-09-28，标的最后日期为 2026-09-25"}]}
+    monkeypatch.setattr(trend_strategy,"scan_trend_consensus",scan)
+    job=manager.submit("scan",{"research":False,"symbols":["000001.SZ","600519.SH"],"end":"2026-09-28","device":"cpu"})
+    finished=wait_terminal(manager,job["job_id"])
+    assert finished["status"]=="succeeded",finished["error"]
+    assert finished["result"]["account_scope"]=="none"
+    assert finished["result"]["coverage"]=={"requested":2,"success":1,"failed":1}
+    assert "行情缺少扫描日" in finished["result"]["failures"][0]["error"]
+
+
+def test_reference_scan_worker_never_substitutes_stale_or_future_quote(monkeypatch):
+    from my_strategy.web_dashboard import trend_strategy
+    from my_strategy.services import czsc_trend_runtime
+    frame=pd.DataFrame({"date":["2026-09-25","2026-09-29"]})
+    monkeypatch.setattr(trend_strategy,"_source_vintage",lambda *a,**k:({"features":frame},"source", "2026-09-29"))
+    monkeypatch.setattr(czsc_trend_runtime,"reference_overlay",lambda *a,**k:pytest.fail("missing target session must fail before scoring"))
+    with pytest.raises(ValueError,match="行情缺少扫描日 2026-09-28.*2026-09-25"):
+        trend_strategy._stock_worker(("000001.SZ","2026-09-28",["2026-09-25","2026-09-28","2026-09-29"],{"analysis_mode":"reference"},"2026-09-29"))
 
 
 def test_interactive_analysis_saves_a_reproducible_run(manager, monkeypatch):
@@ -129,9 +128,11 @@ def test_interactive_analysis_saves_a_reproducible_run(manager, monkeypatch):
     monkeypatch.setattr(paths, "ARTIFACT_RUNS_ROOT", manager.results.runs_root)
     def calculate(**kwargs):
         assert kwargs["config"]["czsc_version"] == "1.0.1"
+        assert kwargs["structure_only"] is True
         return {"symbol": kwargs["symbol"], "data_end": "2025-09-30", "data_version": "test-input",
                 "as_of": kwargs["as_of"], "frequencies": {}, "events": []}
-    monkeypatch.setattr(czsc_analysis, "analyze_stock", calculate)
+    from my_strategy.web_dashboard import trend_strategy
+    monkeypatch.setattr(trend_strategy, "analyze_trend_consensus", calculate)
     with TestClient(create_app(manager)) as client:
         response = client.post("/api/analysis", json={"research": False, "symbol": "000001.SZ", "start": "2025-01-01", "as_of": "2025-09-30"})
         assert response.status_code == 200

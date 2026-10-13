@@ -1,4 +1,4 @@
-"""Causal trend inference and one actual research Broker timeline for the UI."""
+"""Causal account-free references and explicit research Broker simulation."""
 from __future__ import annotations
 
 import copy
@@ -24,6 +24,180 @@ PRICING_ASSUMPTIONS = {
     "scope": "research_simulation",
 }
 
+REFERENCE_PRICING_ASSUMPTIONS = {
+    "reference_price": "last_observed_signal_day_close",
+    "reference_is_fill": False,
+    "scope": "analysis_reference",
+    "account_simulated": False,
+}
+
+
+def reference_overlay(features, calendar, *, model_run_id=None, model_fold=None,
+                      model_mode="historical", as_of=None, device="cpu",
+                      source_context_hash=None, consensus_config=None, use_models=True,
+                      model_selection_frozen=False):
+    """Score each observed close independently, without inventory or a Broker.
+
+    Direction retains the frozen base-score, margin and independent-source
+    thresholds. It never consumes an opportunity, applies an account entry
+    filter or claims a high-return / actual-position exit probability.
+    """
+    from my_strategy.services.czsc_trend_model import TrendSession, bind_trend_inputs
+    from my_strategy.services.czsc_trend_pipeline import forward_trend
+    from my_strategy.services.czsc_trend_consensus import prepare_trend_decisions, consensus_config as validate
+    from my_strategy.services.czsc_native_evidence import build_native_evidence
+    from my_strategy.services.czsc_trend_math import _device
+    from my_strategy.adapters.czsc_adapter import date_cutoff
+
+    if model_mode not in {"historical", "production"}:
+        raise ValueError("参考分析只支持按时点判断")
+    actual_device = str(_device(device or "cpu"))
+    frame = features.copy()
+    if frame.empty:
+        raise ValueError("参考分析需要单股按日有序唯一行情")
+    frame["date"] = pd.to_datetime(frame.date).dt.strftime("%Y-%m-%d")
+    requested_cutoff = date_cutoff(as_of or str(frame.iloc[-1].date))
+    visible_sessions = [day for day in calendar if pd.Timestamp(day) + pd.Timedelta(hours=15) <= requested_cutoff]
+    if not visible_sessions:
+        raise ValueError("请求时点之前没有已收盘的核验交易日")
+    cutoff = visible_sessions[-1]
+    frame = frame[frame.date <= cutoff].reset_index(drop=True)
+    if frame.empty or frame.symbol.nunique() != 1 or list(frame.date) != sorted(set(frame.date)):
+        raise ValueError("参考分析需要单股按日有序唯一行情")
+    load_selected = use_models and not (model_selection_frozen and model_run_id is None)
+    root, report = load_reference_model_run(model_run_id, as_of=cutoff) if load_selected else (None, None)
+    cfg = strategy_config(report["config"]) if report else strategy_config()
+    if consensus_config is not None:
+        cfg["consensus"].update(validate({**cfg["consensus"], **consensus_config}))
+    pack = build_native_evidence(frame, cfg, market_dates=calendar)
+    frame = bind_trend_inputs(pack["frame"], calendar)
+    frame["date"] = pd.to_datetime(frame.date).dt.strftime("%Y-%m-%d")
+    bundles = copy.deepcopy((report or {}).get("trend_bundles", []))
+    if use_models and model_fold:
+        if report is None:
+            raise ValueError("固定检查点需要完整模型")
+        available = [bundle for bundle in bundles if bundle.get("available_at", "9999") < cutoff
+            and bundle.get("heads", {}).get("trend_direction")]
+        matching = available if model_fold == "production" else [bundle for bundle in available if bundle["name"] == model_fold]
+        if not matching:
+            raise ValueError("固定趋势检查点在此判断时点尚不可用")
+        bundles = [max(matching, key=lambda bundle: (bundle["available_at"], bundle["name"]))]
+    session = TrendSession() if use_models else None
+    trends = forward_trend(frame, root or ARTIFACT_RUNS_ROOT, bundles, cfg, session,
+        model_mode, market_dates=calendar) if use_models else {day: {
+            "date": day, "available_at": day + "T15:00:00+08:00", "input_eligible": True,
+            "model_available": False, "p_up": None, "p_down": None, "p_neutral": None,
+            "model_identity": {}, "reason_codes": ["models_disabled_for_structure_reference"]} for day in frame.date}
+    prepared = prepare_trend_decisions(frame, calendar, native_pack=pack,
+        trend_probabilities=trends, config=cfg, mode="E0")
+    following = dict(zip(calendar[:-1], calendar[1:]))
+    rows, points, counts = [], [], Counter()
+    for original in prepared["rows"]:
+        row = copy.deepcopy(original)
+        day = row["date"]
+        ma = {**copy.deepcopy(trends[day]), **copy.deepcopy(row["agents"]["ma"])}
+        scored = ma.get("status") == "scored"
+        # Invalid or missing heads remain unavailable, never neutral/zero.
+        if not scored:
+            ma.update(p_up=None, p_down=None, p_neutral=None)
+        ma.update(kind="model_probability", target="next_verified_open_horizon_direction",
+            in_scope=scored, model_identity=_display_identity(ma.get("model_identity"), model_mode))
+        row["agents"]["ma"] = ma
+        for source in ("structure", "wyckoff"):
+            agent = row["agents"][source]
+            agent.update(kind="rule_evidence", input_eligible=agent["status"] == "scored")
+            if source == "wyckoff":
+                agent.update(effective_demand=agent.get("buy_strength"), effective_supply=agent.get("sell_strength"))
+        row["agents"]["high_return"] = {
+            "label": "高收益", "kind": "model_probability", "status": "reference_out_of_scope",
+            "evaluation_status": "reference_out_of_scope", "probability": None,
+            "in_scope": False, "applied_to_entry": False, "buy_contribution": None,
+            "sell_contribution": None, "quality_contribution": None,
+            "reason_codes": ["reference_has_no_actual_flat_account_population"],
+            "target": "actual_complete_fee_net_roundtrip_high_return_and_initial_risk"}
+        action = row["direction"]
+        basis = {"BUY": "多源方向支持达到买方参考门槛。", "SELL": "多源方向支持达到卖方参考门槛。",
+            "WAIT": "当前多源方向支持未达到参考门槛。"}[action]
+        reasons = [reason for reason in row.get("reason_codes", []) if not (
+            reason.startswith("risk_") or reason in {"no_live_original_buy_opportunity",
+                "high_return_or_total_support_not_qualified"})]
+        recommendation = {"action": action, "reference_only": True, "analysis_mode": "reference",
+            "date": day, "signal_date": day, "available_at": row["available_at"], "basis": basis,
+            "reference_price": row["reference_price"], "reference_close": row["reference_price"],
+            "reference_price_date": day, "reference_price_source": "signal_day_close",
+            "execution_basis": "已知收盘价上的方向参考，非成交或账户操作。"}
+        for key in ("entry_plan", "raw_risk_plan", "entry_eligible", "original_opportunity_ids", "mode"):
+            row.pop(key, None)
+        row.update(analysis_mode="reference", reference_only=True, account_scope="none",
+            reference_action=action, action=action, reference_recommendation=recommendation,
+            reason_codes=reasons, emitted=action in {"BUY", "SELL"},
+            events=copy.deepcopy(row.get("candidate_evidence", [])),
+            reference_close=row["reference_price"], reference_price_date=day,
+            reference_price_source="signal_day_close", next_market_session=following.get(day),
+            high_return_probability=None, exit_probability=None, buy_quality_bonus=None,
+            buy_total_score=row["buy_base_score"],
+            model_resolution={**ma.get("model_identity", {}), "model_family": STRATEGY_ID,
+                "schema_family": STRATEGY_ID, "display_name": DISPLAY_NAME, "probability": None,
+                "direction_probabilities": {key: ma.get(key) for key in ("p_up", "p_down", "p_neutral")},
+                "reason_codes": ma.get("reason_codes", []), "publication_allowed": False})
+        if row["emitted"]:
+            point = {"event_id": stable_hash({"purpose": "reference", "symbol": row["symbol"],
+                    "date": day, "action": action, "config_hash": prepared["config_hash"]}),
+                "date": day, "signal_date": day, "available_at": row["available_at"],
+                "first_available_at": row["available_at"], "symbol": row["symbol"],
+                "side": action, "action": action, "source": "reference_consensus",
+                "event_type": "direction_reference", "reference_only": True, "analysis_mode": "reference",
+                "reference_price": row["reference_price"], "reference_price_date": day,
+                "reference_price_source": "signal_day_close", "reason_codes": reasons,
+                "source_event_ids": copy.deepcopy(row.get("fresh_candidate_ids", [])),
+                "buy_base_score": row["buy_base_score"], "sell_base_score": row["sell_base_score"]}
+            row["event_id"] = point["event_id"]
+            points.append(point)
+        counts[ma.get("status", "unavailable")] += 1
+        rows.append(row)
+    prepared.update(rows=copy.deepcopy(rows), events=points, direction_points=points,
+        mode="reference", analysis_mode="reference", reference_only=True,
+        candidate_policy="independent_daily_direction_reference")
+    latest = copy.deepcopy(rows[-1]) if rows[-1]["date"] == cutoff else {
+        "date": cutoff, "symbol": str(frame.iloc[0].symbol), "available_at": cutoff + "T15:00:00+08:00",
+        "action": "WAIT", "direction": "UNAVAILABLE", "reference_action": "WAIT",
+        "reference_price": None, "reference_close": None, "reference_price_date": cutoff,
+        "events": [], "agents": {source: {"status": "input_ineligible", "in_scope": False,
+            "p_up": None, "p_down": None, "p_neutral": None, "probability": None,
+            "buy_contribution": None, "sell_contribution": None,
+            "reason_codes": ["missing_target_market_session"]} for source in ("ma", "structure", "wyckoff")},
+        "buy_base_score": None, "sell_base_score": None,
+        "high_return_probability": None, "exit_probability": None,
+        "reason_codes": ["missing_target_market_session"],
+        "reference_recommendation": {"action": "WAIT", "reference_only": True, "analysis_mode": "reference",
+            "basis": "请求交易日缺少行情，参考判断不可用。", "reference_price": None},
+        "model_resolution": {"probability": None, "reason_codes": ["missing_target_market_session"]}}
+    latest.update(analysis_mode="reference", reference_only=True, account_scope="none",
+        model_family=STRATEGY_ID, schema_family=STRATEGY_ID, display_name=DISPLAY_NAME,
+        probability_scope="observed_market_direction", next_market_session=following.get(cutoff),
+        model_policy="pinned" if model_fold and use_models else "auto" if use_models else "disabled",
+        model_fold=model_fold if use_models else None,
+        resolved_model_fold=bundles[0]["name"] if model_fold and use_models and bundles else None)
+    stats = copy.deepcopy(getattr(session, "diagnostics", {}))
+    return {"strategy_version": STRATEGY_ID, "display_name": DISPLAY_NAME,
+        "analysis_mode": "reference", "reference_only": True, "account_scope": "none",
+        "models_enabled": bool(use_models), "structure_only": not use_models,
+        "rows": rows, "trend_consensus": prepared, "reference_points": points,
+        "reference_recommendation": copy.deepcopy(latest["reference_recommendation"]),
+        "account_actions": None, "latest_decision": latest, "features": frame, "native_pack": pack,
+        "wyckoff_events": pack.get("wyckoff_events", []), "usage_mode": model_mode,
+        "model_run_id": root.name if root else None, "model_gate": (report or {}).get("model_gate", {"passed": False}),
+        "publication_allowed": False, "source_context_hash": source_context_hash,
+        "pricing_assumptions": copy.deepcopy(REFERENCE_PRICING_ASSUMPTIONS),
+        "compute_info": {"model_family": STRATEGY_ID, "display_name": DISPLAY_NAME,
+            "selected_device": actual_device, "actual_device": "cpu", "model_inference_device": "cpu",
+            "research": True, "account_simulated": False,
+            "actual_cuda_inference": False, "actual_mps_inference": False,
+            "model_inference_rows": int(stats.get("rows", 0)),
+            "model_inference_batches": int(stats.get("batches", 0)),
+            "model_loads": int(stats.get("model_loads", 0)), "trend_inference": stats,
+            "source_reason_counts": dict(counts)}}
+
 
 def load_model_run(model_run_id=None, *, as_of=None, scope='research'):
     """Default inference consumes only a qualified, effective registry selection."""
@@ -34,6 +208,16 @@ def load_model_run(model_run_id=None, *, as_of=None, scope='research'):
         if not model_run_id:
             return None, None
     return read_run(model_run_id)
+
+
+def load_reference_model_run(model_run_id=None, *, as_of=None):
+    """A fixed reference checkpoint cannot bypass the qualified selection."""
+    if model_run_id is not None:
+        from my_strategy.services.model_training_center import TrainingCenter
+        selected = TrainingCenter().active_model_run_id(as_of=as_of, scope="research")
+        if str(model_run_id) != str(selected) or selected is None:
+            raise ValueError("参考分析固定模型必须是此时点已合格且生效的当前选择；候选诊断请使用显式研究或回测")
+    return load_model_run(model_run_id, as_of=as_of, scope="research")
 
 
 def _display_identity(identity, mode):

@@ -119,7 +119,11 @@ def test_current_shell_has_one_model_and_separate_training_defaults_views():
     assert shell.options["scan-usage-mode"] == ["historical", "forward"]
     assert shell.options["backtest-usage-mode"] == ["historical"]
     assert 'id="holding-replay-form"' not in html
-    assert "手动持仓；模型退出需对应实际Broker账本" in html
+    holdings = html.split('<section id="view-holdings"', 1)[1].split('<section id="view-training"', 1)[0]
+    assert "手动记录独立于模拟回测，本页面不下单" in holdings
+    assert "可从持仓列表查看股票的结构与量价参考；持仓记录由你手动维护" in holdings
+    assert 'id="holdings-shares"' in holdings and 'id="holdings-cost"' in holdings
+    assert "模型退出需对应实际Broker账本" not in holdings
 
 
 def test_form_units_nullable_latest_and_fixed_constraint_cannot_change():

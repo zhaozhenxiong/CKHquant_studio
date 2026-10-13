@@ -29,7 +29,7 @@ GENERATING_FILES = tuple('services/'+name for name in ('czsc_trend_contracts.py'
     'czsc_trend_dataset.py','czsc_trend_pipeline.py','czsc_trend_consensus.py',
     'czsc_trend_account.py','czsc_trend_runtime.py','czsc_trend_finalization.py',
     'czsc_trend_source.py','czsc_native_evidence.py','czsc_trend_support.py',
-    'czsc_trend_math.py','czsc_liquidity.py','czsc_backtest.py'))+(
+    'czsc_trend_math.py','czsc_liquidity.py','czsc_backtest.py','czsc_account_artifacts.py'))+(
     'execution/broker.py','execution/cost_model.py','execution/ledger.py','execution/order.py',
     'configs/czsc_trend_strategy.json',)
 POPULATION_VERSION = 'strict_prior_l2_actual_flat_prefix_pre_gate_attempts'

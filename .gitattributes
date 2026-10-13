@@ -84,3 +84,4 @@ app/my_strategy/services/czsc_price_volume_events.py -text whitespace=blank-at-e
 app/my_strategy/configs/czsc_strategy.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 app/my_strategy/services/model_training_center.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 app/my_strategy/web_dashboard/api.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+app/my_strategy/services/czsc_account_artifacts.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

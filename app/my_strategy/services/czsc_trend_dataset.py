@@ -21,6 +21,7 @@ from my_strategy.services.czsc_trend_labels import episode_outcome, exit_outcome
 from my_strategy.services.czsc_trend_interval_model import schema_hash
 from my_strategy.services.czsc_trend_model import bind_trend_inputs
 from my_strategy.services.czsc_trend_contracts import ENTRY_HEADS
+from my_strategy.services.czsc_account_artifacts import write_account_artifacts
 
 
 def make_contract(head, config, calendar, stage):
@@ -253,8 +254,10 @@ def build_account_dataset(frame, calendar, native_pack, trend_probabilities, con
     if directory:
         directory=Path(directory);directory.mkdir(parents=True,exist_ok=True)
         for key in ('entries','exits','episodes'):result[key].to_parquet(directory/(key+'.parquet'),index=False)
-        _save(directory/'reference_account.json',reference)
-        _save(directory/'candidate_clones.json',clone_audits);_save(directory/'holding_pairs.json',pairs)
+        account_artifacts=write_account_artifacts(directory,{
+            'reference_account.json':reference,'candidate_clones.json':clone_audits,'holding_pairs.json':pairs})
+        summary['account_storage']=account_artifacts['storage_stats']
         summary['files']={p.name:{'path':str(p),'sha256':_file_hash(p)} for p in directory.iterdir() if p.is_file()}
+        summary['files'].update(account_artifacts['files'])
         _save(directory/'manifest.json',summary)
     return result,summary

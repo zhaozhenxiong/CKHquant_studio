@@ -200,6 +200,9 @@ def diagnose_entry_frame(frame, fold, config):
 
 
 def _read_verified(path, expected):
+    if Path(path).name in {"reference_account.json", "candidate_clones.json", "holding_pairs.json"}:
+        from my_strategy.services.czsc_account_artifacts import read_account_artifact
+        return read_account_artifact(path, expected_sha256=expected)
     data = Path(path).read_bytes()
     import hashlib
     if hashlib.sha256(data).hexdigest() != expected:
@@ -243,6 +246,11 @@ def _inspect_symbol(payload):
     directory, record, fold, config, calendar = payload
     directory = Path(directory) / record["symbol"].replace(".", "_")
     assets = record["files"]
+    for name in ("reference_account.json", "candidate_clones.json", "holding_pairs.json"):
+        descriptor = json.loads((directory / name).read_text())
+        linked = assets.get(descriptor.get("asset"))
+        if not linked or linked.get("sha256") != descriptor.get("asset_sha256"):
+            raise ValueError("compact diagnostic graph missing from frozen dataset index")
     for name in ("reference_account.json", "candidate_clones.json"):
         suffix = "/" + "/".join(directory.parts[directory.parts.index("runs") + 1:]) + "/" + name
         if not str(assets[name]["path"]).endswith(suffix):
@@ -434,9 +442,14 @@ def run_diagnostics(model_run_id, *, cpu_workers=2, progress=None):
             if (audit.loc[valid_labels, "label"].ne(audit.loc[valid_labels, "recomputed_label"])).any():
                 raise ValueError("pooled high-return label differs from recomputed outcome")
             for record in records:
-                for name in ("reference_account.json", "candidate_clones.json"):
-                    result["input_assets"].append({"path": str(directory / record["symbol"].replace(".", "_") / name),
-                        "sha256": record["files"][name]["sha256"]})
+                stock_root = directory / record["symbol"].replace(".", "_")
+                for name, asset in record["files"].items():
+                    if Path(name).name != name or name in {".", ".."}:
+                        raise ValueError("diagnostic account asset name escapes its stock directory")
+                    asset_path = stock_root / name
+                    if not asset_path.resolve().is_relative_to(stock_root.resolve()) or _file_hash(asset_path) != asset["sha256"]:
+                        raise ValueError("diagnostic frozen linked account asset changed")
+                    result["input_assets"].append({"path": str(asset_path), "sha256": asset["sha256"]})
             diagnostic["daily_candidate_path"] = {}
             for name, segment in diagnostic["segments"].items():
                 scope = daily.date.le(segment["end"]) if segment["start"] is None else daily.date.between(segment["start"], segment["end"])

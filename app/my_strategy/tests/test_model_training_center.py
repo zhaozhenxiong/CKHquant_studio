@@ -18,6 +18,7 @@ from my_strategy.execution.order import Order
 from my_strategy.services import model_training_center as center
 from my_strategy.services.czsc_trend_contracts import strategy_config
 from my_strategy.storage.czsc_results import ResultStore
+from my_strategy.services.czsc_account_artifacts import read_account_artifact, write_account_artifact
 
 
 @pytest.fixture
@@ -235,7 +236,7 @@ def verified_comparison(service, monkeypatch):
             for symbol in cohort:
                 value = account(symbol,dates,profit,multiplier,"candidate" if name.startswith("candidate") else None,"sha-"+symbol)
                 value["series_context"]["calendar_hash"] = stable_hash(calendar)
-                path = root / "validation" / window["name"] / name / (symbol+".json"); center._save(path,value)
+                path = root / "validation" / window["name"] / name / (symbol+".json"); write_account_artifact(path,value)
                 ledger_path = path.with_suffix(".csv"); pd.DataFrame(value["ledger"]).to_csv(ledger_path,index=False)
                 assets.append(dict(path=path.relative_to(root).as_posix(),sha256=center._file_hash(path),ledger_path=ledger_path.relative_to(root).as_posix(),ledger_sha256=center._file_hash(ledger_path)))
                 measures.append(center.audit_account(value,calendar))
@@ -265,11 +266,11 @@ def test_selection_cannot_accept_changed_broker_bindings(verified_comparison, ch
     elif change == "metrics": window["arms"]["candidate"]["metrics"]["total_return"] = 100.
     else:
         asset = window["arms"]["candidate"]["assets"][0]
-        path = service.runs_root / "candidate" / asset["path"]; account_data = json.loads(path.read_text())
+        path = service.runs_root / "candidate" / asset["path"]; account_data = read_account_artifact(path)
         if change == "cost": account_data["cost_model"]["commission"] = 0.
         elif change == "identity": account_data["series_context"]["model_identity"]["model_run_id"] = "retired"
         elif change == "source": account_data["series_context"]["source_hash"] = "not-frozen"
-        center._save(path,account_data); asset["sha256"] = center._file_hash(path)
+        write_account_artifact(path,account_data); asset["sha256"] = center._file_hash(path)
     monkeypatch_result = lambda _:changed
     service.comparison = monkeypatch_result
     with pytest.raises(ValueError): service.select_candidate("candidate")
@@ -433,7 +434,11 @@ def test_active_proof_uses_immutable_selected_comparison_not_latest_row(verified
     assert service.active_model_run_id("2029-01-03")=="candidate"
     asset=result["windows"][0]["arms"]["candidate"]["assets"][0]
     path=service.runs_root/"candidate"/asset["path"]
-    before=path.stat(); original=path.read_text(); changed=original.replace('"action": "BUY"','"action": "BOY"',1)
+    before=path.stat(); original=path.read_text()
+    envelope=json.loads(original)
+    # Mutate same-size envelope metadata without changing its mtime.
+    assert "schema" in envelope
+    changed=original.replace(envelope["schema"], envelope["schema"][:-1]+"X",1)
     assert original!=changed and len(original)==len(changed)
     path.write_text(changed); os.utime(path,ns=(before.st_atime_ns,before.st_mtime_ns))
     assert service.active_model_run_id("2029-01-03") is None
@@ -659,3 +664,29 @@ def test_status_reports_effective_incumbent_date_while_replacement_waits(service
     monkeypatch.setattr(service,"_event_proof",lambda identity:old if identity==1 else pending)
     assert service.status()["active_model"]["run_id"]=="old-current"
     assert service.status()["active_model"]["effective_from"]=="2020-01-01"
+
+
+def test_selected_compact_graph_tamper_invalidates_cached_proof(verified_comparison):
+    service,result,plan=verified_comparison
+    service.select_candidate("candidate")
+    assert service.active_model_run_id("2029-01-03")=="candidate"
+    asset=result["windows"][0]["arms"]["candidate"]["assets"][0]
+    reference=service.runs_root/"candidate"/asset["path"]
+    envelope=json.loads(reference.read_text())
+    blob=reference.parent/envelope["asset"]
+    before=blob.stat(); content=bytearray(blob.read_bytes()); content[-8]^=1
+    blob.write_bytes(content); os.utime(blob,ns=(before.st_atime_ns,before.st_mtime_ns))
+    assert service.active_model_run_id("2029-01-03") is None
+    assert service.status()["mode"]=="integrity_blocked"
+
+
+def test_comparison_cannot_substitute_plain_archive_account(verified_comparison):
+    service,result,plan=verified_comparison
+    asset=result["windows"][0]["arms"]["candidate"]["assets"][0]
+    reference=service.runs_root/"candidate"/asset["path"]
+    logical=read_account_artifact(reference)
+    center._save(reference,logical); asset["sha256"]=center._file_hash(reference)
+    service.comparison=lambda _:result
+    with pytest.raises(ValueError,match="schema|archive"):
+        service.select_candidate("candidate")
+    assert service.current_selection() is None

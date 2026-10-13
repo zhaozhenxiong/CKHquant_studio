@@ -158,10 +158,10 @@ element('analysis-model-policy').value='pinned'; element('analysis-usage-mode').
 element('analysis-end').value='2026-01-01'; element('analysis-checkpoint').value='production';
 updateResearchControls('analysis');
 assert(element('analysis-checkpoint').innerHTML.includes('2025Q4 · 最早可用 2025-09-30'));
-assert(element('analysis-checkpoint-help').textContent.includes('固定入场检查点 production'));
+assert(element('analysis-checkpoint-help').textContent.includes('固定合格检查点 production'));
 assert.throws(() => researchSpec('analysis'),/2026-09-30 才可用/);
 element('analysis-checkpoint').value='2025Q4';
-assert.deepEqual(researchSpec('analysis'),{research:true,model_family:'current',consensus_version:'trend_consensus',usage_mode:'historical',model_policy:'pinned',entry_policy:'risk',model_run_id:'train',model_fold:'2025Q4',calendar_run_id:'verified',device:'auto'});
+assert.deepEqual(researchSpec('analysis'),{research:true,analysis_mode:'reference',model_family:'current',consensus_version:'trend_consensus',usage_mode:'historical',model_policy:'pinned',entry_policy:'risk',model_run_id:'train',model_fold:'2025Q4',calendar_run_id:'verified',device:'auto'});
 element('scan-mode').value='research'; element('scan-model').value='train';
 assert.equal(researchSpec('scan').model_fold,undefined);
 element('backtest-mode').value='research'; element('backtest-model').value='';

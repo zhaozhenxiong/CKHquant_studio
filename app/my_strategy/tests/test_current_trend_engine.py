@@ -904,10 +904,10 @@ def test_missing_prior_l2_preserves_all_daily_flat_attempts_without_actual_buys(
     assert entries.actual_flat_reference.all() and entries.candidate_cash_ratio.eq(1).all()
     assert entries.label_available.all() and entries.label.eq(0).all()
     assert entries.entry_date.tolist()==calendar[71:74]
-    reference=json.loads((tmp_path/'reference_account.json').read_text())
+    reference=__import__('my_strategy.services.czsc_account_artifacts',fromlist=['read_account_artifact']).read_account_artifact(tmp_path/'reference_account.json')
     assert reference['ledger']==[]
     assert all(row['pre_gate_state']['pending_intent'] is None for row in reference['entry_diagnostics'])
-    clones=json.loads((tmp_path/'candidate_clones.json').read_text())
+    clones=__import__('my_strategy.services.czsc_account_artifacts',fromlist=['read_account_artifact']).read_account_artifact(tmp_path/'candidate_clones.json')
     assert len(clones)==3 and all(len([fill for fill in row['ledger'] if fill['action']=='BUY'])==1 for row in clones)
     assert summary['reference_mode']=='final' and summary['ordinary_sell_policy']=='continuous_sell_pass_for_actual_holding'
     assert result['exits'].empty
@@ -919,7 +919,7 @@ def test_training_never_uses_gate_after_state_with_queued_buy(monkeypatch,tmp_pa
     result,summary=build_account_dataset(frame,calendar,{}, {},cfg,stage='E0',directory=tmp_path)
     entries=result['entries']
     assert len(entries)==1 and entries.reference_allowed.iloc[0]
-    reference=json.loads((tmp_path/'reference_account.json').read_text())
+    reference=__import__('my_strategy.services.czsc_account_artifacts',fromlist=['read_account_artifact']).read_account_artifact(tmp_path/'reference_account.json')
     diagnostic=reference['entry_diagnostics'][0]
     after=next(state for state in reference['account_snapshots'] if state['last_close_date']==calendar[70])
     assert diagnostic['pre_gate_state']['pending_intent'] is None

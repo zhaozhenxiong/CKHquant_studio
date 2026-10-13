@@ -26,17 +26,20 @@ function element(id) {
   return elements.get(id);
 }
 global.document={getElementById:element};
+global.KHQuantChartEvidence=require(require('path').join(require('path').dirname(process.argv[1]),'chart_evidence.js'));
 const source=fs.readFileSync(process.argv[1],'utf8').replace('init().catch(showError);',
   'globalThis.progressTest={state,renderComputeResult,renderScanComputePlan,taskDetail,taskActions,refreshCompute};');
 vm.runInThisContext(source);
 const {state,renderComputeResult,renderScanComputePlan,taskDetail,taskActions,refreshCompute}=progressTest;
-state.scan={};
+state.scan={analysis_mode:'reference',account_scope:'none'};
 renderComputeResult('scan',{research:true,selected_device:'cuda:1',cuda_work:true,model_inference_rows:64,
   model_inference_batches:2,cpu_workers:4,cache_hits:63});
 let text=element('scan-compute-result').textContent;
 assert(text.includes('CUDA 模型推理') && text.includes('64 行') && text.includes('2 个推理批次'));
 assert(text.includes('CPU 准备并发上限 4') && text.includes('特征缓存命中 63'));
 assert(!text.includes('个准备进程'));
+assert(text.includes('结构与量价参考在 CPU'));
+assert(!text.includes('实际成交'),'reference scan compute must not claim account execution');
 renderComputeResult('scan',{research:true,selected_device:'cuda:1',cuda_work:false,model_inference_rows:0});
 text=element('scan-compute-result').textContent;
 assert(text.includes('未执行 ML 推理（0 行）') && !text.includes('本次 CUDA'));
@@ -58,7 +61,7 @@ element('scan-mode').value='research'; element('scan-model').value=''; element('
 element('scan-model-policy').value='auto';
 renderScanComputePlan();
 assert(element('scan-compute-plan').textContent.includes('按所选日期匹配模型并批量推理'));
-assert(element('scan-compute-plan').textContent.includes('缺少合格入场头时明确阻断'));
+assert(element('scan-compute-plan').textContent.includes('缺少合格趋势模型时保持未评分'));
 assert(element('scan-compute-plan').textContent.includes('设备 cuda:1'));
 assert(!element('scan-compute-plan').textContent.includes('不执行 GPU ML 推理'));
 assert.equal(element('scan-model').value,'');

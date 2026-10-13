@@ -1,4 +1,4 @@
-"""Route every current entry point to the same model and account contract."""
+"""Route current model references and explicitly requested account research."""
 from __future__ import annotations
 import copy
 import importlib
@@ -10,7 +10,9 @@ from my_strategy.services.czsc_trend_contracts import STRATEGY_ID, DISPLAY_NAME,
 
 CURRENT_PATH = Path(os.environ.get('KHQUANT_CURRENT_STRATEGY_CONFIG', str(MY_STRATEGY_ROOT / 'configs/current_strategy.json')))
 TREND_FAMILIES = {STRATEGY_ID: 'czsc_trend'}
-CAPABILITIES = {'chart': True, 'scan': True, 'offline_validation': True, 'holding': True}
+CAPABILITIES = {'chart': True, 'scan': True, 'offline_validation': True, 'holding': True,
+                'reference_analysis': True, 'default_analysis_mode': 'reference',
+                'analysis_account_simulated': False}
 
 
 def family_module(family, component):

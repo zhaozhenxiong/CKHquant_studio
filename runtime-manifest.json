@@ -53,7 +53,10 @@
     "current-model-revalidation",
     "capabilities-based-explicit-device-selection",
     "bounded-mps-training-input-residency",
-    "strict_causal_model_batch_inference"
+    "strict_causal_model_batch_inference",
+    "independent_reference_analysis",
+    "lossless_shared_account_evidence",
+    "current_compact_evidence_revalidation"
   ],
   "python": "3.12",
   "devices": [
@@ -92,7 +95,7 @@
     "authorized_by": "user",
     "parameter_policy": "retain_current_trade_target_class_maturity_and_risk_constraints",
     "research_version": "trend_consensus",
-    "model_training_status_at_release_preparation": "in_progress",
+    "model_training_status_at_release_preparation": "previous_task_cancelled_current_compact_evidence_training_in_progress",
     "model_production_qualification": "pending"
   },
   "parameter_profiles": {

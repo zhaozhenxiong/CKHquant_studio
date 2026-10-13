@@ -23,6 +23,7 @@ def clean_symbol(value: str) -> str:
 class AnalysisRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     symbol: str
+    analysis_mode: Literal['reference'] = 'reference'
     start: date | None = date(2026, 1, 1)
     end: date | None = None
     as_of: str | None = None
@@ -77,6 +78,7 @@ class AnalysisRequest(BaseModel):
 class TaskSpec(BaseModel):
     model_config = ConfigDict(extra='forbid')
     symbols: list[str] = Field(default_factory=list, max_length=10000)
+    analysis_mode: Literal['reference', 'backtest'] | None = None
     start: date | None = None
     end: date | None = None
     initial_cash: float = Field(default=100000, gt=0, le=1e12, allow_inf_nan=False)
@@ -124,6 +126,10 @@ class TaskRequest(BaseModel):
 
     @model_validator(mode='after')
     def start_date(self):
+        expected_mode = 'reference' if self.kind == 'scan' else 'backtest' if self.kind == 'backtest' else None
+        if self.spec.analysis_mode is not None and self.spec.analysis_mode != expected_mode:
+            raise ValueError('任务用途与分析模式不一致')
+        self.spec.analysis_mode = expected_mode
         if self.kind == 'backtest' and (self.spec.usage_mode != 'historical' or self.spec.model_policy == 'pinned' or self.spec.model_fold is not None):
             raise ValueError('回测只支持历史按日期匹配，固定检查点与当前时点研究请使用分析入口')
         if self.kind in {'scan', 'backtest'} and self.spec.start is None:
@@ -347,7 +353,8 @@ async def analysis(spec: AnalysisRequest, request: Request):
                                          consensus_version=spec.consensus_version)
         else:
             baseline_query = {key: calculation_query[key] for key in ("symbol", "start", "end", "as_of") if key in calculation_query}
-            result = analyze_stock(**baseline_query, config=settings, research=False)
+            from my_strategy.web_dashboard.trend_strategy import analyze_trend_consensus
+            result = analyze_trend_consensus(**baseline_query, config=settings, structure_only=True)
         consensus = result.get("consensus_decisions") or {}
         if consensus.get("config"):
             query["consensus_config"] = consensus["config"]
@@ -359,7 +366,7 @@ async def analysis(spec: AnalysisRequest, request: Request):
                 query["model_run_id"] = selected_model
             if research_context.get("calendar_run_id"):
                 query["calendar_run_id"] = research_context["calendar_run_id"]
-            account_context = result.get("account_actions", {}).get("context", {})
+            account_context = (result.get("account_actions") or {}).get("context", {})
             if account_context.get("account_start"):
                 query["account_start"] = account_context["account_start"]
             if account_context.get("initial_cash") is not None:

@@ -181,7 +181,7 @@ assert.equal(lastAnalysisQuery.start,'2026-09-15','an older run without a window
 ''')
 
 
-def test_auto_checkpoint_controls_send_selected_new_family_and_saved_account():
+def test_reference_checkpoint_controls_keep_model_context_without_simulated_account():
     run_js(r'''
 workbench.state.research={calendar_run_id:'calendar',default_consensus_version:'trend_consensus',
  models:[{run_id:'new-run',schema_family:'trend_consensus'}]};
@@ -191,7 +191,7 @@ element('analysis-mode').value='research';element('analysis-model-family').value
 element('analysis-model').value='new-run';element('analysis-model-policy').value='auto';element('analysis-usage-mode').value='historical';
 const actual=workbench.researchSpec('analysis');
 assert.equal(actual.consensus_version,'trend_consensus');assert.equal(actual.model_run_id,'new-run');
-assert.equal(actual.account_start,'2023-01-01');assert.equal(actual.account_initial_cash,150000);
+assert.equal(actual.analysis_mode,'reference');assert.equal(actual.account_start,undefined);assert.equal(actual.account_initial_cash,undefined);
 assert.equal(actual.consensus_config.version,'trend_consensus');
 const context=workbench.resultResearchContext({strategy_version:'trend_consensus',research:{model_run_id:'new-run'},
  request:{consensus_version:'trend_consensus',account_start:'2023-01-01',account_initial_cash:150000}});
@@ -218,7 +218,7 @@ assert(select.options.some(option=>option.value==='old-explicit-run'));
 workbench.populateResearchModels('analysis');
 const actual=workbench.researchSpec('analysis');
 assert.equal(actual.model_run_id,'old-explicit-run');assert.equal(actual.consensus_version,context.consensus_version);
-assert.equal(actual.account_start,context.account_start);assert.equal(actual.account_initial_cash,150000);
+assert.equal(actual.analysis_mode,'reference');assert.equal(actual.account_start,undefined);assert.equal(actual.account_initial_cash,undefined);
 assert.deepEqual(actual.consensus_config,context.consensus_config);
 assert.throws(()=>workbench.applyResearchContext('analysis',{...context,model_family:'retired_family'}),/已退役/);
 workbench.applyResearchContext('analysis',context);

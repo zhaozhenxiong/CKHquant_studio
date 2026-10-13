@@ -6,6 +6,7 @@ research event and does not confer formal publication certification.
 from __future__ import annotations
 
 import copy
+import ctypes
 from contextlib import closing, contextmanager
 from datetime import date
 import json
@@ -21,6 +22,7 @@ import sys
 import threading
 import time
 import uuid
+from types import FunctionType
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 
@@ -85,7 +87,8 @@ FIELDS = [
 DEFAULTS = {field["key"]: field["default"] for field in FIELDS}
 EXTRA_KEYS = {"symbols", "calendar_run_id"}
 EVALUATION_FILES = ("services/model_training_center.py", "execution/broker.py", "execution/cost_model.py",
-                    "execution/ledger.py", "execution/order.py", "services/czsc_backtest.py")
+                    "execution/ledger.py", "execution/order.py", "services/czsc_backtest.py",
+                    "services/czsc_account_artifacts.py")
 
 
 def evaluation_freeze():
@@ -137,52 +140,220 @@ def _event_asset_signature(paths):
     return signature
 
 
-def _terminate_windows_process_tree(process):
-    """Stop only the launched process and its descendants, then verify exit."""
-    import psutil
+class _JobBasicLimit(ctypes.Structure):
+    _fields_ = [("process_time", ctypes.c_int64), ("job_time", ctypes.c_int64),
+                ("flags", ctypes.c_uint32), ("min_working_set", ctypes.c_size_t),
+                ("max_working_set", ctypes.c_size_t), ("active_limit", ctypes.c_uint32),
+                ("affinity", ctypes.c_size_t), ("priority", ctypes.c_uint32),
+                ("scheduling", ctypes.c_uint32)]
+
+
+class _JobIoCounters(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_uint64) for name in
+                ("read_ops", "write_ops", "other_ops", "read_bytes", "write_bytes", "other_bytes")]
+
+
+class _JobExtendedLimit(ctypes.Structure):
+    _fields_ = [("basic", _JobBasicLimit), ("io", _JobIoCounters),
+                ("process_memory", ctypes.c_size_t), ("job_memory", ctypes.c_size_t),
+                ("peak_process_memory", ctypes.c_size_t), ("peak_job_memory", ctypes.c_size_t)]
+
+
+class _JobAccounting(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_int64) for name in ("user_time", "kernel_time", "period_user", "period_kernel")] + [
+        (name, ctypes.c_uint32) for name in ("page_faults", "total_processes", "active_processes", "terminated_processes")]
+
+
+class _WindowsJobApi:
+    """Native handles only; no PID enumeration or process-global API patching."""
+    def __init__(self):
+        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle, dword, pointer, boolean = ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_int32
+        signatures = {
+            "CreateJobObjectW": ([pointer, ctypes.c_wchar_p], handle),
+            "SetHandleInformation": ([handle, dword, dword], boolean),
+            "SetInformationJobObject": ([handle, ctypes.c_int32, pointer, dword], boolean),
+            "AssignProcessToJobObject": ([handle, handle], boolean),
+            "ResumeThread": ([handle], dword),
+            "TerminateJobObject": ([handle, dword], boolean),
+            "QueryInformationJobObject": ([handle, ctypes.c_int32, pointer, dword, pointer], boolean),
+            "CloseHandle": ([handle], boolean),
+            "TerminateProcess": ([handle, dword], boolean),
+            "WaitForSingleObject": ([handle, dword], dword),
+        }
+        for name, (arguments, result) in signatures.items():
+            function = getattr(self.kernel, name)
+            function.argtypes, function.restype = arguments, result
+
+    @staticmethod
+    def _check(result):
+        if not result:
+            raise ctypes.WinError(ctypes.get_last_error())
+        return result
+
+    def create(self):
+        return self._check(self.kernel.CreateJobObjectW(None, None))
+
+    def configure(self, handle):
+        self._check(self.kernel.SetHandleInformation(handle, 1, 0))
+        limits = _JobExtendedLimit()
+        # Descendants inherit this unnamed, non-inheritable job membership.
+        # No BREAKAWAY flag permits a descendant to escape its owned family.
+        limits.basic.flags = 0x00002000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        self._check(self.kernel.SetInformationJobObject(handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)))
+
+    def assign(self, job, process):
+        self._check(self.kernel.AssignProcessToJobObject(job, process))
+
+    def resume(self, thread):
+        previous = self.kernel.ResumeThread(thread)
+        if previous != 1:
+            if previous == 0xFFFFFFFF:
+                raise ctypes.WinError(ctypes.get_last_error())
+            raise RuntimeError("训练主线程暂停计数异常，拒绝启动未受控进程")
+
+    def terminate(self, job):
+        self._check(self.kernel.TerminateJobObject(job, 1))
+
+    def active_count(self, job):
+        accounting = _JobAccounting()
+        self._check(self.kernel.QueryInformationJobObject(job, 1, ctypes.byref(accounting), ctypes.sizeof(accounting), None))
+        return accounting.active_processes
+
+    def terminate_process(self, process):
+        self._check(self.kernel.TerminateProcess(process, 1))
+        self.wait_process(process)
+
+    def wait_process(self, process):
+        if self.kernel.WaitForSingleObject(process, 10000) != 0:
+            raise RuntimeError("训练自有启动进程未完成终止")
+
+    def close(self, handle):
+        self._check(self.kernel.CloseHandle(handle))
+
+
+class _WindowsJob:
+    def __init__(self, api=None):
+        self.api = api if api is not None else _WindowsJobApi()
+        self.raw_process = self.raw_thread = None
+        self.handle = self.api.create()
+        try:
+            self.api.configure(self.handle)
+        except BaseException:
+            self.api.close(self.handle)
+            self.handle = None
+            raise
+
+    def _close_raw_handles(self):
+        thread, self.raw_thread = self.raw_thread, None
+        try:
+            if thread is not None:
+                self.api.close(thread)
+        finally:
+            process, self.raw_process = self.raw_process, None
+            if process is not None:
+                self.api.close(process)
+
+    def _close_parent_handle(self, process):
+        if process is not None:
+            if self.raw_process == int(process._handle):
+                self.raw_process = None
+            process._handle.Close()
+
+    def stop(self, process=None):
+        if self.handle is None:
+            return
+        try:
+            self.api.terminate(self.handle)
+            if process is not None:
+                process.wait(timeout=10)
+                # Windows accounting retains an exited process until its last
+                # reference is released. Popen already knows the return code.
+                self._close_parent_handle(process)
+            elif self.raw_process is not None:
+                # CPython can fail while closing inherited pipe handles before
+                # it adopts hp. Keep the raw handles owned until that handoff.
+                self.api.wait_process(self.raw_process)
+            self._close_raw_handles()
+            deadline = time.monotonic() + 10
+            while self.api.active_count(self.handle):
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("训练结束后自有 Windows Job 仍包含未释放进程")
+                threading.Event().wait(.05)
+        finally:
+            handle, self.handle = self.handle, None
+            try:
+                self._close_parent_handle(process)
+            finally:
+                try:
+                    self._close_raw_handles()
+                finally:
+                    self.api.close(handle)
+
+
+class _WindowsCreateProcessProxy:
+    def __init__(self, native, job):
+        self.native, self.job = native, job
+
+    def __getattr__(self, name):
+        return getattr(self.native, name)
+
+    def CloseHandle(self, handle):
+        self.native.CloseHandle(handle)
+        if self.job.raw_thread == handle:
+            self.job.raw_thread = None
+
+    def CreateProcess(self, *arguments):
+        arguments = list(arguments)
+        arguments[5] |= 0x00000004  # CREATE_SUSPENDED before any descendant can spawn.
+        process, thread, pid, tid = self.native.CreateProcess(*arguments)
+        try:
+            self.job.api.assign(self.job.handle, process)
+            self.job.api.resume(thread)
+        except BaseException:
+            try:
+                self.job.api.terminate_process(process)
+            finally:
+                try:
+                    self.native.CloseHandle(thread)
+                finally:
+                    self.native.CloseHandle(process)
+            raise
+        # CPython takes hp ownership and closes ht after this successful return.
+        self.job.raw_process, self.job.raw_thread = process, thread
+        return process, thread, pid, tid
+
+
+class _OwnedWindowsPopen(subprocess.Popen):
+    def __init__(self, *arguments, windows_job, **options):
+        self._windows_job = windows_job
+        try:
+            super().__init__(*arguments, **options)
+        except BaseException:
+            windows_job.stop(self if hasattr(self, "_handle") else None)
+            raise
+
+    def _execute_child(self, *arguments, **options):
+        original = subprocess.Popen._execute_child
+        if sys.version_info[:2] != (3, 12) or "_winapi" not in original.__globals__:
+            raise RuntimeError("受控 Windows 训练启动仅支持已核验的 Python 3.12 subprocess")
+        namespace = dict(original.__globals__)
+        namespace["_winapi"] = _WindowsCreateProcessProxy(namespace["_winapi"], self._windows_job)
+        local = FunctionType(original.__code__, namespace, original.__name__, original.__defaults__, original.__closure__)
+        local.__kwdefaults__ = original.__kwdefaults__
+        result = local(self, *arguments, **options)
+        self._windows_job.raw_process = None  # Successful CPython hp ownership.
+        return result
+
+
+def _start_windows_process(args, **options):
+    job = _WindowsJob()
     try:
-        descendants = psutil.Process(process.pid).children(recursive=True)
-    except psutil.Error:
-        descendants = []
-    # taskkill handles grandchildren that appeared after our initial snapshot.
-    # A parent that already exited may no longer be addressable by taskkill;
-    # the captured psutil handles still cover its known descendants.
-    if process.poll() is None:
-        try:
-            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           check=False, timeout=10)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-    for child in reversed(descendants):
-        try:
-            child.kill()
-        except psutil.Error:
-            pass
-    if process.poll() is None:
-        process.kill()
-    process.wait(timeout=5)
-    _, alive = psutil.wait_procs(descendants, timeout=5)
-    living = []
-    for child in alive:
-        try:
-            if child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
-                living.append(child)
-        except psutil.Error:
-            pass
-    if living:
-        for child in living:
-            try:
-                child.kill()
-            except psutil.Error:
-                pass
-        _, alive = psutil.wait_procs(living, timeout=5)
-        for child in alive:
-            try:
-                if child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
-                    raise RuntimeError("训练取消后仍有未结束的自有子进程")
-            except psutil.Error:
-                pass
+        process = _OwnedWindowsPopen(args, windows_job=job, **options)
+    except BaseException:
+        job.stop()
+        raise
+    return process, job
 
 
 def validate_parameters(parameters=None):
@@ -452,6 +623,9 @@ class TrainingCenter:
                         target=(root/asset[file_key]).resolve()
                         if not target.is_relative_to(root.resolve()) or _file_hash(target)!=asset[sha_key]:
                             raise ValueError("当前活动选择账本资产改变")
+                        if file_key == "path":
+                            from my_strategy.services.czsc_account_artifacts import validate_account_artifact
+                            validate_account_artifact(target, expected_sha256=asset[sha_key])
                         files.append(target)
         # Immutable current weights, targets, code and external frozen sources
         # share the cache signature; any change forces a complete cold check.
@@ -1164,17 +1338,23 @@ class TrainingCenter:
 
     @staticmethod
     def _run_process(args, log_path, progress, check_cancel, *, initial_ids=None, source_total=0, source_reuse=None):
+        windows_job = None
         process_options = (dict(creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
                            if _is_windows() else dict(start_new_session=True))
-        process = subprocess.Popen(args, cwd=PROJECT_ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace", **process_options)
-        messages = queue.Queue()
-        def collect():
-            for line in process.stdout: messages.put(line)
-            messages.put(None)
-        reader = threading.Thread(target=collect, daemon=True); reader.start()
-        result_ids = dict(initial_ids or {}); done = False; dataset_counts = {}
+        options = dict(cwd=PROJECT_ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       text=True, encoding="utf-8", errors="replace", **process_options)
+        if _is_windows():
+            process, windows_job = _start_windows_process(args, **options)
+        else:
+            process = subprocess.Popen(args, **options)
+        reader = None
         try:
+            messages = queue.Queue()
+            def collect():
+                for line in process.stdout: messages.put(line)
+                messages.put(None)
+            reader = threading.Thread(target=collect, daemon=True); reader.start()
+            result_ids = dict(initial_ids or {}); done = False; dataset_counts = {}
             with log_path.open("w", encoding="utf-8") as handle:
                 if source_reuse:
                     event=dict(source_native_run_id=source_reuse["source_native_run_id"],
@@ -1224,7 +1404,6 @@ class TrainingCenter:
             if code: raise ValueError(f"训练阶段失败，退出码 {code}；日志：{log_path}")
         except BaseException:
             if _is_windows():
-                _terminate_windows_process_tree(process)
                 raise
             import psutil
             try: descendants = psutil.Process(process.pid).children(recursive=True)
@@ -1267,6 +1446,14 @@ class TrainingCenter:
                     except psutil.Error: pass
                 psutil.wait_procs(live, timeout=5)
             raise
+        finally:
+            if windows_job is not None:
+                windows_job.stop(process)
+                if reader is not None and reader.ident is not None:
+                    reader.join(timeout=5)
+                    if reader.is_alive():
+                        raise RuntimeError("训练自有进程已停止但日志管道仍未释放")
+                process.stdout.close()
         return result_ids
 
     def _model(self, run_id):
@@ -1516,7 +1703,8 @@ class TrainingCenter:
                     path = (root / asset["path"]).resolve(); ledger = (root / asset["ledger_path"]).resolve()
                     if not path.is_relative_to(root.resolve()) or not ledger.is_relative_to(root.resolve()): raise ValueError("比较路径越界")
                     if _file_hash(path) != asset["sha256"] or _file_hash(ledger) != asset["ledger_sha256"]: raise ValueError("Broker 账本证据改变")
-                    account = json.loads(path.read_text()); context = account["series_context"]
+                    from my_strategy.services.czsc_account_artifacts import read_account_artifact
+                    account = read_account_artifact(path, expected_sha256=asset["sha256"]); context = account["series_context"]
                     symbols.append(account["symbol"])
                     if context.get("source_hash") != source_hashes.get(account["symbol"]) or context.get("calendar_hash") != stable_hash(calendar):
                         raise ValueError("Broker 账本来源或日历与冻结输入不同")
@@ -1646,7 +1834,8 @@ def _compare_stock(record, specification):
                 metrics = audit_account(account, specification["calendar"])
                 target = assets_root / window["name"] / key / (record["symbol"].replace(".", "_") + ".json")
                 evidence = {k:account[k] for k in ("symbol", "series_context", "ledger", "daily", "cost_model", "terminal_state")}
-                _save(target, evidence)
+                from my_strategy.services.czsc_account_artifacts import write_account_artifact
+                write_account_artifact(target, evidence)
                 ledger = Ledger()
                 ledger.entries = [LedgerEntry(**{k:v for k,v in row.items() if k in LedgerEntry.__dataclass_fields__}) for row in account["ledger"]]
                 csv_path = target.with_suffix(".ledger.csv"); ledger.to_frame().to_csv(csv_path, index=False)

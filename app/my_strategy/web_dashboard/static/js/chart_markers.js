@@ -49,13 +49,13 @@
       if (excluded) ignoredCount++;
       const version = consensusVersion || row.version || row.consensus_version;
       const sourceFrequency = row.source_frequency || row.signal_frequency || row.frequency || '日线';
-      const nativePeriodSignal = !execution && ['consensus','account_action'].includes(row.source) && ['trend_consensus'].includes(version)
+      const nativePeriodSignal = !execution && ['consensus','account_action','reference_consensus'].includes(row.source) && ['trend_consensus'].includes(version)
         && sourceFrequency !== '日线' && sourceFrequency === frequency;
       const bucketDate = nativePeriodSignal ? day(row.source_period_date || row.period_end || row.time || row.date) : original;
       const key = periodKey(bucketDate,frequency), bar = periodBars.get(key);
       // Daily final decisions are already known facts. A forming weekly/monthly
       // display bucket must not defer them as if they were native period signals.
-      const dailyProjection = !execution && ['consensus','account_action'].includes(row.source) && ['trend_consensus'].includes(version)
+      const dailyProjection = !execution && ['consensus','account_action','reference_consensus'].includes(row.source) && ['trend_consensus'].includes(version)
         && sourceFrequency === '日线' && frequency !== '日线';
       const time = dailyProjection && bar ? day(bar.time) : byPeriod.get(key);
       const closedAt = frequency === '日线' ? time : observedDaily.find((date) => periodKey(date,frequency) > key);
@@ -126,7 +126,7 @@
     if (!time) return '点击最终 B/S 或对应 K 线，查看多 Agent 判断；悬浮只切换指标与筹码。';
     const items = mappings.filter((item) => item.bar_date === time && item.displayed !== false);
     if (!items.length) return `${time} · 该K线无买卖标记`;
-    return items.map((item) => `${item.action === 'BUY' ? '买入' : '卖出'}${item.kind === 'execution' ? '成交' : item.source === 'consensus' ? '最终点' : '意图'} ${item.original_date}${frequency === '日线' ? '' : item.daily_confirmed && item.period_status === 'forming' ? ` · 日线已确认／${frequency}周期形成中` : ` · ${frequency}闭合 ${item.closed_at || '时间待核验'}`}`).join('；');
+    return items.map((item) => `${item.action === 'BUY' ? '买入' : '卖出'}${item.kind === 'execution' ? '成交' : item.source === 'reference_consensus' ? '参考点' : item.source === 'consensus' ? '最终点' : '意图'} ${item.original_date}${frequency === '日线' ? '' : item.daily_confirmed && item.period_status === 'forming' ? ` · 日线已确认／${frequency}周期形成中` : ` · ${frequency}闭合 ${item.closed_at || '时间待核验'}`}`).join('；');
   }
   const api = {periodKey,build,describe};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

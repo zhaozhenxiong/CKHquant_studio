@@ -140,10 +140,11 @@ def _event(event):
         "available_at": str(event.get("first_available_at") or event.get("available_at"))}
 
 
-def stock_facts(symbol, dates, *, overlay=None, failure=None, sector=None, name=""):
+def stock_facts(symbol, dates, *, overlay=None, failure=None, sector=None, name="", analysis_mode=None):
     """Missing market sessions remain facts, never forward-filled opinions."""
     sector = sector or {"id": UNKNOWN, "name": "未知行业"}
     overlay = overlay or {}
+    reference = (analysis_mode or overlay.get("analysis_mode")) == "reference"
     rows = {_day(row["date"]): row for row in overlay.get("rows", [])}
     first_candidates, candidate_seen = {}, set()
     for day, row in sorted(rows.items()):
@@ -212,6 +213,12 @@ def stock_facts(symbol, dates, *, overlay=None, failure=None, sector=None, name=
             account_buy=account_row is not None and action == "BUY", account_sell=account_row is not None and action == "SELL",
             filled_buy="BUY" in fills[day], filled_sell="SELL" in fills[day], holding=shares is not None and shares > 0,
             failed=failure is not None, missing_price=not available and failure is None)
+        if reference:
+            quality_status = "reference_out_of_scope"
+            shares = None
+            for key in ("risk_blocked", "hr_scored_passed", "hr_scored_rejected", "hr_unscored",
+                        "account_buy", "account_sell", "filled_buy", "filled_sell", "holding"):
+                counts[key] = False
         wyckoff = agents.get("wyckoff") or {}
         support = dict.fromkeys(SUPPORT_KEYS)
         if available and wyckoff.get("status") == "scored":
@@ -236,17 +243,19 @@ def stock_facts(symbol, dates, *, overlay=None, failure=None, sector=None, name=
         if not available:
             reasons = ["scan_failed" if failure is not None else "missing_market_session_price"]
         facts.append({"symbol": symbol, "name": name, "date": day, "sector_id": sector["id"],
+            "analysis_mode": "reference" if reference else "backtest", "reference_only": reference,
+            "account_scope": "none" if reference else "research_simulation",
             "sector": sector["name"], "price_available": available,
             "input_available": available and any((agents.get(source) or {}).get("status") == "scored" for source in ("ma", "structure", "wyckoff")),
             "model_scored": available and (agents.get("ma") or {}).get("status") == "scored",
             "quality_status": quality_status, "high_return_probability": _number(quality.get("probability")) if available and quality_status in {"scored_passed", "scored_rejected"} else None,
-            "direction": direction, "account_action": action if account_row else "UNAVAILABLE",
-            "holding_shares": shares, "account_available": account_row is not None, "counts": counts, "support": support,
+            "direction": direction, "account_action": "UNAVAILABLE" if reference else action if account_row else "UNAVAILABLE",
+            "holding_shares": shares, "account_available": False if reference else account_row is not None, "counts": counts, "support": support,
             "reason_codes": reasons, "failure": str((failure or {}).get("error") or "") if failure is not None else None,
             "new_events": new, "active_events": list(active.values()),
             "invalidated_events": len(w_eval.get("invalidations_at_day", [])) if available else 0,
             "model_resolution": resolution,
-            "account_id": (account.get("context") or account.get("series_context") or {}).get("account_id")})
+            "account_id": None if reference else (account.get("context") or account.get("series_context") or {}).get("account_id")})
     return facts
 
 
@@ -261,7 +270,8 @@ def _add(target, fact):
     for key in ("failed", "missing_price"):
         target["coverage"][key] += int(fact["counts"][key])
     target["counts"].update({key: int(fact["counts"][key]) for key in COUNT_KEYS})
-    target["hr_status"][fact["quality_status"]] += 1
+    if fact.get("analysis_mode") != "reference":
+        target["hr_status"][fact["quality_status"]] += 1
     for kind in ("new", "active"):
         items = fact[kind + "_events"]
         target["events"][kind + "_total"] += len(items)
@@ -309,7 +319,8 @@ class MarketHistoryBuilder:
         if symbol not in self.symbols or symbol in self.processed:
             raise ValueError("市场历史股票必须属于固定股票池且不能重复")
         facts = stock_facts(symbol, self.dates, overlay=overlay, failure=failure,
-            sector=self.classifications[symbol], name=self.names.get(symbol, ""))
+            sector=self.classifications[symbol], name=self.names.get(symbol, ""),
+            analysis_mode=self.contract.get("analysis_mode"))
         for fact in facts:
             _add(self.daily[fact["date"]], fact)
             _add(self.sectors[fact["sector_id"]]["daily"][fact["date"]], fact)
@@ -326,7 +337,10 @@ class MarketHistoryBuilder:
     def finish(self):
         if set(self.symbols) != self.processed:
             raise ValueError("市场历史未覆盖固定股票池的全部成功及失败标的")
+        reference = self.contract.get("analysis_mode") == "reference"
         return {"version": VERSION, "run_id": self.run_id,
+            "analysis_mode": "reference" if reference else "backtest", "reference_only": reference,
+            "account_scope": "none" if reference else "research_simulation",
             "strategy_version": self.contract.get("strategy_version") or STRATEGY_ID,
             "dates": self.dates, "window_sessions": self.window_sessions, "available_sessions": len(self.dates),
             "window_start": self.dates[0], "window_end": self.dates[-1], "requested_end": self.end,
@@ -337,10 +351,10 @@ class MarketHistoryBuilder:
                 for sector in sorted(self.sectors.values(), key=lambda item: (item["id"] == UNKNOWN, item["name"]))],
             "unknown_sector_id": UNKNOWN, "event_types": sorted(self.types.values(), key=lambda item: item["id"]),
             "support_unit": "fraction_0_1", "publication_allowed": False,
-            "notes": ["最近30个已核验交易日；每股一次连续回放，显示窗口不重置账户。",
+            "notes": ["最近30个已核验交易日；每股按时点独立计算方向参考，不创建资金或持仓账户。" if reference else "最近30个已核验交易日；每股一次连续回放，显示窗口不重置账户。",
                 "分母为此次固定扫描股票池；缺行情、不可评分与失败均保留，不自动认定为停牌。",
                 "固定股票池回溯统计不等于历史上市、退市及ST身份完整复原的历史市场股票池。",
-                "方向诊断、最终账户意图和实际成交分别统计；未评估概率不是0或负例。",
+                "B/S统计表示方向参考；高收益与实际持仓退出概率不在参考人口中评估。" if reference else "方向诊断、最终账户意图和实际成交分别统计；未评估概率不是0或负例。",
                 "新增事件按首次可见时间去重；有效存量仅计已确认且仍有有效强度的量价事件。",
-                "历史判断由既有按日模型路由和冻结持仓政策生成，不改变评分及交易规则。",
+                "历史判断使用既有因果证据和严格按日模型路由；缺模型保持不可用。" if reference else "历史判断由既有按日模型路由和冻结持仓政策生成，不改变评分及交易规则。",
                 self.classification["note"], "均值仅使用可用量价输入，强度单位为0至1。"]}

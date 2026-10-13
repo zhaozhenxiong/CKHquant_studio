@@ -30,6 +30,16 @@ def audit_stage_assets(root, relative, *, expected_symbols, expected_population=
             path=Path(asset['path']).resolve()
             if not path.is_relative_to(directory) or _file_hash(path)!=asset['sha256']:
                 raise ValueError('stored reassessment account/label asset drift')
+        from my_strategy.services.czsc_account_artifacts import validate_account_artifact
+        for name in ('reference_account.json','candidate_clones.json','holding_pairs.json'):
+            proof=validate_account_artifact(Path(record['files'][name]['path']),
+                expected_sha256=record['files'][name]['sha256'])
+            linked=record['files'].get(proof['asset'])
+            if not linked or linked.get('sha256')!=proof['asset_sha256']:
+                raise ValueError('compact account graph missing from frozen dataset index')
+            linked_path=Path(linked['path']).resolve()
+            if linked_path!=Path(record['files'][name]['path']).resolve().parent/proof['asset']:
+                raise ValueError('compact account graph index path mismatch')
     if set(manifest.get('pooled_files') or {})!={'entries','exits','episodes'}:
         raise ValueError('incomplete pooled reassessment training data')
     for asset in manifest['pooled_files'].values():
