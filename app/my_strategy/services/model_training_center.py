@@ -113,9 +113,76 @@ def _native_input_contract(config):
     return {**body, "contract_hash": stable_hash(body)}
 
 
+def _is_windows():
+    return os.name == "nt"
+
+
 def _asset_signature(paths):
-    return tuple((str(path), value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
-                 for path in paths for value in [path.stat()])
+    paths = tuple(paths)
+    signature = tuple((str(path), value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+                      for path in paths for value in [path.stat()])
+    if _is_windows():
+        # Windows ctime is the birth time, so equal metadata is not a content
+        # proof after a same-length write followed by restoring mtime.
+        return tuple((*item, _file_hash(path)) for item, path in zip(signature, paths))
+    return signature
+
+
+def _event_asset_signature(paths):
+    paths = tuple(paths)
+    signature = tuple((str(path), path.stat().st_size, path.stat().st_mtime_ns,
+                       path.stat().st_ctime_ns, path.stat().st_ino) for path in paths)
+    if _is_windows():
+        return tuple((*item, _file_hash(path)) for item, path in zip(signature, paths))
+    return signature
+
+
+def _terminate_windows_process_tree(process):
+    """Stop only the launched process and its descendants, then verify exit."""
+    import psutil
+    try:
+        descendants = psutil.Process(process.pid).children(recursive=True)
+    except psutil.Error:
+        descendants = []
+    # taskkill handles grandchildren that appeared after our initial snapshot.
+    # A parent that already exited may no longer be addressable by taskkill;
+    # the captured psutil handles still cover its known descendants.
+    if process.poll() is None:
+        try:
+            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           check=False, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    for child in reversed(descendants):
+        try:
+            child.kill()
+        except psutil.Error:
+            pass
+    if process.poll() is None:
+        process.kill()
+    process.wait(timeout=5)
+    _, alive = psutil.wait_procs(descendants, timeout=5)
+    living = []
+    for child in alive:
+        try:
+            if child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
+                living.append(child)
+        except psutil.Error:
+            pass
+    if living:
+        for child in living:
+            try:
+                child.kill()
+            except psutil.Error:
+                pass
+        _, alive = psutil.wait_procs(living, timeout=5)
+        for child in alive:
+            try:
+                if child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
+                    raise RuntimeError("训练取消后仍有未结束的自有子进程")
+            except psutil.Error:
+                pass
 
 
 def validate_parameters(parameters=None):
@@ -373,7 +440,7 @@ class TrainingCenter:
         with self._proof_lock:
             cached=self._proof_cache.get(key)
             if cached and cached["payload_hash"]==stable_hash(payload):
-                signature=tuple((str(p),p.stat().st_size,p.stat().st_mtime_ns,p.stat().st_ctime_ns,p.stat().st_ino) for p in cached["files"])
+                signature=_event_asset_signature(cached["files"])
                 if signature==cached["signature"]: return payload
         _,report=self._model(payload["run_id"])
         records=self._evaluation_records(report,plan)
@@ -395,7 +462,7 @@ class TrainingCenter:
             files.extend(resolve_frozen_asset(record[k],runs_root=self.runs_root) for k in ("path","raw_path","native_path") if record.get(k))
         files.extend(self._source_provenance_files(report,plan))
         files=sorted(set(files),key=str)
-        signature=tuple((str(p),p.stat().st_size,p.stat().st_mtime_ns,p.stat().st_ctime_ns,p.stat().st_ino) for p in files)
+        signature=_event_asset_signature(files)
         with self._proof_lock:
             self._proof_cache[key]=dict(files=files,signature=signature,payload_hash=stable_hash(payload))
         return payload
@@ -1097,8 +1164,10 @@ class TrainingCenter:
 
     @staticmethod
     def _run_process(args, log_path, progress, check_cancel, *, initial_ids=None, source_total=0, source_reuse=None):
+        process_options = (dict(creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
+                           if _is_windows() else dict(start_new_session=True))
         process = subprocess.Popen(args, cwd=PROJECT_ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace", start_new_session=True)
+            text=True, encoding="utf-8", errors="replace", **process_options)
         messages = queue.Queue()
         def collect():
             for line in process.stdout: messages.put(line)
@@ -1154,6 +1223,9 @@ class TrainingCenter:
             code = process.wait()
             if code: raise ValueError(f"训练阶段失败，退出码 {code}；日志：{log_path}")
         except BaseException:
+            if _is_windows():
+                _terminate_windows_process_tree(process)
+                raise
             import psutil
             try: descendants = psutil.Process(process.pid).children(recursive=True)
             except psutil.Error: descendants = []
@@ -1398,7 +1470,7 @@ class TrainingCenter:
             if json.loads(path.read_text()) != result: raise ValueError("已有冻结比较不可覆盖，请重新预检与比较")
         else: _save(path, result)
         with closing(_connect(self.registry_path)) as conn:
-            conn.execute("INSERT INTO current_model_comparisons VALUES (?,?,?) ON CONFLICT(run_id) DO UPDATE SET report_path=excluded.report_path,sha256=excluded.sha256", (run_id, str(path.relative_to(self.runs_root)), _file_hash(path)))
+            conn.execute("INSERT INTO current_model_comparisons VALUES (?,?,?) ON CONFLICT(run_id) DO UPDATE SET report_path=excluded.report_path,sha256=excluded.sha256", (run_id, path.relative_to(self.runs_root).as_posix(), _file_hash(path)))
             conn.commit()
         return result
 
@@ -1578,8 +1650,8 @@ def _compare_stock(record, specification):
                 ledger = Ledger()
                 ledger.entries = [LedgerEntry(**{k:v for k,v in row.items() if k in LedgerEntry.__dataclass_fields__}) for row in account["ledger"]]
                 csv_path = target.with_suffix(".ledger.csv"); ledger.to_frame().to_csv(csv_path, index=False)
-                arms[key] = dict(metrics=metrics, asset=dict(path=str(target.relative_to(root)), sha256=_file_hash(target),
-                    ledger_path=str(csv_path.relative_to(root)), ledger_sha256=_file_hash(csv_path)))
+                arms[key] = dict(metrics=metrics, asset=dict(path=target.relative_to(root).as_posix(), sha256=_file_hash(target),
+                    ledger_path=csv_path.relative_to(root).as_posix(), ledger_sha256=_file_hash(csv_path)))
         windows.append(arms)
     return dict(symbol=record["symbol"], windows=windows)
 

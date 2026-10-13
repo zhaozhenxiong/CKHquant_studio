@@ -186,7 +186,7 @@ def add_current_selection_database(repo: Path, runs: Path) -> Path:
     evidence = runs / "training/validation/model_comparison/window/candidate.json"
     write_json(evidence, {"ledger": [], "qualification": "package content fixture only"})
     comparison = {"run_id": "training", "plan_id": plan["plan_id"], "plan_hash": plan["plan_hash"],
-        "windows": [{"arms": {"candidate": {"assets": [{"path": str(evidence.relative_to(runs / 'training')), "sha256": file_sha256(evidence)}]}}}]}
+        "windows": [{"arms": {"candidate": {"assets": [{"path": evidence.relative_to(runs / 'training').as_posix(), "sha256": file_sha256(evidence)}]}}}]}
     path = runs / "training/validation/model_comparison" / plan["plan_id"] / "comparison.json"; write_json(path, comparison)
     event = {"run_id": "training", "previous_run_id": None, "comparison_sha256": stable_hash(comparison),
              "plan_hash": plan["plan_hash"], "effective_from": "2026-01-07"}
@@ -199,7 +199,7 @@ def add_current_selection_database(repo: Path, runs: Path) -> Path:
                            "CREATE TRIGGER immutable_events BEFORE DELETE ON current_model_events BEGIN SELECT RAISE(ABORT,'immutable'); END;")
         conn.execute("INSERT INTO current_model_events VALUES (1,'select',?,'2026-01-06')", (json.dumps(event),))
         conn.execute("INSERT INTO current_model_selection VALUES (1,'training',1,'2026-01-07')")
-        conn.execute("INSERT INTO current_model_comparisons VALUES ('training',?,?)", (str(path.relative_to(runs)), file_sha256(path)))
+        conn.execute("INSERT INTO current_model_comparisons VALUES ('training',?,?)", (path.relative_to(runs).as_posix(), file_sha256(path)))
         conn.execute("INSERT INTO czsc_runs VALUES ('scan','scan/reports/czsc.json')"); conn.commit()
     return database
 

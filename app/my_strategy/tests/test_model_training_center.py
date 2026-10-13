@@ -237,7 +237,7 @@ def verified_comparison(service, monkeypatch):
                 value["series_context"]["calendar_hash"] = stable_hash(calendar)
                 path = root / "validation" / window["name"] / name / (symbol+".json"); center._save(path,value)
                 ledger_path = path.with_suffix(".csv"); pd.DataFrame(value["ledger"]).to_csv(ledger_path,index=False)
-                assets.append(dict(path=str(path.relative_to(root)),sha256=center._file_hash(path),ledger_path=str(ledger_path.relative_to(root)),ledger_sha256=center._file_hash(ledger_path)))
+                assets.append(dict(path=path.relative_to(root).as_posix(),sha256=center._file_hash(path),ledger_path=ledger_path.relative_to(root).as_posix(),ledger_sha256=center._file_hash(ledger_path)))
                 measures.append(center.audit_account(value,calendar))
             arms[name] = dict(assets=assets,metrics=center.aggregate_account_metrics(measures))
         result["windows"].append(dict(window=window,arms=arms))
