@@ -70,6 +70,77 @@ def _atomic(path: Path, value: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _windows_allocated_bytes(path: Path) -> int:
+    """Query allocation; ordinary GetCompressedFileSizeW is only logical size.
+
+    Compression/sparse bytes use GetCompressedFileSizeW; regular files use
+    FILE_STANDARD_INFO.AllocationSize. All handles are opened read-only.
+    """
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+
+    class FileStandardInfo(ctypes.Structure):
+        _fields_ = [("AllocationSize", ctypes.c_longlong),
+                    ("EndOfFile", ctypes.c_longlong),
+                    ("NumberOfLinks", ctypes.c_uint32),
+                    ("DeletePending", ctypes.c_ubyte), ("Directory", ctypes.c_ubyte)]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    attributes = kernel.GetFileAttributesW
+    attributes.argtypes = [wintypes.LPCWSTR]
+    attributes.restype = ctypes.c_uint32
+    wide_path = str(path.absolute())
+    if not wide_path.startswith("\\\\?\\"):
+        wide_path = ("\\\\?\\UNC\\" + wide_path[2:] if wide_path.startswith("\\\\")
+                     else "\\\\?\\" + wide_path)
+    flags = int(attributes(wide_path))
+    if flags == 0xFFFFFFFF:
+        raise OSError(ctypes.get_last_error(), "GetFileAttributesW failed")
+    if flags & (0x800 | 0x200):  # FILE_ATTRIBUTE_COMPRESSED / SPARSE_FILE
+        compressed = kernel.GetCompressedFileSizeW
+        compressed.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_uint32)]
+        compressed.restype = ctypes.c_uint32
+        high = ctypes.c_uint32()
+        ctypes.set_last_error(0)
+        low = int(compressed(wide_path, ctypes.byref(high)))
+        error = ctypes.get_last_error()
+        # INVALID_FILE_SIZE can also be a valid low DWORD; last-error disambiguates.
+        if low == 0xFFFFFFFF and error:
+            raise OSError(error, "GetCompressedFileSizeW failed")
+        return (int(high.value) << 32) | low
+    information = kernel.GetFileInformationByHandleEx
+    information.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    information.restype = wintypes.BOOL
+    info = FileStandardInfo()
+    with path.open("rb") as handle:
+        if not information(msvcrt.get_osfhandle(handle.fileno()), 1,
+                           ctypes.byref(info), ctypes.sizeof(info)):
+            raise OSError(ctypes.get_last_error(), "FileStandardInfo allocation query failed")
+    if info.AllocationSize < 0 or info.Directory:
+        raise ValueError("invalid file allocation information")
+    return int(info.AllocationSize)
+
+
+def _physical_storage_stats(directory: Path, files: dict[str, Any]) -> dict[str, Any]:
+    """Storage diagnostics never turn a successfully saved account into failure."""
+    if os.name == "nt":
+        try:
+            return {"physical_bytes": sum(_windows_allocated_bytes(directory / name) for name in files),
+                    "physical_bytes_source": "windows_file_allocation_and_compressed_storage"}
+        except Exception as error:
+            return {"physical_bytes": None, "physical_bytes_source": "windows_file_allocation_and_compressed_storage",
+                    "physical_bytes_unavailable_reason": "windows_allocation_query_unavailable_or_failed",
+                    "physical_bytes_error_type": type(error).__name__,
+                    "physical_bytes_error_code": getattr(error, "winerror", None) or getattr(error, "errno", None)}
+    try:
+        # Preserve the original POSIX syscall path, units, order, and output.
+        return {"physical_bytes": sum((directory / name).stat().st_blocks * 512 for name in files)}
+    except (AttributeError, OSError) as error:
+        return {"physical_bytes": None, "physical_bytes_unavailable_reason": "posix_allocated_blocks_unavailable",
+                "physical_bytes_error_type": type(error).__name__}
+
+
 class _Encoder:
     def __init__(self) -> None:
         self.nodes: list[dict[str, Any]] = []
@@ -159,7 +230,7 @@ def write_account_artifacts(directory: str | Path, documents: dict[str, Any]) ->
              "deduplicated_composite_occurrences": encoder.containers - len(encoder.nodes),
              "graph_canonical_bytes": len(graph), "graph_compressed_bytes": len(content),
              "stored_bytes": sum(v["bytes"] for v in files.values()),
-             "physical_bytes": sum((directory / name).stat().st_blocks * 512 for name in files),
+             **_physical_storage_stats(directory, files),
              "asset": asset_name, "asset_sha256": asset_sha}
     return {"files": files, "storage_stats": stats}
 

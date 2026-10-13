@@ -603,8 +603,14 @@ def test_cancel_kills_own_group_when_child_ignores_sigterm(tmp_path):
     try:
         with pytest.raises(RuntimeError,match="cancel own"):
             center.TrainingCenter._run_process([sys.executable,"-u","-c",code],tmp_path/"group.log",progress,check)
+        assert pids, "The cancellation must observe an actual owned child"
         for pid in pids:
-            assert not psutil.pid_exists(pid) or psutil.Process(pid).status()==psutil.STATUS_ZOMBIE
+            try:
+                process = psutil.Process(pid)
+                assert not process.is_running() or process.status()==psutil.STATUS_ZOMBIE
+            except psutil.NoSuchProcess:
+                # The owned job can finish between the liveness and status reads.
+                pass
     finally:
         for pid in pids:
             if psutil.pid_exists(pid):

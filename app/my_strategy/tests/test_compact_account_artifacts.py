@@ -191,3 +191,159 @@ def test_graph_expansion_bomb_is_rejected_without_materialization(tmp_path):
     rewrite_graph(tmp_path, envelope, graph)
     with pytest.raises(ValueError, match='beyond supported size'):
         validate_account_artifact(path)
+
+
+class _StorageApiFunction:
+    def __init__(self, function):
+        self.function, self.calls = function, []
+
+    def __call__(self, *args):
+        self.calls.append(args)
+        return self.function(*args)
+
+
+def _storage_windows_api(monkeypatch, *, flags=0x80, allocation=4096, low=4096,
+                         high=0, last_error=0, info_success=True):
+    import ctypes
+    import sys
+    from types import SimpleNamespace
+    errors = [last_error]
+
+    def compressed(path, pointer):
+        ctypes.cast(pointer, ctypes.POINTER(ctypes.c_uint32)).contents.value = high
+        errors[0] = last_error
+        return low
+
+    def information(handle, info_class, pointer, size):
+        assert handle == 12345 and info_class == 1 and size == 24
+        pointer._obj.AllocationSize = allocation
+        pointer._obj.EndOfFile = 5
+        errors[0] = last_error
+        return int(info_success)
+
+    kernel = SimpleNamespace(GetFileAttributesW=_StorageApiFunction(lambda _: flags),
+                             GetCompressedFileSizeW=_StorageApiFunction(compressed),
+                             GetFileInformationByHandleEx=_StorageApiFunction(information))
+    monkeypatch.setattr(ctypes, 'WinDLL', lambda *args, **kwargs: kernel, raising=False)
+    monkeypatch.setattr(ctypes, 'get_last_error', lambda: errors[0], raising=False)
+    monkeypatch.setattr(ctypes, 'set_last_error', lambda value: errors.__setitem__(0, value), raising=False)
+    monkeypatch.setitem(sys.modules, 'msvcrt', SimpleNamespace(get_osfhandle=lambda fd: 12345))
+    return kernel
+
+
+def _storage_platform(monkeypatch, name):
+    import os
+    from types import SimpleNamespace
+    from my_strategy.services import czsc_account_artifacts as accounts
+    # Keep the real global os.name/Path platform intact for cross-platform CI.
+    monkeypatch.setattr(accounts, 'os', SimpleNamespace(name=name, fsync=os.fsync))
+    return accounts
+
+
+def test_windows_storage_regular_file_reports_allocation_not_logical_size(tmp_path, monkeypatch):
+    from my_strategy.services import czsc_account_artifacts as accounts
+    path = tmp_path / 'regular.json'
+    path.write_bytes(b'abcde')
+    kernel = _storage_windows_api(monkeypatch, allocation=4096, low=5)
+    assert accounts._windows_allocated_bytes(path) == 4096
+    assert len(kernel.GetFileInformationByHandleEx.calls) == 1
+    assert not kernel.GetCompressedFileSizeW.calls
+
+
+@pytest.mark.parametrize('flags', [0x800, 0x200, 0xA00])
+def test_windows_storage_compressed_sparse_high_dword(tmp_path, monkeypatch, flags):
+    from my_strategy.services import czsc_account_artifacts as accounts
+    path = tmp_path / 'compressed.json'
+    path.write_bytes(b'abcde')
+    kernel = _storage_windows_api(monkeypatch, flags=flags, low=7, high=2)
+    assert accounts._windows_allocated_bytes(path) == (2 << 32) | 7
+    assert len(kernel.GetCompressedFileSizeW.calls) == 1
+    assert not kernel.GetFileInformationByHandleEx.calls
+
+
+def test_windows_storage_invalid_low_dword_zero_error_is_success(tmp_path, monkeypatch):
+    from my_strategy.services import czsc_account_artifacts as accounts
+    path = tmp_path / 'sparse.json'
+    path.write_bytes(b'abcde')
+    _storage_windows_api(monkeypatch, flags=0x200, low=0xFFFFFFFF, high=3, last_error=0)
+    assert accounts._windows_allocated_bytes(path) == (3 << 32) | 0xFFFFFFFF
+
+
+@pytest.mark.parametrize('flags,info_success,low,error', [(0xFFFFFFFF, True, 3, 5),
+                                                       (0x800, True, 0xFFFFFFFF, 5),
+                                                       (0x80, False, 3, 6)])
+def test_windows_storage_failure_is_null_with_reason(tmp_path, monkeypatch, flags, info_success, low, error):
+    path = tmp_path / 'failure.json'
+    path.write_bytes(b'abcde')
+    _storage_windows_api(monkeypatch, flags=flags, info_success=info_success, low=low, last_error=error)
+    accounts = _storage_platform(monkeypatch, 'nt')
+    stats = accounts._physical_storage_stats(tmp_path, {path.name: {}})
+    assert stats['physical_bytes'] is None
+    assert stats['physical_bytes_unavailable_reason'] == 'windows_allocation_query_unavailable_or_failed'
+    assert stats['physical_bytes_error_code'] == error
+
+
+def test_windows_storage_api_unavailable_keeps_written_semantic_assets(tmp_path, monkeypatch):
+    import ctypes
+    import sys
+    from types import SimpleNamespace
+    def unavailable(*args, **kwargs):
+        raise AttributeError('unavailable')
+    monkeypatch.setattr(ctypes, 'WinDLL', unavailable, raising=False)
+    monkeypatch.setitem(sys.modules, 'msvcrt', SimpleNamespace())
+    _storage_platform(monkeypatch, 'nt')
+    documents = account_evidence()
+    result = write_account_artifacts(tmp_path, documents)
+    assert result['storage_stats']['physical_bytes'] is None
+    assert result['storage_stats']['physical_bytes_error_type'] == 'AttributeError'
+    for name, original in documents.items():
+        entry = result['files'][name]
+        path = tmp_path / name
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == entry['sha256']
+        assert read_account_artifact(path, entry['sha256']) == original
+
+
+def test_windows_storage_partial_allocation_sum_is_not_reported(tmp_path, monkeypatch):
+    accounts = _storage_platform(monkeypatch, 'nt')
+    calls = []
+    def allocated(path):
+        calls.append(path.name)
+        if path.name == 'second':
+            raise OSError(5, 'unavailable')
+        return 8192
+    monkeypatch.setattr(accounts, '_windows_allocated_bytes', allocated)
+    stats = accounts._physical_storage_stats(tmp_path, {'first': {}, 'second': {}, 'third': {}})
+    assert stats['physical_bytes'] is None and calls == ['first', 'second']
+
+
+def test_posix_storage_preserves_stat_order_units_and_no_windows_query(monkeypatch):
+    from types import SimpleNamespace
+    accounts = _storage_platform(monkeypatch, 'posix')
+    calls = []
+    class PosixFile:
+        def __init__(self, name):
+            self.name = name
+        def stat(self):
+            calls.append(self.name)
+            return SimpleNamespace(st_blocks={'first': 8, 'second': 16}[self.name], st_size=5)
+    class Directory:
+        def __truediv__(self, name):
+            return PosixFile(name)
+    def forbidden(_):
+        raise AssertionError('POSIX must not query Windows')
+    monkeypatch.setattr(accounts, '_windows_allocated_bytes', forbidden)
+    assert accounts._physical_storage_stats(Directory(), {'first': {}, 'second': {}}) == {'physical_bytes': 24 * 512}
+    assert calls == ['first', 'second']
+
+
+def test_non_windows_unknown_allocated_blocks_explicit_null(monkeypatch):
+    from types import SimpleNamespace
+    accounts = _storage_platform(monkeypatch, 'posix')
+    class UnknownDirectory:
+        def __truediv__(self, name):
+            return self
+        def stat(self):
+            return SimpleNamespace(st_size=123456)
+    stats = accounts._physical_storage_stats(UnknownDirectory(), {'file': {}})
+    assert stats['physical_bytes'] is None
+    assert stats['physical_bytes_unavailable_reason'] == 'posix_allocated_blocks_unavailable'
