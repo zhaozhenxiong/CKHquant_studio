@@ -53,7 +53,7 @@ jobs:
       - run: python install.py --venv-dir .venv-ci --wheel-dir .scratch/native-wheel --device cpu
       - run: ${{ matrix.python }} -m my_strategy.scripts.ci_guard --skip-docker
       - run: ${{ matrix.python }} -m pip wheel . --no-deps --no-build-isolation --wheel-dir .scratch/application-wheels
-      - run: ${{ matrix.python }} -m pip install --no-deps --force-reinstall .scratch/application-wheels/khquant-0.1.3-py3-none-any.whl
+      - run: ${{ matrix.python }} -m pip install --no-deps --force-reinstall .scratch/application-wheels/khquant-0.1.4-py3-none-any.whl
       - name: Verify isolated installed application identity
         shell: python
         env:
@@ -67,12 +67,12 @@ jobs:
           import my_strategy
           path = Path(my_strategy.__file__).resolve()
           assert path.is_relative_to(Path(sys.prefix).resolve()) and 'site-packages' in path.parts
-          assert importlib.metadata.version('khquant') == '0.1.3'
-          print(json.dumps({'version': '0.1.3', 'package_path': str(path), 'prefix': sys.prefix,
+          assert importlib.metadata.version('khquant') == '0.1.4'
+          print(json.dumps({'version': '0.1.4', 'package_path': str(path), 'prefix': sys.prefix,
                             'application_import': 'installed wheel site-packages',
                             'direct_url': json.loads(importlib.metadata.distribution('khquant').read_text('direct_url.json'))}))'''
           identity = json.loads(subprocess.check_output([executable, '-I', '-c', probe], text=True))
-          wheel = Path('.scratch/application-wheels/khquant-0.1.3-py3-none-any.whl')
+          wheel = Path('.scratch/application-wheels/khquant-0.1.4-py3-none-any.whl')
           digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
           assert identity.pop('direct_url')['archive_info']['hashes']['sha256'] == digest
           identity['application_wheel_sha256'] = digest
@@ -88,7 +88,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: application-wheel-${{ matrix.os }}
-          path: .scratch/application-wheels/khquant-0.1.3-py3-none-any.whl
+          path: .scratch/application-wheels/khquant-0.1.4-py3-none-any.whl
           if-no-files-found: error
           include-hidden-files: true
       - uses: actions/upload-artifact@v4
@@ -111,12 +111,12 @@ jobs:
         with:
           pattern: wheels-*
           path: .scratch/native-assets
-      - run: python app/build_release.py --output-dir dist/releases/0.1.3 --wheel-dir .scratch/native-assets/wheels-ubuntu-latest --wheel-dir .scratch/native-assets/wheels-windows-latest --wheel-dir .scratch/native-assets/wheels-macos-15
+      - run: python app/build_release.py --output-dir dist/releases/0.1.4 --wheel-dir .scratch/native-assets/wheels-ubuntu-latest --wheel-dir .scratch/native-assets/wheels-windows-latest --wheel-dir .scratch/native-assets/wheels-macos-15
       # The portable application wheel must contain the merged native provenance
       # index, rather than a single platform job's separately verified index.
-      - run: python -m pip wheel dist/releases/0.1.3/KHQuant-0.1.3 --no-deps --no-build-isolation --wheel-dir dist/releases/0.1.3
-      - run: python dist/releases/0.1.3/KHQuant-0.1.3/install.py --venv-dir "$GITHUB_WORKSPACE/.venv-archive" --device cpu
-      - run: .venv-archive/bin/python -m pip install --no-deps --force-reinstall dist/releases/0.1.3/khquant-0.1.3-py3-none-any.whl
+      - run: python -m pip wheel dist/releases/0.1.4/KHQuant-0.1.4 --no-deps --no-build-isolation --wheel-dir dist/releases/0.1.4
+      - run: python dist/releases/0.1.4/KHQuant-0.1.4/install.py --venv-dir "$GITHUB_WORKSPACE/.venv-archive" --device cpu
+      - run: .venv-archive/bin/python -m pip install --no-deps --force-reinstall dist/releases/0.1.4/khquant-0.1.4-py3-none-any.whl
       - name: Verify final combined application wheel identity
         shell: python
         run: |
@@ -127,33 +127,33 @@ jobs:
           import my_strategy
           path = Path(my_strategy.__file__).resolve()
           assert path.is_relative_to(Path(sys.prefix).resolve()) and 'site-packages' in path.parts
-          assert importlib.metadata.version('khquant') == '0.1.3'
-          print(json.dumps({'version': '0.1.3', 'package_path': str(path), 'prefix': sys.prefix,
+          assert importlib.metadata.version('khquant') == '0.1.4'
+          print(json.dumps({'version': '0.1.4', 'package_path': str(path), 'prefix': sys.prefix,
                             'application_import': 'installed wheel site-packages',
                             'direct_url': json.loads(importlib.metadata.distribution('khquant').read_text('direct_url.json'))}))'''
           executable = str(Path('.venv-archive/bin/python').resolve())
           identity = json.loads(subprocess.check_output([executable, '-I', '-c', probe], text=True))
-          wheel = Path('dist/releases/0.1.3/khquant-0.1.3-py3-none-any.whl')
+          wheel = Path('dist/releases/0.1.4/khquant-0.1.4-py3-none-any.whl')
           digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
           assert identity.pop('direct_url')['archive_info']['hashes']['sha256'] == digest
           identity['application_wheel_sha256'] = digest
           identity['source_commit'] = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
           identity['native_provenance'] = 'combined three-platform index from assembled source package'
-          Path('dist/releases/0.1.3/installation-combined-identity.json').write_text(json.dumps(identity, indent=2), encoding='utf-8')
-      - run: .venv-archive/bin/python dist/releases/0.1.3/KHQuant-0.1.3/app/verify_installation.py --device cpu --output dist/releases/0.1.3/installation-combined-cpu.json
+          Path('dist/releases/0.1.4/installation-combined-identity.json').write_text(json.dumps(identity, indent=2), encoding='utf-8')
+      - run: .venv-archive/bin/python dist/releases/0.1.4/KHQuant-0.1.4/app/verify_installation.py --device cpu --output dist/releases/0.1.4/installation-combined-cpu.json
       - uses: actions/download-artifact@v4
         with:
           pattern: installation-*
-          path: dist/releases/0.1.3/platform-verification
+          path: dist/releases/0.1.4/platform-verification
       - name: Extend checksums with verified application and installation assets
         shell: python
         run: |
           import hashlib
           from pathlib import Path
-          root = Path('dist/releases/0.1.3')
+          root = Path('dist/releases/0.1.4')
           checksum = root / 'SHA256SUMS.txt'
           previous = checksum.read_text(encoding='utf-8')
-          assert 'KHQuant-0.1.3.zip' in previous
+          assert 'KHQuant-0.1.4.zip' in previous
           assets = [*root.glob('*.whl'), *root.glob('installation-*.json'), *root.glob('platform-verification/**/*.json')]
           assert assets and all(path.is_file() for path in assets)
           entries = ''.join(f'{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(root).as_posix()}\n' for path in sorted(assets))
@@ -163,11 +163,11 @@ jobs:
           name: KHQuant-source-release
           if-no-files-found: error
           path: |
-            dist/releases/0.1.3/*.zip
-            dist/releases/0.1.3/*.whl
-            dist/releases/0.1.3/SHA256SUMS.txt
-            dist/releases/0.1.3/installation-*.json
-            dist/releases/0.1.3/platform-verification/
+            dist/releases/0.1.4/*.zip
+            dist/releases/0.1.4/*.whl
+            dist/releases/0.1.4/SHA256SUMS.txt
+            dist/releases/0.1.4/installation-*.json
+            dist/releases/0.1.4/platform-verification/
   mps:
     if: ${{ inputs.verify_mps }}
     runs-on: [self-hosted, macOS, ARM64, khquant-mps]

@@ -1,4 +1,4 @@
-# KHQuant 0.1.3 原生安装与验收
+# KHQuant 0.1.4 原生安装与验收
 
 ## 环境和设备
 
@@ -34,7 +34,7 @@ CI 和维护者构建命令：
 
 ~~~bash
 python app/build_czsc_runtime.py --out app/vendor/wheels --no-install
-python app/build_release.py --output-dir dist/releases/0.1.3-rebuild --wheel-dir app/vendor/wheels
+python app/build_release.py --output-dir dist/releases/0.1.4-rebuild --wheel-dir app/vendor/wheels
 ~~~
 
 build_release.py 支持重复 --wheel-dir 合并三平台 CI 资产。它验证原生资产并生成源码 ZIP、完整性清单、版本来源及 SHA256SUMS.txt；不会上传远端。工作区未提交内容会包含在包中，并在 release.json 标明。

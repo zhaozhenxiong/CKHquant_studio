@@ -174,7 +174,7 @@ def test_release_assembly_is_relative_clean_and_retains_validation_document(tmp_
     app = repo / "app"
     app.mkdir(parents=True)
     for name, body in {"install.py": "# fixture installer", "RELEASE_VALIDATION.md": "# Current validation",
-        "pyproject.toml": '[project]\nversion="0.1.3"\n', "runtime-manifest.json": '{"platform_verification": {}}'}.items():
+        "pyproject.toml": '[project]\nversion="0.1.4"\n', "runtime-manifest.json": '{"platform_verification": {}}'}.items():
         (repo / name).write_text(body, encoding="utf-8")
     (app / "AGENTS.md").write_text("fixture source checkout", encoding="utf-8")
     paths = app / "my_strategy/core/paths.py"
