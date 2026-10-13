@@ -1,3 +1,15 @@
+# KHQuant 0.1.4 参数与模型选择
+
+当前默认策略为“趋势共识策略 · 有效机会重评”，独立模型族 `czsc_trend_consensus_v2`。协议基线为 `my_strategy/configs/czsc_trend_v2_strategy.json`，候选逐日重评、持续卖方退出、完整依赖重建及冻结状态迁移见[有效机会重评指南](my_strategy/docs/trend_reassessment.md)。均线／结构／量价／高收益质量权重维持40%／20%／30%／10%。
+
+公开 `current_strategy.json` 使用 `model_run_id: null`；自动选择同族合格的本地运行，无合格模型明确未训练／不可用。自己的模型选择使用独立配置或显式请求，不能把旧族模型直接当作本版重评模型。修改策略、标签或训练参数需要新来源、标签与模型；已经冻结的运行和旧0.1.3资产保留。完整训练入口为 `python -m my_strategy.scripts.train_trend_reassessment`，必须使用自己的已核验日历和来源。
+
+软件发行不授予模型收益或生产资格。近期入场头仍可能因样本不足不可用，不能通过降低8%且2R标签、放松门槛或关闭质量过滤来声称合格。当前扫描的行业是快照归组历史，通用状态导出未认证此族完整迁移。
+
+---
+
+以下保留0.1.3旧趋势族及0.1.2旧高收益族指南，供历史运行对照。
+
 # KHQuant 0.1.3 参数与模型选择
 
 当前策略名称为“趋势共识策略”。均线、结构、威科夫、高收益质量的权重为40%／20%／30%／10%；最后一项仅过滤已有买入候选。当前协议基线是 `my_strategy/configs/czsc_trend_strategy.json`，完整说明见 [趋势共识策略](my_strategy/docs/trend_consensus.md)。

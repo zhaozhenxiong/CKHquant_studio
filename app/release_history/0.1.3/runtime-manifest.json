@@ -1,0 +1,125 @@
+{
+  "schema_version": 2,
+  "application_version": "0.1.3",
+  "method": "CZSC",
+  "version": "1.0.1",
+  "source_manifest": "app/czsc-source-manifest.json",
+  "entrypoints": {
+    "windows": "khquant-native.bat",
+    "unix": "khquant-native.sh"
+  },
+  "views": [
+    "analysis",
+    "scan",
+    "backtest",
+    "watchlist",
+    "holdings",
+    "data"
+  ],
+  "capabilities": [
+    "update-data",
+    "analysis",
+    "scan",
+    "backtest",
+    "research-train",
+    "model-inference",
+    "dated-model-releases",
+    "personal-portfolio",
+    "portable-package",
+    "ma-trend-model",
+    "dual-expert-fusion",
+    "wyckoff-three-expert-shadow",
+    "actual-policy-entry-shadow",
+    "actual-holding-exit-shadow",
+    "independent-signal-points",
+    "actual-trade-episodes",
+    "high-return-two-stage-ml",
+    "signal-pinned-ma-holding-exit",
+    "three_class_trend_probability",
+    "continuous_agent_consensus",
+    "account_bound_final_actions",
+    "click_only_agent_scores",
+    "historical_reference_prices",
+    "hover_causal_chip_profile",
+    "portable_untrained_trend_defaults"
+  ],
+  "python": "3.12",
+  "devices": [
+    "auto",
+    "cpu",
+    "cuda",
+    "cuda:N",
+    "mps"
+  ],
+  "platform_verification": {
+    "macos_arm64_cpu": "see_release_validation_for_0_1_3_installed_wheel",
+    "macos_arm64_mps": "requires_0_1_3_real_hardware_installed_wheel_verification",
+    "windows_x64_cpu": "see_release_validation_for_0_1_3_installed_wheel",
+    "linux_x64_cpu": "see_release_validation_for_0_1_3_installed_wheel",
+    "windows_x64_cuda": "not_verified_0_1_3",
+    "linux_x64_cuda": "not_verified_0_1_3",
+    "macos_x64": "not_in_release_matrix"
+  },
+  "verification_report": "release-validation.json",
+  "local_verification_date": "2026-10-12",
+  "input": "stock_daily_normalized",
+  "results": "data/processed/czsc/results.db",
+  "tasks": "data/metadata/czsc_tasks.db",
+  "runs": "artifacts/runs",
+  "legacy_compatibility": false,
+  "previous_release_verification": {
+    "application_version": "0.1.2",
+    "preserved_manifest": "app/release_history/0.1.2/runtime-manifest.json"
+  },
+  "verification_scope": {
+    "source_baseline": {
+      "commit": "d8a9ae49df32d3d34efba6993cc39f23605a22b3",
+      "tested_tree_commit": "61fdfa7b0a56a2d17766b716be946a317c115cb4",
+      "linux_cpu": {
+        "passed": 1906,
+        "skipped": 15
+      },
+      "windows_cpu": {
+        "passed": 1909,
+        "skipped": 12
+      },
+      "macos_cpu": {
+        "passed": 1909,
+        "skipped": 12
+      }
+    },
+    "version_0_1_3": "separate_installed_asset_validation_required",
+    "financial_certification": false
+  },
+  "software_release": {
+    "version": "0.1.3",
+    "status": "user_authorized_software_release",
+    "authorized_by": "user",
+    "authorization_text": "把现在这个做成v0.1.3 提交到github",
+    "parameter_policy": "preserve_trend_contract_and_user_local_model_selection",
+    "research_version": "czsc_trend_consensus"
+  },
+  "parameter_profiles": {
+    "baseline": "app/my_strategy/configs/czsc_trend_strategy.json",
+    "public_selection": "app/my_strategy/configs/current_strategy.json",
+    "guide": "app/PARAMETERS.md",
+    "baseline_sha256": "53ae009778078fca08bb6c872624941998dc0c80eaee5626a735026a4c6bbb3a"
+  },
+  "model_qualification": {
+    "profitability_improvement_passed": false,
+    "independent_forward_validation_complete": false,
+    "ordinary_routes": "account_bound_research_trend_consensus",
+    "production_qualification": "pending",
+    "fixed_ten_session_model_alias_updated": false,
+    "training_models_published": false
+  },
+  "github_release": {
+    "repository": "zhaozhenxiong/CKHquant_studio",
+    "base_commit": "d8a9ae49df32d3d34efba6993cc39f23605a22b3",
+    "public_asset_policy": "code_native_runtime_parameters_only",
+    "contains_market_data": false,
+    "contains_trained_models": false,
+    "contains_personal_data": false,
+    "local_model_baseline_published": false
+  }
+}

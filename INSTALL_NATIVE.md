@@ -1,4 +1,4 @@
-# KHQuant 0.1.3 原生安装与验收
+# KHQuant 0.1.4 原生安装与验收
 
 ## 环境和设备
 
@@ -34,7 +34,7 @@ CI 和维护者构建命令：
 
 ~~~bash
 python app/build_czsc_runtime.py --out app/vendor/wheels --no-install
-python app/build_release.py --output-dir dist/releases/0.1.3-rebuild --wheel-dir app/vendor/wheels
+python app/build_release.py --output-dir dist/releases/0.1.4-rebuild --wheel-dir app/vendor/wheels
 ~~~
 
 build_release.py 支持重复 --wheel-dir 合并三平台 CI 资产。它验证原生资产并生成源码 ZIP、完整性清单、版本来源及 SHA256SUMS.txt；不会上传远端。工作区未提交内容会包含在包中，并在 release.json 标明。
@@ -96,6 +96,6 @@ latest 从最新运行开始收集模型、日历及发布证据依赖；all 保
 
 ## 当前趋势模型与本机选择
 
-公开程序中的 `app/my_strategy/configs/current_strategy.json` 不绑定开发机器的训练运行；自动查询本地合格模型。无模型安装可以使用原生结构基线，默认趋势界面会标记未训练／模型不可用，不补零或套用旧族概率。训练新趋势模型时显式提供自己生成的 `--source-native-run-id` 与正确截止日；详细契约见 `app/my_strategy/docs/trend_consensus.md`。
+公开程序中的 `app/my_strategy/configs/current_strategy.json` 不绑定开发机器的训练运行；自动查询本地合格模型。无模型安装可以使用原生结构基线，默认趋势界面会标记未训练／模型不可用，不补零或套用旧族概率。训练本版重评模型使用 `python -m my_strategy.scripts.train_trend_reassessment`，显式提供自己生成的 `--source-native-run-id` 与正确截止日；完整重建及核验日历契约见 `app/my_strategy/docs/trend_reassessment.md`。
 
 已有合法历史模型可以复制当前选择配置到自己的状态目录，填写该运行 ID，再在自己的 `.env` 设置 `KHQUANT_CURRENT_STRATEGY_CONFIG=/绝对路径/current-strategy-local.json`。这个路径不会进入公开源码；选择运行后仍按判断日期核验每个检查点。升级前保留自己的配置、行情、日历及完整模型依赖，软件升级不会提升其收益资格。
