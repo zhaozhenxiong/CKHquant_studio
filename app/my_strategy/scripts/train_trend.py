@@ -21,6 +21,8 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--raw-source-run-id',type=_identifier)
     parser.add_argument('--source-native-run-id',type=_identifier)
+    parser.add_argument('--resume-native-run-id',type=_identifier,
+                        help='Resume only a source with verified per-stock checkpoints and identical frozen identity')
     parser.add_argument('--calendar-run-id',type=_identifier)
     parser.add_argument('--end',required=True)
     parser.add_argument('--symbols',nargs='+')
@@ -38,15 +40,22 @@ def main():
         parser.error('worker count and stock preparation batch must be positive')
     if args.freeze_raw_only and args.source_native_run_id:
         parser.error('raw-only mode does not accept a native snapshot')
+    if args.resume_native_run_id and (args.source_native_run_id or args.freeze_raw_only):
+        parser.error('native checkpoint resume cannot be combined with a completed native source or raw-only mode')
     from my_strategy.adapters.czsc_adapter import normalize_symbol
     args.symbols=[normalize_symbol(symbol) for symbol in args.symbols] if args.symbols else None
     from my_strategy.services.czsc_trend_contracts import strategy_config, TRAIN_KIND
-    from my_strategy.services.czsc_trend_source import build_liquidity_universe, freeze_raw_source, prepare_native_source
+    from my_strategy.services.czsc_trend_source import (build_liquidity_universe, freeze_raw_source,
+        prepare_native_source, verify_native_checkpoint)
     cfg=strategy_config(json.loads(args.config.read_text()) if args.config else None)
     cfg.update(full_qualified_pool=True, stock_batch_size=args.stock_batch_size)
     native=args.source_native_run_id
     if not native:
         raw_id=args.raw_source_run_id
+        if args.resume_native_run_id:
+            proof=verify_native_checkpoint(args.resume_native_run_id,raw_source_run_id=raw_id,config=cfg,
+                cpu_workers=args.cpu_workers,prepare_batch_size=args.stock_batch_size)
+            raw_id=proof['raw_source_run_id']
         if not raw_id:
             print('STAGE raw_source_freeze',flush=True)
             preferred=json.loads(args.cohort_file.read_text()) if args.cohort_file else None
@@ -73,7 +82,7 @@ def main():
             return
         print('STAGE native_source_prepare',flush=True)
         source=prepare_native_source(raw_id,config=cfg,cpu_workers=args.cpu_workers,
-                                     prepare_batch_size=args.stock_batch_size)
+                                     prepare_batch_size=args.stock_batch_size,resume_native_run_id=args.resume_native_run_id)
         if source['data_end'] != args.end:
             raise ValueError('training end differs from immutable raw source end')
         native=source['run_id']

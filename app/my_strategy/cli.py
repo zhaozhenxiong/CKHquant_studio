@@ -43,6 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     train = commands.add_parser("train-trend", help="从冻结原始输入完整训练当前模型依赖")
     train.add_argument("--raw-source-run-id")
     train.add_argument("--source-native-run-id")
+    train.add_argument("--resume-native-run-id")
     train.add_argument("--calendar-run-id")
     train.add_argument("--end", required=True)
     train.add_argument("--symbols", nargs="+")
@@ -75,7 +76,7 @@ def _train_arguments(args) -> list[str]:
     if args.symbols and args.stocks:
         raise ValueError("--symbols 与 --stocks 不能同时指定")
     values = ["-m", "my_strategy.scripts.train_trend", "--end", args.end]
-    for key in ("raw_source_run_id", "source_native_run_id", "calendar_run_id", "stock_batch_size",
+    for key in ("raw_source_run_id", "source_native_run_id", "resume_native_run_id", "calendar_run_id", "stock_batch_size",
                 "cohort_file", "cpu_workers", "device", "config"):
         value = getattr(args, key)
         if value is not None:

@@ -39,7 +39,10 @@ def _day(value: Any) -> str:
 
 
 def _pen_key(pen: Any) -> tuple[Any, ...]:
-    return (_day(pen.fx_a.dt), _day(pen.fx_b.dt), float(pen.fx_a.fx), float(pen.fx_b.fx))
+    # Native FX getters clone their payload. Keep both endpoints local to this
+    # observation; an unfinished pen must never be cached across updates.
+    first, last = pen.fx_a, pen.fx_b
+    return (_day(first.dt), _day(last.dt), float(first.fx), float(last.fx))
 
 
 def _zone_key(zone: Any) -> tuple[Any, ...]:
@@ -121,7 +124,11 @@ class CzscSession(IntentSession):
                  collect_confirmations: bool = True, create_position: bool = True):
         super().__init__(symbol, config, create_position=create_position)
         self.collect_confirmations = collect_confirmations
-        self.bg = self.czsc.BarGenerator(base_freq="日线", freqs=list(FREQUENCIES), max_count=max(count + 5, 1000), market="A股")
+        # This generator only aggregates the current frequency buckets. Full
+        # closed history and causal CZSC state live in closed/kas below. Two
+        # retained bars preserve native last-bar aggregation and monotonically
+        # increasing ids without exporting the entire history on every update.
+        self.bg = self.czsc.BarGenerator(base_freq="日线", freqs=list(FREQUENCIES), max_count=2, market="A股")
         self.kas: dict[str, Any] = {}
         self.closed: dict[str, list[Any]] = {frequency: [] for frequency in FREQUENCIES}
         self.closed_available: dict[str, list[str]] = {frequency: [] for frequency in FREQUENCIES}

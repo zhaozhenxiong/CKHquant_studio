@@ -209,7 +209,7 @@
       (['native_source','native_source_prepare'].includes(detail.stage) || detail.stage === 'training' &&
         (children.source_native_run_id || String(detail.message || '').startsWith('NATIVE_SOURCE_RUN_ID '))) &&
       Number(detail.current || 0) === 0 && Number(detail.total || 0) === 0;
-    if (waitingNativeBatch) return '结构数据准备中 · 首批完成后更新计数';
+    if (waitingNativeBatch) return detail.checkpoint_available === true ? '结构数据准备中 · 按逐股核验更新计数' : '结构数据准备中 · 首批完成后更新计数';
     const hasTotal = Number.isFinite(Number(detail.total)) && Number(detail.total) > 0;
     return stageName(detail.stage) + (hasTotal && detail.current != null ? ` · ${detail.current} / ${detail.total}` : '');
   }
@@ -239,10 +239,41 @@
     if (!task.job_id) throw new Error('服务未返回复核任务标识。');
     state.jobs.set(task.job_id,task); localStorage.setItem('khquant_current_training_job',task.job_id); renderJobs(); await pollJobs();
   }
+  function nativeProgressStatsHtml(job) {
+    const d = job.progress_detail || {};
+    if (d.stage !== 'native_source_prepare') return '';
+    const valid = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+    const rate = d.stocks_per_minute ?? d.throughput_per_minute;
+    const inflight = d.in_flight ?? d.inflight;
+    const pieces = [];
+    if (valid(inflight)) pieces.push(`计算中 ${inflight} 股`);
+    if (valid(d.cache_hits)) pieces.push(`数据库复用 ${d.cache_hits} 股`);
+    if (valid(d.reused)) pieces.push(`断点复用 ${d.reused} 股`);
+    if (valid(rate) && rate > 0) pieces.push(`实测 ${rate.toFixed(1)} 股/分钟`);
+    if (valid(d.eta_seconds) && d.current < d.total) pieces.push(`本阶段剩余约 ${Math.max(1,Math.ceil(d.eta_seconds / 60))} 分钟`);
+    return pieces.length ? `<p class="training-note">${esc(pieces.join(' · '))}</p>` : '';
+  }
+  function nativeResumeSpec(job) {
+    const detail = job.progress_detail || {}, children = detail.children || {};
+    if (!['cancelled','failed'].includes(job.status) || detail.checkpoint_available !== true ||
+        !children.source_native_run_id || !children.raw_source_run_id || !job.spec?.parameters) return null;
+    return {parameters:job.spec.parameters,raw_source_run_id:children.raw_source_run_id,
+      resume_native_run_id:children.source_native_run_id};
+  }
+  async function resumeNative(job) {
+    const spec = nativeResumeSpec(job);
+    if (!spec) throw new Error('此任务没有可核验的结构检查点。');
+    const checked = await api('/api/training/preflight',{method:'POST',body:JSON.stringify(spec)});
+    if (checked.valid !== true || !checked.plan?.plan_id) throw new Error((checked.errors || ['检查点核验未通过']).join('；'));
+    const task = await api('/api/training/jobs',{method:'POST',body:JSON.stringify({plan_id:checked.plan.plan_id,parameters:spec.parameters})});
+    if (!task.job_id) throw new Error('服务未返回恢复任务标识。');
+    state.jobs.set(task.job_id,task);localStorage.setItem('khquant_current_training_job',task.job_id);
+    renderJobs();await pollJobs();
+  }
   function renderJob(job) {
     const detail = job.progress_detail || {}, result = job.result || {}, progress = Math.max(0,Math.min(100,Number(job.progress) || 0));
     const comparison = result.comparison || result.selection || {}, reasons = comparison.reasons || result.blockers || [];
-    return `<article class="training-job" data-training-job="${esc(job.job_id || job.run_id)}"><div class="task-heading"><strong>${jobTitle(job)}</strong><span class="badge">${esc(statuses[job.status] || job.status || '读取中')}</span></div><small>${esc(job.run_id || job.job_id)}</small><div class="progress-track" aria-label="${job.status === 'succeeded' ? '任务完成' : '当前阶段进度'} ${progress}%"><i style="width:${progress}%"></i></div><p>${active.has(job.status) ? `当前阶段 ${progress}% · ` : ''}${esc(jobProgressText(job))}${detail.failed ? ` · 失败 ${esc(detail.failed)}` : ''}${detail.device ? ` · 实际设备 ${esc(detail.device)}` : ''}</p>${jobResourceHtml(job)}${job.error ? `<p class="training-message error">${esc(message(job.error))}</p>` : ''}${job.status === 'succeeded' ? `<p>${job.kind === 'model_validation' || result.training_started === false ? '复核已完成' : '训练已完成'}；替换结果：${esc(statuses[result.selection?.status || result.comparison_status] || result.selection?.status || result.comparison_status || '以资格报告为准')}。</p>` : ''}${result.training_started === false && result.weights_unchanged === true ? '<p>本次没有启动训练，模型权重保持不变；原任务与历史诊断保留。</p>' : ''}${reasons.length ? `<ul class="training-blockers">${reasons.map(reason => `<li>${esc(message(reason))}</li>`).join('')}</ul>` : ''}${result.training_run_id ? `<p>模型运行：${esc(result.training_run_id)}</p>` : ''}${referenceQualityTrainingHtml(result.reference_quality,result.result_reasons)}${populationHtml({...detail,...result})}${childrenHtml(detail.children || result.children)}${diagnosticsHtml(result.diagnostics)}${result.required_heads ? `<details data-job-detail="heads"><summary>必需头资格</summary><pre>${esc(JSON.stringify(result.required_heads,null,2))}</pre></details>` : ''}<div class="button-group">${active.has(job.status) ? `<button type="button" data-training-cancel="${esc(job.job_id)}" ${job.status === 'cancelling' ? 'disabled' : ''}>${job.kind === 'model_validation' ? '取消复核' : '取消训练'}</button>` : ''}${job.status === 'succeeded' && job.run_id ? `<button type="button" data-training-result="${esc(job.job_id)}">查看结果与阻断原因</button>` : ''}${result.training_run_id ? `<button type="button" data-training-comparison="${esc(result.training_run_id)}">查看费用验收对比</button>` : ''}${validationButton(job)}</div>${job.logs?.length ? `<details data-job-detail="logs"><summary>阶段日志</summary><pre>${esc(job.logs.map(message).join('\n'))}</pre></details>` : ''}</article>`;
+    return `<article class="training-job" data-training-job="${esc(job.job_id || job.run_id)}"><div class="task-heading"><strong>${jobTitle(job)}</strong><span class="badge">${esc(statuses[job.status] || job.status || '读取中')}</span></div><small>${esc(job.run_id || job.job_id)}</small><div class="progress-track" aria-label="${job.status === 'succeeded' ? '任务完成' : '当前阶段进度'} ${progress}%"><i style="width:${progress}%"></i></div><p>${active.has(job.status) ? `当前阶段 ${progress}% · ` : ''}${esc(jobProgressText(job))}${detail.failed ? ` · 失败 ${esc(detail.failed)}` : ''}${detail.device ? ` · 实际设备 ${esc(detail.device)}` : ''}</p>${nativeProgressStatsHtml(job)}${jobResourceHtml(job)}${job.error ? `<p class="training-message error">${esc(message(job.error))}</p>` : ''}${job.status === 'succeeded' ? `<p>${job.kind === 'model_validation' || result.training_started === false ? '复核已完成' : '训练已完成'}；替换结果：${esc(statuses[result.selection?.status || result.comparison_status] || result.selection?.status || result.comparison_status || '以资格报告为准')}。</p>` : ''}${result.training_started === false && result.weights_unchanged === true ? '<p>本次没有启动训练，模型权重保持不变；原任务与历史诊断保留。</p>' : ''}${reasons.length ? `<ul class="training-blockers">${reasons.map(reason => `<li>${esc(message(reason))}</li>`).join('')}</ul>` : ''}${result.training_run_id ? `<p>模型运行：${esc(result.training_run_id)}</p>` : ''}${referenceQualityTrainingHtml(result.reference_quality,result.result_reasons)}${populationHtml({...detail,...result})}${childrenHtml(detail.children || result.children)}${diagnosticsHtml(result.diagnostics)}${result.required_heads ? `<details data-job-detail="heads"><summary>必需头资格</summary><pre>${esc(JSON.stringify(result.required_heads,null,2))}</pre></details>` : ''}<div class="button-group">${active.has(job.status) ? `<button type="button" data-training-cancel="${esc(job.job_id)}" ${job.status === 'cancelling' ? 'disabled' : ''}>${job.kind === 'model_validation' ? '取消复核' : '取消训练'}</button>` : ''}${job.status === 'succeeded' && job.run_id ? `<button type="button" data-training-result="${esc(job.job_id)}">查看结果与阻断原因</button>` : ''}${result.training_run_id ? `<button type="button" data-training-comparison="${esc(result.training_run_id)}">查看费用验收对比</button>` : ''}${validationButton(job)}${nativeResumeSpec(job) ? `<button type="button" data-training-resume="${esc(job.job_id)}">继续结构准备与训练</button>` : ''}</div>${job.logs?.length ? `<details data-job-detail="logs"><summary>阶段日志</summary><pre>${esc(job.logs.map(message).join('\n'))}</pre></details>` : ''}</article>`;
   }
   function renderTaskSummary(jobs) {
     const running = jobs.filter(job => active.has(job.status)), failed = jobs.filter(job => job.status === 'failed'), cancelled = jobs.filter(job => job.status === 'cancelled');
@@ -418,8 +449,8 @@
     $('parameters-reset').addEventListener('click',() => { renderParameters(state.capabilities.defaults || state.capabilities.builtin_profile?.parameters || {},false); state.dirty = true; $('parameters-save-status').textContent = '已载入内置值，点击保存后才成为以后训练默认。'; });
     $('training-refresh').addEventListener('click',() => refresh().catch(fail)); $('training-events-refresh').addEventListener('click',() => events().catch(fail));
     $('training-jobs').addEventListener('click',async event => {
-      const cancel = event.target.closest('[data-training-cancel]'), result = event.target.closest('[data-training-result]'), comparison = event.target.closest('[data-training-comparison]'), diagnostics = event.target.closest('[data-training-diagnostics]'), validation = event.target.closest('[data-training-validate]');
-      try { if (cancel) { const job = await api(`/api/tasks/${encodeURIComponent(cancel.dataset.trainingCancel)}/cancel`,{method:'POST',body:'{}'}); state.jobs.set(job.job_id,job); await pollJobs(); } else if (diagnostics) { await showDiagnostics(diagnostics.dataset.trainingDiagnostics,diagnostics.dataset.diagnosticSha256); } else if (validation && !validation.disabled) { const job = state.jobs.get(validation.dataset.trainingValidate) || state.validationReceipts.get(validation.dataset.trainingValidate); if (!job) throw new Error('所选任务凭据已不可用，请刷新。'); await revalidate(job); } else if (comparison) { await showComparison(comparison.dataset.trainingComparison); } else if (result) { const job = await api(`/api/tasks/${encodeURIComponent(result.dataset.trainingResult)}`); await showResult(job.result || job,job); } } catch (error) { fail(error); }
+      const cancel = event.target.closest('[data-training-cancel]'), result = event.target.closest('[data-training-result]'), comparison = event.target.closest('[data-training-comparison]'), diagnostics = event.target.closest('[data-training-diagnostics]'), validation = event.target.closest('[data-training-validate]'), resume = event.target.closest('[data-training-resume]');
+      try { if (resume) { const job = state.jobs.get(resume.dataset.trainingResume); if (!job) throw new Error('恢复任务凭据不可用，请刷新。'); await resumeNative(job); } else if (cancel) { const job = await api(`/api/tasks/${encodeURIComponent(cancel.dataset.trainingCancel)}/cancel`,{method:'POST',body:'{}'}); state.jobs.set(job.job_id,job); await pollJobs(); } else if (diagnostics) { await showDiagnostics(diagnostics.dataset.trainingDiagnostics,diagnostics.dataset.diagnosticSha256); } else if (validation && !validation.disabled) { const job = state.jobs.get(validation.dataset.trainingValidate) || state.validationReceipts.get(validation.dataset.trainingValidate); if (!job) throw new Error('所选任务凭据已不可用，请刷新。'); await revalidate(job); } else if (comparison) { await showComparison(comparison.dataset.trainingComparison); } else if (result) { const job = await api(`/api/tasks/${encodeURIComponent(result.dataset.trainingResult)}`); await showResult(job.result || job,job); } } catch (error) { fail(error); }
     });
   }
   globalThis.KHQuantTraining = {refresh,showResult};

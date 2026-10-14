@@ -975,18 +975,122 @@ class TrainingCenter:
         self._source_reuse_cache[cache_key] = dict(paths=paths,signature=before,proof=copy.deepcopy(proof))
         return proof,copy.deepcopy(population),dates
 
-    def preflight(self, parameters=None, profile_id=None, *, source_native_run_id=None, progress=None):
+    def _verify_reusable_raw(self, raw_id, config, end, *, expected=None, progress=None, check_cancel=None):
+        """Verify complete immutable raw inputs without importing any native/model/label."""
+        import pyarrow.parquet as pq
+        from my_strategy.services.czsc_trend_source import _verify_population
+        from my_strategy.services.czsc_research_calendar import load_verified_calendar
+        identity = _identifier(raw_id)
+        root = (self.runs_root / identity).resolve()
+        if not root.is_relative_to(self.runs_root.resolve()):
+            raise ValueError("原始来源越过运行目录")
+        path = root / "reports/raw_source.json"
+        report_bytes = path.read_bytes()
+        source = json.loads(report_bytes)
+        if not isinstance(source,dict) or not isinstance(source.get("raw_records"),list) or any(not isinstance(row,dict) for row in source["raw_records"]):
+            raise ValueError("原始来源报告或记录目录格式无效")
+        if (source.get("run_id") != identity or source.get("strategy_version") != STRATEGY_ID
+                or source.get("status") != "completed" or source.get("failures")
+                or source.get("raw_only_rebuild") is not True or source.get("reused_model_or_label") is not False
+                or source.get("end") != end or source.get("data_end") != end
+                or source.get("population_mode") != "full_liquidity_union"
+                or source.get("snapshot_hash") != stable_hash({k:v for k,v in source.items() if k != "snapshot_hash"})):
+            raise ValueError("复用需要完整、同截止日且身份一致的原始冻结来源")
+        population = source.get("liquidity")
+        _verify_population(population)
+        if (population != source.get("liquidity_universe") or population["policy"] != config["liquidity_universe"]
+                or population["feature_start"] != config["feature_start"] or population["end"] != end
+                or source["selected_symbols"] != population["selected_symbols"]
+                or [r["symbol"] for r in source["raw_records"]] != population["selected_symbols"]):
+            raise ValueError("原始来源人口或输入政策与训练计划不同")
+        dates, _ = load_verified_calendar(source["calendar_run_id"], runs_root=self.runs_root)
+        dates = [d for d in dates if d <= end]
+        if (not dates or dates[-1] != end or dates != source["dates"]
+                or stable_hash(dates) != source["calendar_hash"]
+                or population["calendar_hash"] != source["calendar_hash"]
+                or population["calendar_run_id"] != source["calendar_run_id"]):
+            raise ValueError("原始来源核验日历发生改变")
+        assets = population.get("membership_assets") or []
+        if sorted(r["symbol"] for r in assets) != population["candidate_symbols"]:
+            raise ValueError("原始来源流动性资产不完整")
+        checks = []
+        for record in source["raw_records"]:
+            checks.append((record["raw_path"], record["raw_sha256"], record["raw_rows"], record["raw_columns"]))
+            if record.get("liquidity_policy_hash") != population["policy_hash"]:
+                raise ValueError("原始记录流动性政策不同")
+            checks.append((record["liquidity_path"], record["liquidity_sha256"], record["liquidity_rows"], None))
+        for asset in assets:
+            checks.append((asset["path"], asset["sha256"], asset["rows"], None))
+        for asset in population.get("summary_assets") or []:
+            checks.append((asset["path"], asset["sha256"], None, None))
+        verified = {}
+        for index, (asset_path, sha, rows, columns) in enumerate(checks):
+            if check_cancel: check_cancel()
+            asset = resolve_frozen_asset(asset_path, runs_root=self.runs_root)
+            if not asset.is_relative_to(root): raise ValueError("原始来源资产越过冻结运行目录")
+            key = str(asset)
+            if key in verified:
+                if verified[key] != (sha,rows,columns): raise ValueError("重复资产身份不同")
+                continue
+            before = asset.stat()
+            if _file_hash(asset) != sha: raise ValueError("原始来源资产实际SHA不匹配")
+            if rows is not None:
+                metadata = pq.read_metadata(asset)
+                if metadata.num_rows != rows: raise ValueError("原始来源资产行数不匹配")
+                if columns is not None and pq.read_schema(asset).names != columns:
+                    raise ValueError("原始来源资产字段不同")
+            after = asset.stat()
+            if (before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns) != (after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns):
+                raise ValueError("原始来源资产在核验中发生改变")
+            verified[key] = (sha,rows,columns)
+            if progress and (index % 100 == 0 or index == len(checks)-1):
+                progress(dict(stage="frozen_source_verification",completed=index+1,total=len(checks),raw_source_reused=True))
+        if path.read_bytes() != report_bytes: raise ValueError("原始来源报告在核验中发生改变")
+        proof = dict(raw_source_run_id=identity, raw_report_sha256=hashlib.sha256(report_bytes).hexdigest(),
+            raw_snapshot_hash=source["snapshot_hash"], population_hash=population["population_hash"],
+            calendar_run_id=source["calendar_run_id"], calendar_hash=source["calendar_hash"],
+            selected_count=len(source["selected_symbols"]), verified_assets=len(verified), reused_model_or_label=False)
+        if expected is not None and expected != proof: raise ValueError("原始冻结来源与预检查证明不同")
+        return proof, population, dates
+
+    def preflight(self, parameters=None, profile_id=None, *, source_native_run_id=None, raw_source_run_id=None, resume_native_run_id=None, progress=None):
         values = validate_parameters(parameters if parameters is not None else self.profiles()["default_profile"]["parameters"])
         errors, warnings, cohort = [], [], []
         calendar_id, calendar, end = None, [], values["end"]
         requested_end = end
-        config, universe, source_reuse = None, None, None
+        config, universe, source_reuse, raw_source_reuse = None, None, None, None
         date_status = dict(code="not_checked", requested_end=requested_end, effective_end=None)
         try:
             from my_strategy.services.czsc_trend_math import _device
             _device(values["device"])
             from my_strategy.services.czsc_trend_support import _calendar, VERIFIED_SOURCES
-            if source_native_run_id is not None:
+            if source_native_run_id is not None and (raw_source_run_id is not None or resume_native_run_id is not None):
+                raise ValueError("完整native复用与raw/checkpoint恢复不能同时请求")
+            if raw_source_run_id is not None or resume_native_run_id is not None:
+                if resume_native_run_id is not None:
+                    from my_strategy.services.czsc_trend_source import verify_native_checkpoint
+                    checkpoint_path = self.runs_root / _identifier(resume_native_run_id) / "reports/native_checkpoint.json"
+                    header = json.loads(checkpoint_path.read_text())
+                    if not isinstance(header,dict) or not isinstance(header.get("identity"),dict) or not isinstance(header["identity"].get("raw_source_run_id"),str):
+                        raise ValueError("恢复检查点头或原始身份格式无效")
+                    frozen_raw = header["identity"]["raw_source_run_id"]
+                    if raw_source_run_id is not None and raw_source_run_id != frozen_raw:
+                        raise ValueError("恢复检查点与请求的原始来源不同")
+                    raw_source_run_id = frozen_raw
+                raw_header = json.loads((self.runs_root / _identifier(raw_source_run_id) / "reports/raw_source.json").read_text())
+                if not isinstance(raw_header,dict) or not isinstance(raw_header.get("end"),str):
+                    raise ValueError("原始来源预检头或截止日格式无效")
+                end = end or raw_header["end"]
+                config = _configuration(values,end)
+                raw_source_reuse,universe,calendar = self._verify_reusable_raw(raw_source_run_id,config,end,progress=progress)
+                calendar_id = raw_source_reuse["calendar_run_id"]
+                if values.get("calendar_run_id") not in {None,calendar_id}: raise ValueError("原始来源日历与请求不同")
+                if resume_native_run_id is not None:
+                    config["training_capacity_tiers"] = [len(universe["selected_symbols"])]
+                    verify_native_checkpoint(resume_native_run_id,raw_source_run_id=raw_source_run_id,config=config,
+                        cpu_workers=values["cpu_workers"],prepare_batch_size=values["stock_batch_size"])
+                latest = end
+            elif source_native_run_id is not None:
                 identity = _identifier(source_native_run_id)
                 header = json.loads((self.runs_root / identity / "reports/native_source.json").read_text())
                 if (not isinstance(header,dict) or not isinstance(header.get("data_end"),str)
@@ -1035,12 +1139,13 @@ class TrainingCenter:
                 raise ValueError("历史时点流动性和完整窗口核验后没有合格股票；保留筛选诊断，不降低门槛")
             config["training_capacity_tiers"] = [len(cohort)]
             if source_reuse: date_status["code"] = "verified_frozen_source_reuse"
+            elif raw_source_reuse: date_status["code"] = "verified_frozen_raw_reuse"
             if cohort and len(cohort) < 60:
                 warnings.append("历史合格股票并集不足 60 股，不能自动替换；不会降低门槛扩充")
             warnings.append("可观察原始行情人口尚不等于完整历史上市/ST/退市名录；正式独立认证继续 pending")
             if values["trend_horizon_sessions"] != 10:
                 warnings.append("此目标为实验配置，不赋予当前默认 10 日目标研究选择资格")
-        except (OSError, ValueError, KeyError, RuntimeError, sqlite3.Error) as exc:
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError, sqlite3.Error) as exc:
             errors.append(str(exc))
         values["end"] = end
         current = self.current_selection()
@@ -1053,7 +1158,7 @@ class TrainingCenter:
             windows=(config or {}).get("development_windows", []), incumbent_run_id=(current or {}).get("run_id"),
             source_policy="historical_daily_liquidity_eligible_union", valid=not errors, errors=errors, warnings=warnings,
             profile_revision=self.profiles()["default_revision"], created_at=local_now().isoformat(),
-            source_reuse=source_reuse,training_code_freeze=training_code_freeze(),
+            source_reuse=source_reuse,raw_source_reuse=raw_source_reuse,resume_native_run_id=resume_native_run_id,training_code_freeze=training_code_freeze(),
             selection_policy=dict(min_stocks=60, min_round_trips_per_window=50, min_round_trips_total=200,
                 drawdown_tolerance=.02, stress_multiplier=2., publication_allowed=False))
         plan["plan_hash"] = stable_hash(plan)
@@ -1093,6 +1198,17 @@ class TrainingCenter:
         if plan.get("training_code_freeze") != training_code_freeze():
             raise ValueError("预检查后训练生成代码已改变；必须重新预检查，不能沿用旧身份")
         if plan.get("config_hash") != stable_hash(plan["config"]): raise ValueError("冻结计划配置哈希不同")
+        raw_reuse = plan.get("raw_source_reuse")
+        if raw_reuse:
+            proof,population,dates = self._verify_reusable_raw(raw_reuse["raw_source_run_id"],plan["config"],
+                plan["data_end"],expected=raw_reuse,progress=progress,check_cancel=check_cancel)
+            if population != plan["liquidity_universe"] or population["selected_symbols"] != plan["cohort"]:
+                raise ValueError("原始复用人口与冻结计划不同")
+            if plan.get("resume_native_run_id"):
+                from my_strategy.services.czsc_trend_source import verify_native_checkpoint
+                verify_native_checkpoint(plan["resume_native_run_id"],raw_source_run_id=raw_reuse["raw_source_run_id"],
+                    config=plan["config"],cpu_workers=plan["parameters"]["cpu_workers"],
+                    prepare_batch_size=plan["parameters"]["stock_batch_size"])
         reuse = plan.get("source_reuse")
         if reuse:
             proof,population,dates = self._verify_reusable_source(reuse["source_native_run_id"],plan["config"],
@@ -1158,6 +1274,10 @@ class TrainingCenter:
         reuse = plan.get("source_reuse")
         if reuse:
             args.extend(["--source-native-run-id",reuse["source_native_run_id"]])
+        if plan.get("raw_source_reuse"):
+            args.extend(["--raw-source-run-id",plan["raw_source_reuse"]["raw_source_run_id"]])
+        if plan.get("resume_native_run_id"):
+            args.extend(["--resume-native-run-id",plan["resume_native_run_id"]])
         if stage == "source_prepare": args.append("--prepare-source-only")
         elif stage != "complete": raise ValueError("当前阶段只支持 complete 或 source_prepare")
         if reuse:
@@ -1165,8 +1285,13 @@ class TrainingCenter:
             result_ids = self._run_process(args,context.subdir("logs")/"training.log",progress,check_cancel,
                 initial_ids=initial_ids,source_total=len(plan["cohort"]),source_reuse=reuse)
         else:
+            initial_ids = {}
+            if plan.get("raw_source_reuse"):
+                initial_ids["raw_source_run_id"] = plan["raw_source_reuse"]["raw_source_run_id"]
+            if plan.get("resume_native_run_id"):
+                initial_ids["source_native_run_id"] = plan["resume_native_run_id"]
             result_ids = self._run_process(args, context.subdir("logs") / "training.log", progress, check_cancel,
-                source_total=len(plan["cohort"]))
+                source_total=len(plan["cohort"]), initial_ids=initial_ids)
         model_id = result_ids.get("model_run_id")
         result = dict(run_id=context.run_id, training_run_id=model_id, model_run_id=model_id,
                       children=result_ids, plan_id=plan["plan_id"], publication_allowed=False,
@@ -1312,6 +1437,14 @@ class TrainingCenter:
                 {r["symbol"] for r in report.get("dataset_records", [])} != set(plan["cohort"])):
             raise ValueError("完整训练未覆盖全部冻结历史合格股票")
         source=report["source_snapshot"]
+        raw_reuse=plan.get("raw_source_reuse")
+        if raw_reuse:
+            actual_raw=source.get("source_snapshot") or {}
+            actual_population=source.get("liquidity") or {}
+            if (actual_raw.get("raw_source_run_id")!=raw_reuse["raw_source_run_id"]
+                    or actual_raw.get("raw_snapshot_hash")!=raw_reuse["raw_snapshot_hash"]
+                    or actual_population.get("population_hash")!=raw_reuse["population_hash"]):
+                raise ValueError("训练实际原始来源或人口与冻结raw复用证明不同")
         reuse=plan.get("source_reuse")
         if reuse:
             raw=source.get("source_snapshot") or {}
@@ -1465,9 +1598,16 @@ class TrainingCenter:
                                 head=event.get("head"),fold=event.get("fold"),architecture=event.get("architecture"),
                                 training_resources=event.get("training_resources"),message=text[-500:],children=copy.deepcopy(result_ids)))
                         elif text.startswith("SOURCE_BATCH "):
-                            batch = json.loads(text[len("SOURCE_BATCH "):]); source_total = batch["total"]
+                            batch = json.loads(text[len("SOURCE_BATCH "):])
+                            if (batch.get("total") != source_total or batch.get("stage") not in {"raw","native"}
+                                    or type(batch.get("completed")) is not int or not 0 <= batch["completed"] <= source_total):
+                                raise ValueError("来源进度与冻结人口不同")
+                            details = {k:v for k,v in batch.items() if k not in {"stage","completed","total"}}
+                            if "inflight" in details: details["in_flight"] = details.pop("inflight")
+                            if "throughput_per_minute" in details: details["stocks_per_minute"] = details.pop("throughput_per_minute")
+                            details.setdefault("actual_device","cpu")
                             publish_progress(dict(stage="raw_source_freeze" if batch["stage"] == "raw" else "native_source_prepare",
-                                completed=batch["completed"], total=batch["total"], message=text[-500:], children=copy.deepcopy(result_ids)))
+                                completed=batch["completed"], total=batch["total"], message=text[-500:], children=copy.deepcopy(result_ids),**details))
                         elif text.startswith("DATASET "):
                             # Per-stock detail is retained in the log. Only the
                             # parent emits complete single-population progress.

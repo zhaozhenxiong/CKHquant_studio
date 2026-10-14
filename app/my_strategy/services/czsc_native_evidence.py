@@ -8,6 +8,8 @@ Continuous W scores are rule strength, never a probability or a fresh trigger.
 from __future__ import annotations
 
 import copy
+from dataclasses import dataclass
+import hashlib
 import re
 from typing import Any
 
@@ -17,7 +19,7 @@ import pandas as pd
 from my_strategy.adapters.czsc_adapter import engine_contract
 from my_strategy.core.run_context import stable_hash
 from my_strategy.services.czsc_analysis import CzscSession, _pen_key, strategy_config
-from my_strategy.services.czsc_trend_support import VERIFIED_SOURCES
+from my_strategy.services.czsc_trend_support import VERIFIED_SOURCES, _json
 from my_strategy.services.czsc_market_features import _validate_input
 from my_strategy.services.czsc_price_volume_features import prepare_wyckoff_inputs, get_wyckoff_profile, WYCKOFF_SCHEMA_HASH
 from my_strategy.services.czsc_price_volume_events import event_config
@@ -80,7 +82,7 @@ _W_BUYS = {"Spring", "Test", "SOS", "LPS"}
 _W_WEIGHTS = {"Spring": .5, "Test": 1., "SOS": .75, "LPS": 1., "Upthrust": .5, "SOW": .75, "LPSY": 1.}
 
 
-def _pure_third_sell_signal(analysis: Any) -> tuple[str, int | None]:
+def _pure_third_sell_signal(analysis: Any, *, finished=None) -> tuple[str, int | None]:
     """Exact price-reflected native third-buy geometry on finished pens.
 
     The frozen vendor only exposes a pure third BUY. Its third-BS alternatives
@@ -88,7 +90,7 @@ def _pure_third_sell_signal(analysis: Any) -> tuple[str, int | None]:
     weight. This owned rule mirrors each inequality and direction without
     changing vendor code or using a forming pen or an eventual chart anchor.
     """
-    finished = analysis.finished_bis
+    finished = analysis.finished_bis if finished is None else finished
     # Native's len(bi_list) >= di+11, with the delivered finished-di mapping.
     if len(finished) < 12:
         return "其他", None
@@ -240,16 +242,22 @@ def _invalidate(active: dict[str, dict], invalidated: dict[str, dict], ids: list
 
 
 def _zone_snapshot(zone: Any, available: str, seen: dict[str, dict], finished_keys: set[tuple]) -> dict | None:
-    if len(zone.bis) < 3 or not zone.is_valid():
+    # A native bis getter clones the complete sequence; read it once per zone.
+    bis = zone.bis
+    if len(bis) < 3 or not zone.is_valid():
         return None
-    keys = [_pen_key(pen) for pen in zone.bis[:3]]
+    keys = [_pen_key(pen) for pen in bis[:3]]
     if not all(key in finished_keys for key in keys):
         return None
     identity = "zone:native:" + stable_hash({"pens": keys, "low": float(zone.zd), "high": float(zone.zg)})
-    return seen.setdefault(identity, {"zone_id": identity, "first_confirmed_at": available,
-        "available_at": available, "anchor_at": _day(zone.bis[2].edt), "support_low": float(zone.zd),
+    if identity in seen:
+        return seen[identity]
+    value = {"zone_id": identity, "first_confirmed_at": available,
+        "available_at": available, "anchor_at": _day(bis[2].edt), "support_low": float(zone.zd),
         "resistance_high": float(zone.zg), "dependencies": [list(key) for key in keys], "confirmed": True,
-        "dependency_start_index": min(int(raw.id) for bi in zone.bis[:3] for raw in bi.raw_bars)})
+        "dependency_start_index": min(int(raw.id) for bi in bis[:3] for raw in bi.raw_bars)}
+    seen[identity] = value
+    return value
 
 
 def _structure_evidence(bars: pd.DataFrame, raw_quality: np.ndarray, metrics: pd.DataFrame,
@@ -272,9 +280,18 @@ def _structure_evidence(bars: pd.DataFrame, raw_quality: np.ndarray, metrics: pd
         session.advance_structure(row)
         analysis = session.kas["日线"]; finished = analysis.finished_bis
         pen_keys = [_pen_key(pen) for pen in finished]
+        finished_keys = set(pen_keys)
+        # All entries below belong to this exact causal observation. Reading
+        # dependency ids once avoids repeated native RawBar sequence exports.
+        dependency_ids = {}
+        def ids(pen):
+            key = id(pen)
+            if key not in dependency_ids:
+                dependency_ids[key] = tuple(int(raw.id) for raw in pen.raw_bars)
+            return dependency_ids[key]
         di = len(analysis.bi_list) - len(finished) + 1
         new: list[dict] = []; current_labels = {}; dependency_start = i
-        zones = [_zone_snapshot(z, available, zone_seen, set(pen_keys)) for z in analysis.zs_list]
+        zones = [_zone_snapshot(z, available, zone_seen, finished_keys) for z in analysis.zs_list]
         complete_zones = []
         for item in zones:
             if item is None:continue
@@ -286,7 +303,7 @@ def _structure_evidence(bars: pd.DataFrame, raw_quality: np.ndarray, metrics: pd
         # Geometry is causal and retained even when native's newest zone is forming.
         if zone:
             dependency_start = min(dependency_start, zone["dependency_start_index"])
-        aux_start = max(0, min([int(raw.id) for pen in finished[-5:] for raw in pen.raw_bars], default=i) - 34)
+        aux_start = max(0, min((raw_id for pen in finished[-5:] for raw_id in ids(pen)), default=i) - 34)
         aux_span = calendar.span(aux_start, i)
         aux_eligible = bool(raw_quality[i] and len(finished) >= 5 and
                             aux_span["dependency_calendar_complete"] and bad_prefix[i + 1] == bad_prefix[aux_start])
@@ -300,7 +317,7 @@ def _structure_evidence(bars: pd.DataFrame, raw_quality: np.ndarray, metrics: pd
             invalidations.extend(_invalidate(active, invalidated, list(active), available, "input_quality_gap"))
         for short, name in _RULES:
             if short == "third_sell":
-                label, count = _pure_third_sell_signal(analysis)
+                label, count = _pure_third_sell_signal(analysis, finished=finished)
                 signal = None
             else:
                 signal = session.czsc._native.call_signal(name, analysis, {"di": di, **({"w": 9, "t": 2} if short == "second_bs" else {})})[0] if finished else None
@@ -311,13 +328,13 @@ def _structure_evidence(bars: pd.DataFrame, raw_quality: np.ndarray, metrics: pd
             match = re.search(r"(\d+)笔", str(signal.v2)) if signal is not None else None
             n = count or (int(match.group(1)) if match else 9)
             dependencies = finished[-n:]
-            start = min(int(raw.id) for pen in dependencies for raw in pen.raw_bars)
+            start = min(raw_id for pen in dependencies for raw_id in ids(pen))
             dependency_start = min(dependency_start, start)
             span = calendar.span(start, i)
             eligible = bool(raw_quality[i] and span["dependency_calendar_complete"] and bad_prefix[i + 1] == bad_prefix[start])
             pattern = {"version": STRUCTURE_RULE_VERSION, "rule": name, "label": label,
                        "parameters": {"w": 9, "t": 2} if short == "second_bs" else {},
-                       "pens": [_pen_key(pen) for pen in dependencies]}
+                       "pens": pen_keys[-n:]}
             pattern_id = "structure:native:" + stable_hash({"symbol": str(row.symbol), **pattern})
             if pattern_id in seen:
                 continue
@@ -328,7 +345,7 @@ def _structure_evidence(bars: pd.DataFrame, raw_quality: np.ndarray, metrics: pd
                          candidate=True, confirmed=True, eligible=eligible, reference=close,
                          extra={"rule_name": name, "label": label, "family": "structure_native",
                                 "version": STRUCTURE_RULE_VERSION, "dependency_start": _day(bars.iloc[start].date),
-                                "dependencies": [list(_pen_key(pen)) for pen in dependencies],
+                                "dependencies": [list(key) for key in pen_keys[-n:]],
                                 "dependency_bars": i - start + 1, **span,
                                 "reason_codes": [] if eligible else ["native_structure_input_ineligible", *([] if span["dependency_calendar_complete"] else ["native_structure_dependency_calendar_incomplete"])]})
             seen[pattern_id] = fact; facts.append(fact); new.append(fact)
@@ -497,8 +514,87 @@ def _wyckoff_evidence(bars: pd.DataFrame, legacy: pd.DataFrame, metrics: pd.Data
     return facts, evaluations, daily_events
 
 
+@dataclass(frozen=True)
+class PreparedNativeWyckoff:
+    """A local preparation bound to its inputs, policy and unmodified output."""
+    frame: pd.DataFrame
+    input_hash: str
+    output_hash: str
+    profile_hash: str
+
+
+def _frame_digest(frame: pd.DataFrame, columns) -> str:
+    digest = hashlib.sha256()
+    digest.update(stable_hash({"columns": list(columns), "dtypes": [str(frame[key].dtype) for key in columns],
+        "index_dtype": str(frame.index.dtype), "index_name": frame.index.name}).encode())
+    digest.update(pd.util.hash_pandas_object(frame.index, index=True).to_numpy().tobytes())
+    for key in columns:
+        values = frame[key]
+        # Nested reason/evidence objects must be protected along with numerical
+        # columns; pandas cannot hash lists directly.
+        if values.dtype == object:
+            values = values.map(lambda value: stable_hash(_json(value)))
+        digest.update(pd.util.hash_pandas_object(values, index=False).to_numpy().tobytes())
+    return digest.hexdigest()
+
+
+def _wyckoff_config(config, market_dates):
+    settings = copy.deepcopy((config or {}).get("wyckoff") or {})
+    if market_dates is not None:
+        settings["market_dates"] = list(market_dates)
+    return settings
+
+
+def _wyckoff_input_hash(frame, bars, settings):
+    columns = [key for key in ("symbol", "date", "open", "high", "low", "close", "volume", "amount",
+        "source", "has_trade_price") if key in bars]
+    identity = bars[columns].copy()
+    # build_features deliberately stores text metadata as object, whereas raw
+    # Parquet can use pandas StringDtype. Compare the same effective text used
+    # by source-quality checks, retaining exact numeric/date/index identity.
+    for key in ("symbol", "source"):
+        if key in identity:
+            identity[key] = identity[key].fillna("").astype(str).astype(object)
+    body = {"raw": _frame_digest(identity, columns), "profile": get_wyckoff_profile(settings)["schema_hash"],
+        "calendar": settings.get("market_dates"),
+        "quality_attrs": {key: bars.attrs.get(key) for key in ("price_basis", "volume_unit", "amount_unit")}}
+    if settings.get("market_dates") is None:
+        key = "model_reason_codes" if "model_reason_codes" in frame else "reason_codes" if "reason_codes" in frame else None
+        body["calendar_reason_codes"] = None if key is None else _frame_digest(frame, [key])
+    return stable_hash(body)
+
+
+def _wyckoff_output_hash(frame):
+    columns = [key for key in frame if key.startswith("w_") or key.startswith("wyckoff_")]
+    return stable_hash({"data": _frame_digest(frame, columns),
+        "attrs": {key: value for key, value in frame.attrs.items() if key.startswith("wyckoff_")}})
+
+
+def prepare_native_wyckoff_inputs(frame: pd.DataFrame, raw: pd.DataFrame | None = None,
+        config: dict | None = None, *, market_dates: list[str] | None = None) -> PreparedNativeWyckoff:
+    """Prepare once for reuse only under the same complete observed contract.
+
+    Callers retain their existing feature preparation configuration. A native
+    policy with different W settings must perform its own preparation.
+    """
+    bars = _validate_input(frame if raw is None else raw)
+    bars.attrs = dict(frame.attrs)
+    dates = market_dates if market_dates is not None else frame.attrs.get("verified_market_dates")
+    settings = _wyckoff_config(config, dates)
+    result = prepare_wyckoff_inputs(frame, bars, config=settings)
+    return PreparedNativeWyckoff(result, _wyckoff_input_hash(frame, bars, settings),
+        _wyckoff_output_hash(result), get_wyckoff_profile(settings)["schema_hash"])
+
+
+def can_reuse_native_wyckoff(prepared: PreparedNativeWyckoff, config: dict | None = None) -> bool:
+    """Compare effective W settings; build_native_evidence validates the data."""
+    return isinstance(prepared, PreparedNativeWyckoff) and prepared.profile_hash == get_wyckoff_profile(
+        (config or {}).get("wyckoff"))["schema_hash"]
+
+
 def build_native_evidence(frame: pd.DataFrame, config: dict | None = None, *,
-                             market_dates: list[str] | None = None) -> dict:
+                             market_dates: list[str] | None = None,
+                             prepared_wyckoff: PreparedNativeWyckoff | None = None) -> dict:
     """Enrich a complete single-stock causal prefix; never mutate its old columns.
 
     Optional ``config['native_evidence']`` changes obtain a distinct schema.
@@ -509,6 +605,8 @@ def build_native_evidence(frame: pd.DataFrame, config: dict | None = None, *,
     prefix is provenance, while future extension cannot change a policy hash.
     With no explicit calendar (or ``attrs['verified_market_dates']``), input
     eligibility remains false rather than inventing a schedule from stock rows.
+    A prepared W result is reused only after raw/index, policy/calendar,
+    quality metadata and generated output identity checks all succeed.
     """
     settings = _settings(config)
     semantics = {**copy.deepcopy(NATIVE_SEMANTICS), "config": settings}
@@ -542,9 +640,17 @@ def build_native_evidence(frame: pd.DataFrame, config: dict | None = None, *,
     bars.attrs = dict(frame.attrs)
     market_dates = market_dates if market_dates is not None else frame.attrs.get("verified_market_dates")
     calendar = _VerifiedCalendar(bars, market_dates)
-    w_config = copy.deepcopy((config or {}).get("wyckoff") or {})
-    if market_dates is not None:w_config["market_dates"] = list(market_dates)
-    legacy = prepare_wyckoff_inputs(frame, bars, config=w_config)
+    w_config = _wyckoff_config(config, market_dates)
+    if prepared_wyckoff is None:
+        legacy = prepare_wyckoff_inputs(frame, bars, config=w_config)
+    else:
+        if (not can_reuse_native_wyckoff(prepared_wyckoff, config) or
+                prepared_wyckoff.input_hash != _wyckoff_input_hash(frame, bars, w_config) or
+                prepared_wyckoff.output_hash != _wyckoff_output_hash(prepared_wyckoff.frame)):
+            raise ValueError("prepared Wyckoff input, policy or output identity drift")
+        # The no-calendar branch below adjusts eligibility, so keep the bound
+        # prepared result immutable and independently reusable.
+        legacy = prepared_wyckoff.frame.copy()
     if not calendar.provided:
         legacy["wyckoff_input_eligible"] = False
         legacy["wyckoff_reason_codes"] = [list(codes) + ["native_verified_calendar_unavailable"] for codes in legacy.wyckoff_reason_codes]

@@ -150,6 +150,8 @@ class TrainingParametersRequest(BaseModel):
 
 class TrainingPreflightRequest(TrainingParametersRequest):
     source_native_run_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,179}$')
+    raw_source_run_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,179}$')
+    resume_native_run_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,179}$')
 
 
 class DefaultProfileRequest(TrainingParametersRequest):
@@ -254,10 +256,9 @@ async def save_default(spec: DefaultProfileRequest, request: Request):
 
 @router.post('/training/preflight')
 async def training_preflight(spec: TrainingPreflightRequest, request: Request):
-    if spec.source_native_run_id is None:
-        return await asyncio.to_thread(request.app.state.training.preflight, spec.parameters)
-    return await asyncio.to_thread(request.app.state.training.preflight, spec.parameters,
-        source_native_run_id=spec.source_native_run_id)
+    sources = {key:getattr(spec,key) for key in ("source_native_run_id","raw_source_run_id","resume_native_run_id")
+               if getattr(spec,key) is not None}
+    return await asyncio.to_thread(request.app.state.training.preflight, spec.parameters, **sources)
 
 
 @router.post('/training/jobs', status_code=202)
