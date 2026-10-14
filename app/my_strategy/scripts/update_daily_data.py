@@ -31,6 +31,7 @@ from my_strategy.data_manager.config import load_data_config
 from my_strategy.data_manager.local_cache import LocalCache
 from my_strategy.data_manager.stock_pool import StockPoolManager
 from my_strategy.data_manager.updater import DailyUpdater
+from my_strategy.data_manager.update_universe import filter_update_pool, normalize_update_code
 from my_strategy.data_manager.industry_enricher import IndustryEnricher
 from my_strategy.storage.access_layer import get_data_access
 from my_strategy.validation.data_quality import DataQualityChecker
@@ -101,8 +102,8 @@ def update_today_realtime(config: dict, stocks: list[str] | None, end_date: str 
     target_date = end_date or local_now().strftime("%Y-%m-%d")
     target_stamp = target_date.replace("-", "")
     cache = LocalCache(config)
-    if stocks:
-        pool = StockPoolManager(config).build_pool(stocks=stocks)
+    if stocks is not None:
+        pool = StockPoolManager(config).build_pool(stocks=[normalize_update_code(code) for code in stocks]) if stocks else pd.DataFrame({"stock": []})
     else:
         db_stocks = get_data_access().list_stocks()
         if db_stocks:
@@ -113,6 +114,8 @@ def update_today_realtime(config: dict, stocks: list[str] | None, end_date: str 
         else:
             pool = pd.DataFrame({"stock": []})
 
+    pool, universe = filter_update_pool(pool)
+    universe["selected"] = len(pool)
     rows = []
     codes = pool["stock"].astype(str).drop_duplicates().tolist()
     total_batches = max(1, (len(codes) + batch_size - 1) // batch_size)
@@ -211,7 +214,9 @@ def update_today_realtime(config: dict, stocks: list[str] | None, end_date: str 
 
     if progress_bar is not None:
         progress_bar.close()
-    return pd.DataFrame(rows)
+    report = pd.DataFrame(rows)
+    report.attrs["update_universe"] = universe
+    return report
 
 
 def summarize_update(
@@ -240,6 +245,9 @@ def summarize_update(
         "failed": int((status == "failed").sum()),
         "skipped": int((status == "skipped").sum()),
         "quality_check": quality_summary or {},
+        "update_universe": report.attrs.get("update_universe", {}),
+        "target_date_covered": int((pd.to_datetime(report.get("last_date", pd.Series(dtype=str)), errors="coerce") >= pd.Timestamp(end_date)).sum()),
+        "not_updated": int((status == "skipped").sum()),
     }
     if storage.settings.write_db:
         summary["db_update_run"] = storage.record_data_update(
@@ -305,7 +313,7 @@ def _run_quality_check(
         return {"skipped": True, "reason": "no successful updates"}
     end = pd.to_datetime(end_date)
     start = (end - pd.Timedelta(days=QUALITY_CHECK_WINDOW_DAYS)).strftime("%Y-%m-%d")
-    check_end = (end + pd.Timedelta(days=QUALITY_CHECK_WINDOW_DAYS)).strftime("%Y-%m-%d")
+    check_end = end.strftime("%Y-%m-%d")
     try:
         checker = DataQualityChecker(config=config)
         quality_report = checker.check(
@@ -328,6 +336,7 @@ def _run_quality_check(
             "errors": sum(1 for issue in quality_report.issues if issue.severity == "error"),
             "warnings": sum(1 for issue in quality_report.issues if issue.severity == "warning"),
             "has_errors": quality_report.has_errors(),
+            "error_details": [issue.to_record() for issue in quality_report.issues if issue.severity == "error"],
         }
         return summary
     except Exception as exc:
@@ -339,8 +348,10 @@ def _sync_after_update(args, summary, quality_summary):
     """Derived failure does not erase a successfully committed raw update."""
     if args.skip_feature_sync:
         return {"status": "skipped", "reason": "explicit maintenance skip", "training_started": False}
-    if (quality_summary or {}).get("has_errors") or (quality_summary or {}).get("error"):
-        return {"status": "blocked", "reason": "raw quality check did not pass", "training_started": False}
+    if summary.get("failed") or (quality_summary or {}).get("has_errors") or (quality_summary or {}).get("error"):
+        return {"status": "blocked", "reason": "raw update or quality check did not pass", "training_started": False}
+    if summary.get("success") == 0:
+        return {"status": "skipped", "reason": "no successful market-data rows; no derived update started", "training_started": False}
     _emit_stage("feature_sync", "行情与元数据更新完成，正在同步当前特征…")
     import signal
     import threading
@@ -408,10 +419,14 @@ def main() -> None:
         stocks = [item.strip() for item in args.stocks.split(",") if item.strip()] or None
     use_progress_bar = not args.no_progress_bar and not args.json
     if args.today_realtime:
+        realtime_universe = None
         if stocks is None and args.max_stocks > 0:
-            pool = StockPoolManager(config).build_pool(mode=effective_mode).head(args.max_stocks)
-            stocks = pool["stock"].astype(str).tolist()
+            pool, realtime_universe = filter_update_pool(StockPoolManager(config).build_pool(mode=effective_mode))
+            stocks = pool.head(args.max_stocks)["stock"].astype(str).tolist()
+            realtime_universe["selected"] = len(stocks)
         report = update_today_realtime(config, stocks=stocks, end_date=args.end_date, batch_size=args.batch_size, use_progress_bar=use_progress_bar)
+        if realtime_universe is not None:
+            report.attrs["update_universe"] = realtime_universe
     else:
         progress_rows: list[dict[str, Any]] = []
 
@@ -489,7 +504,8 @@ def main() -> None:
     )
     summary["metadata_refresh"] = metadata_summary
     summary["feature_sync"] = _sync_after_update(args, summary, quality_summary)
-    exit_code = 130 if summary["feature_sync"].get("status") == "cancelled" else 2 if summary["failed"] or (quality_summary or {}).get("has_errors") else 0
+    summary["status"] = "failed" if summary["failed"] or (quality_summary or {}).get("has_errors") or (quality_summary or {}).get("error") else "partial" if summary["not_updated"] else "no_updates" if not summary["total"] else "completed"
+    exit_code = 130 if summary["feature_sync"].get("status") == "cancelled" else 2 if summary["status"] == "failed" else 0
     if args.json:
         output = {"summary": summary, "rows": report.to_dict("records")}
         print(json.dumps(output, ensure_ascii=False, indent=2, default=str))

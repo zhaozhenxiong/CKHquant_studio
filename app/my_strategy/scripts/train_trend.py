@@ -90,8 +90,10 @@ def main():
         print(json.dumps({'source_native_run_id':native,'training_started':False},ensure_ascii=False),flush=True)
         return
     from my_strategy.services.czsc_trend_pipeline import train_trend_consensus
-    report=train_trend_consensus(source_native_run_id=native,end=args.end,
-        config=cfg,cpu_workers=args.cpu_workers,device=args.device)
+    from my_strategy.services.czsc_training_acceleration import accelerated_pipeline
+    with accelerated_pipeline(args.cpu_workers, args.device):
+        report=train_trend_consensus(source_native_run_id=native,end=args.end,
+            config=cfg,cpu_workers=args.cpu_workers,device=args.device)
     from my_strategy.services.czsc_trend_support import _json
     from my_strategy.storage.czsc_results import ResultStore
     ResultStore().save(TRAIN_KIND,_json(report))

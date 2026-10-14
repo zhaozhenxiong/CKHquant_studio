@@ -1316,7 +1316,9 @@ class TrainingCenter:
         config_path = context.subdir("config") / "strategy.json"; _save(config_path, plan["config"])
         cohort_path = context.subdir("config") / "cohort.json"; _save(cohort_path, {"symbols": plan["cohort"],
             "plan_hash": plan["plan_hash"], "liquidity_universe": plan.get("liquidity_universe")})
-        training_module = "my_strategy.scripts.resume_trend_training" if resume_training else "my_strategy.scripts.train_trend"
+        training_module = "my_strategy.scripts.resume_training_legacy_cached" if resume_training else "my_strategy.scripts.train_trend"
+        if resume_training and (self.runs_root / resume_training / "reports/training_acceleration.json").is_file():
+            training_module = "my_strategy.scripts.resume_training_fast"
         args = [sys.executable, "-u", "-m", training_module, "--end", plan["data_end"],
             "--cohort-file", str(cohort_path), "--calendar-run-id", plan["calendar_run_id"],
             "--cpu-workers", str(plan["parameters"]["cpu_workers"]), "--device", plan["parameters"]["device"], "--config", str(config_path),

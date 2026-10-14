@@ -26,6 +26,31 @@ from my_strategy.storage.czsc_results import ResultStore
 ACTIVE = ("queued", "running", "cancelling")
 
 
+def _daily_update_result(log: str) -> dict[str, Any]:
+    marker = log.rfind('{\n  "summary":')
+    if marker < 0:
+        return {}
+    try:
+        result, _ = json.JSONDecoder().raw_decode(log[marker:])
+        return result if isinstance(result, dict) else {}
+    except ValueError:
+        return {}
+
+
+def _daily_update_failure(summary: dict[str, Any], returncode: int) -> str:
+    quality = summary.get("quality_check") or {}
+    reasons = []
+    if summary.get("failed"):
+        reasons.append(f"行情请求失败 {summary['failed']} 只")
+    if quality.get("has_errors"):
+        details = quality.get("error_details") or []
+        names = ", ".join(dict.fromkeys(str(item.get("entity_id", "")) for item in details))
+        reasons.append(f"数据质量检查未通过：{quality.get('errors', '?')} 项错误" + (f"（{names}）" if names else ""))
+    if quality.get("error"):
+        reasons.append(f"数据质量检查异常：{quality['error']}")
+    return "；".join(reasons) or f"行情更新进程退出码 {returncode}，请查看完整日志"
+
+
 class Cancelled(RuntimeError):
     pass
 
@@ -270,7 +295,7 @@ class TaskManager:
         if spec.get("end"):
             command.extend(["--end-date", spec["end"]])
         self._patch(job_id, run_id=context.run_id, progress_detail={"stage": "更新行情", "current": 0, "total": 0, "failed": 0})
-        offset, pending, failed = 0, "", 0
+        offset, pending, failed, skipped = 0, "", 0, 0
         with log_path.open("w", encoding="utf-8") as output:
             process = subprocess.Popen(command, cwd=PROJECT_ROOT, stdout=output, stderr=subprocess.STDOUT, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             try:
@@ -301,7 +326,12 @@ class TaskManager:
                             event = json.loads(line)
                         except ValueError:
                             continue
-                        if event.get('event') == 'feature_sync':
+                        if not isinstance(event, dict):
+                            continue
+                        if event.get('event') == 'stage':
+                            current = self.get(job_id).get('progress_detail') or {}
+                            self._patch(job_id, progress_detail={**current, 'stage': event.get('message') or event.get('stage')})
+                        elif event.get('event') == 'feature_sync':
                             current, total = event.get('current', event.get('completed', 0)) or 0, event.get('total', 0) or 0
                             self._patch(job_id, progress=min(95, current / total * 95) if total else 0,
                                 progress_detail={**{key: event[key] for key in ('stage', 'status', 'sync_id', 'failed') if key in event},
@@ -309,22 +339,32 @@ class TaskManager:
                         elif event.get("event") == "progress":
                             current, total = event.get("current", 0), event.get("total", 0)
                             failed += int(event.get("row", {}).get("status") in {"failed", "error"})
-                            self._patch(job_id, progress=current / total * 95 if total else 0, progress_detail={"stage": "更新行情", "current": current, "total": total, "failed": failed})
+                            skipped += int(event.get("row", {}).get("status") == "skipped")
+                            self._patch(job_id, progress=current / total * 95 if total else 0, progress_detail={"stage": "更新行情", "current": current, "total": total, "failed": failed, "not_updated": skipped})
                 if process.returncode:
-                    raise RuntimeError(log_path.read_text(encoding="utf-8", errors="replace")[-3000:])
+                    summary = (_daily_update_result(log_path.read_text(encoding="utf-8", errors="replace")).get("summary") or {})
+                    if not summary:
+                        raise RuntimeError(f"行情更新进程退出码 {process.returncode}；" + log_path.read_text(encoding="utf-8", errors="replace")[-1500:])
+                    return {"run_id": context.run_id, "run_context": context.to_dict(), "status": "failed",
+                            "update_summary": summary, "feature_sync": summary.get("feature_sync") or {},
+                            "error": _daily_update_failure(summary, process.returncode), "log_path": str(log_path)}
             finally:
                 if process.poll() is None:
                     process.kill()
                     process.wait()
         status = data_status()
         log = log_path.read_text(encoding="utf-8", errors="replace")
-        marker = log.rfind('{\n  "summary":')
-        update_result = json.loads(log[marker:]) if marker >= 0 else {}
+        update_result = _daily_update_result(log)
         summary = update_result.get('summary') or {}
         derived = summary.get('feature_sync') or update_result.get('feature_sync') or {}
+        universe = summary.get('update_universe') or {}
+        self._patch(job_id, progress_detail={"stage": "行情处理完成" if summary.get("status") == "completed" else "行情处理结束，部分股票未更新",
+            "current": summary.get("total", 0), "total": summary.get("total", 0), "failed": summary.get("failed", 0),
+            "not_updated": summary.get("not_updated", summary.get("skipped", 0)), "excluded": universe.get("excluded"),
+            "target_date_covered": summary.get("target_date_covered")})
         return {"run_id": context.run_id, "run_context": context.to_dict(), "data_status": status,
             "update_summary": summary, "feature_sync": derived,
-            "status": 'partial' if derived.get('status') in {'partial', 'failed', 'interrupted', 'cancelled'} else 'completed',
+            "status": 'partial' if summary.get('status') in {'partial', 'no_updates'} or derived.get('status') in {'partial', 'failed', 'interrupted', 'cancelled', 'blocked'} else 'completed',
             "error": derived.get('error'), "log": log[-6000:]}
 
     def close(self) -> None:

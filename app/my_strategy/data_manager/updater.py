@@ -24,6 +24,7 @@ from .downloader import DataDownloader, DownloadResult
 from .local_cache import LocalCache
 from .stock_pool import StockPoolManager, normalize_stock_code
 from .validator import DataValidator
+from .update_universe import filter_update_pool, normalize_update_code
 
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,9 @@ class DailyUpdater:
         self.use_progress_bar = bool(use_progress_bar)
 
     def update_one(self, code: str, start_date: str | None = None, end_date: str | None = None) -> dict:
-        code = normalize_stock_code(code)
+        code = normalize_update_code(code)
+        if code.endswith(".BJ"):
+            return self._status_row(code, None, 0, "update_scope", "skipped", "excluded_beijing_exchange")
         update_cfg = self.config.get("update", {})
         start_date = start_date or update_cfg.get("start_date", "2015-01-01")
         end_date = end_date or local_now().strftime("%Y-%m-%d")
@@ -74,11 +77,12 @@ class DailyUpdater:
 
         result = self.downloader.download_stock_daily(code, download_start.strftime("%Y-%m-%d"), end_date)
         if not result.ok or result.data is None or result.data.empty:
-            # If the requested interval is ahead of the latest cached date (e.g.
-            # today is a non-trading day or the market has not closed yet) and
-            # the upstream returns empty, the local cache is already up to date.
-            if old_last_date is not None and old_last_date >= download_start - pd.Timedelta(days=1):
-                row = self._status_row(code, old_last_date, len(old_df), "local_cache", "success", "")
+            # An authenticated, decoded empty interval is distinct from a request
+            # failure. Retain its old date and report no update, never fabricate
+            # target-date coverage from an existing cache.
+            if result.ok and result.empty_range and old_last_date is not None:
+                row = self._status_row(code, old_last_date, len(old_df), result.source, "skipped",
+                                       "verified_empty_requested_range; retained cache; target date not covered")
                 self.cache.update_status(row)
                 self.cache.append_log({**row, "time": now, "action": "skip", "start_date": download_start.strftime("%Y-%m-%d"), "end_date": end_date})
                 return row
@@ -142,7 +146,8 @@ class DailyUpdater:
         ``batch_cb`` is invoked with its status rows so callers can surface live
         progress instead of waiting for the whole universe to finish.
         """
-        codes = [normalize_stock_code(code) for code in stocks]
+        eligible, universe = filter_update_pool(pd.DataFrame({"stock": stocks}))
+        codes = eligible["stock"].tolist()
         end_date = end_date or local_now().strftime("%Y-%m-%d")
         end_dt = pd.to_datetime(end_date)
         update_cfg = self.config.get("update", {})
@@ -244,10 +249,15 @@ class DailyUpdater:
 
                 if group.empty:
                     old_last_date = None if old_df.empty else pd.to_datetime(old_df["date"]).max()
-                    if old_last_date is not None and old_last_date >= download_start_dt - pd.Timedelta(days=1):
-                        batch_rows.append(self._status_row(code, old_last_date, len(old_df), "local_cache", "success", ""))
+                    outcome = (result.stock_results or {}).get(code, {})
+                    verified_empty = result.ok and (outcome.get("status") == "no_data" or (
+                        grouped is not None and code in grouped.groups and outcome.get("status") != "failed"))
+                    if verified_empty and old_last_date is not None:
+                        batch_rows.append(self._status_row(code, old_last_date, len(old_df), source, "skipped",
+                            "verified_empty_requested_range; retained cache; target date not covered"))
                     else:
-                        batch_rows.append(self._status_row(code, None, len(old_df), source, "failed", f"no data returned for {code}"))
+                        error = outcome.get("error") or result.error or f"no verified data returned for {code}"
+                        batch_rows.append(self._status_row(code, old_last_date, len(old_df), source, "failed", error))
                     continue
 
                 new_df = DataValidator.clean_stock_daily(group, code)
@@ -374,17 +384,25 @@ class DailyUpdater:
         end_date: str | None = None,
         max_stocks: int | None = None,
     ) -> pd.DataFrame:
+        # Normalize explicit exchanges before the generic stock-pool normalizer.
+        stocks = [normalize_update_code(code) for code in stocks] if stocks else stocks
         pool = StockPoolManager(self.config).build_pool(mode=mode, stocks=stocks)
+        pool, universe = filter_update_pool(pool)
         if max_stocks and max_stocks > 0:
             pool = pool.head(max_stocks).copy()
         total = len(pool)
+        universe["selected"] = total
         if total == 0:
-            return pd.DataFrame()
+            report = pd.DataFrame(columns=["code", "status", "last_date", "error_msg"])
+            report.attrs["update_universe"] = universe
+            return report
 
         stock_list = pool["stock"].tolist()
         use_batch = self.config.get("update", {}).get("use_batch", True)
         if use_batch and total > 1:
-            return self._update_pool_batch(stock_list, end_date=end_date)
+            report = self._update_pool_batch(stock_list, end_date=end_date)
+            report.attrs["update_universe"] = universe
+            return report
 
         sleep_seconds = float(self.config.get("update", {}).get("sleep_seconds", 0.8))
         rows: list[dict] = [None] * total
@@ -450,7 +468,9 @@ class DailyUpdater:
 
         if progress_bar is not None:
             progress_bar.close()
-        return pd.DataFrame([r for r in rows if r is not None])
+        report = pd.DataFrame([r for r in rows if r is not None])
+        report.attrs["update_universe"] = universe
+        return report
 
     @staticmethod
     def _short_history_warning(rows: int, minimum: int) -> str:

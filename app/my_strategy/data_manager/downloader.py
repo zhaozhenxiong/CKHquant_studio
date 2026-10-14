@@ -27,6 +27,8 @@ class DownloadResult:
     data: pd.DataFrame | None = None
     source: str = ""
     error: str = ""
+    empty_range: bool = False
+    stock_results: dict | None = None
 
 
 class DataDownloader:
@@ -59,6 +61,8 @@ class DataDownloader:
             if not valid.ok:
                 return DownloadResult(False, None, result.source, valid.error)
             return DownloadResult(True, clean, result.source, "")
+        if result.ok and result.empty_range:
+            return DownloadResult(True, result.data, result.source, "", empty_range=True)
         return DownloadResult(False, None, result.source or "", result.error)
 
     def download_stocks_daily(
@@ -85,7 +89,9 @@ class DataDownloader:
             valid = DataValidator.validate_stock_daily(clean, min_rows=1, require_min_rows=False)
             if not valid.ok:
                 return DownloadResult(False, None, result.source, valid.error)
-            return DownloadResult(True, clean, result.source, "")
+            return DownloadResult(True, clean, result.source, "", stock_results=result.stock_results)
+        if result.ok and result.stock_results:
+            return DownloadResult(True, result.data, result.source, "", stock_results=result.stock_results)
         return DownloadResult(False, None, result.source or "", result.error)
 
     def download_stock_basic(self, min_count: int = 3000) -> DownloadResult:

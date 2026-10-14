@@ -102,6 +102,8 @@ class ProviderResult:
     data: pd.DataFrame | None = None
     source: str = ""
     error: str = ""
+    empty_range: bool = False
+    stock_results: dict[str, dict[str, Any]] | None = None
 
 
 class RateLimiter:
@@ -486,7 +488,7 @@ class EastmoneyProvider(MarketDataProvider):
                 raise ValueError("duplicated historical kline dates")
             frame = frame.loc[frame["date"].between(start, end)].copy()
             if frame.empty:
-                raise ValueError("no historical bars in requested date range")
+                return ProviderResult(True, frame, self.name, "", empty_range=True)
             frame["updated_at"] = pd.Timestamp.now(tz="Asia/Shanghai").strftime("%Y-%m-%d %H:%M:%S")
             valid = DataValidator.validate_stock_daily(frame, min_rows=1, require_min_rows=False)
             if not valid.ok:
@@ -617,7 +619,7 @@ class SinaUnadjustedProvider(MarketDataProvider):
                 raise ValueError("invalid or duplicated historical dates")
             frame = frame.loc[frame["date"].between(start, end)].sort_values("date").copy()
             if frame.empty:
-                raise ValueError("no historical bars in requested date range")
+                return ProviderResult(True, frame, self.name, "", empty_range=True)
             for column in ("open", "high", "low", "close", "volume", "amount"):
                 frame[column] = pd.to_numeric(frame[column], errors="raise")
                 if not frame[column].map(math.isfinite).all():
@@ -732,7 +734,7 @@ class TencentStarUnadjustedProvider(MarketDataProvider):
                 if len(bars) in {320, 640} and page_dates[0] > max(start, window_start):
                     raise ValueError(f"truncated Tencent historical year window: {year}")
             if not selected:
-                raise ValueError("no historical bars in requested date range")
+                return ProviderResult(True, pd.DataFrame(), self.name, "", empty_range=True)
             frame = pd.DataFrame(selected).sort_values("date").reset_index(drop=True)
             if frame["date"].duplicated().any():
                 raise ValueError("duplicated Tencent historical dates across year windows")
@@ -1667,7 +1669,7 @@ class UnifiedDataProvider:
             if result.ok:
                 if index > 0:
                     logger.warning("Fallback used: primary=%s resolved by %s", primary, name)
-                return ProviderResult(True, result.data, name, "")
+                return ProviderResult(True, result.data, name, "", result.empty_range, result.stock_results)
             errors.append(f"{name}: {result.error}")
         return ProviderResult(False, None, "", " | ".join(errors))
 
@@ -1682,6 +1684,7 @@ class UnifiedDataProvider:
     ) -> ProviderResult:
         frames: list[pd.DataFrame] = []
         failed: list[str] = []
+        outcomes: dict[str, dict[str, Any]] = {}
         for code in codes:
             result = self._call_with_retry(
                 provider,
@@ -1693,10 +1696,17 @@ class UnifiedDataProvider:
             )
             if result.ok and result.data is not None and not result.data.empty:
                 frames.append(result.data)
+                outcomes[code] = {"status": "success", "source": result.source}
+            elif result.ok and result.empty_range:
+                outcomes[code] = {"status": "no_data", "source": result.source,
+                                  "reason": "verified_empty_requested_range"}
             else:
+                outcomes[code] = {"status": "failed", "source": result.source,
+                                  "error": result.error or "unverified empty response"}
                 failed.append(f"{code}: {result.error or 'empty'}")
-        if frames:
-            return ProviderResult(True, pd.concat(frames, ignore_index=True), provider.name, "")
+        if frames or any(item["status"] == "no_data" for item in outcomes.values()):
+            combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+            return ProviderResult(True, combined, provider.name, "", stock_results=outcomes)
         tail = "; ".join(failed[:5])
         if len(failed) > 5:
             tail += "..."
@@ -1754,7 +1764,7 @@ class UnifiedDataProvider:
             if result.ok:
                 if index > 0:
                     logger.warning("Fallback used: primary=%s resolved by %s", primary, name)
-                return ProviderResult(True, result.data, name, "")
+                return ProviderResult(True, result.data, name, "", result.empty_range, result.stock_results)
             errors.append(f"{name}: {result.error}")
         return ProviderResult(False, None, "", " | ".join(errors))
 

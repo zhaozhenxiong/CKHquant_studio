@@ -20,6 +20,8 @@ Native 准备使用有界逐股调度、分段计时、原子检查点与同 run
 
 中断模型训练可通过独立恢复适配器继续同一未完成run。原生成源码、配置、来源、日历与已完成资产必须实际核验；已完成模型头、训练特征及逐股标签只读复用，未提交manifest的半品不能冒充完成。恢复代码另行冻结SHA和同run租约，不改变原算法、时间资格或最终费用验收。粘连JSON日志按完整对象解析，语法异常保留审计，有效事件的严格进度契约和非零退出失败不得放宽。见 `my_strategy/docs/training_resume.md`。
 
+新训练的独立加速适配器使用 `processed/stock_training/training_cache.db` 及相邻对象目录，提供按完成补位、模型与推理复用、逐股和阶段检查点、独立费用审核并行。来源、配置、精确输入及全部产物 SHA 约束复用；适配器另行冻结，不能热改活跃任务。结果按原人口顺序汇总，Broker 与资格算法不变。见 `my_strategy/docs/training_acceleration.md`。日更统一排除北交所，保留历史原始行；有效空行情区间标记未更新，不能以旧数据冒充目标日覆盖。见 `my_strategy/docs/daily_update_scope.md`。
+
 - `adapters/czsc_adapter.py`：原始 SQLite 日线只读输入契约。
 - `services/czsc_analysis.py`、`czsc_native_evidence.py`：冻结结构及因果来源证据。
 - `services/czsc_trend_*`：当前趋势、实际研究人口、训练、推理与完整资格。

@@ -41,13 +41,33 @@ def test_resume_routes_original_resources_and_complete_native_without_prepare(ro
     with pytest.raises(RuntimeError, match='routing verified'):
         instance._execute_training_job({'plan_id': plan['plan_id'], 'resume_training_run_id': 'original-model'})
     args = captured['args']
-    assert 'my_strategy.scripts.resume_trend_training' in args
+    assert 'my_strategy.scripts.resume_training_legacy_cached' in args
     assert args[args.index('--resume-training-run-id') + 1] == 'original-model'
     assert args[args.index('--source-native-run-id') + 1] == 'completed-native'
     assert args[args.index('--cpu-workers') + 1] == '10'
     assert args[args.index('--device') + 1] == 'mps'
     assert '--prepare-source-only' not in args and '--resume-native-run-id' not in args
     assert captured['kwargs']['initial_ids'] == {'raw_source_run_id': 'completed-raw', 'source_native_run_id': 'completed-native'}
+
+
+def test_accelerated_resume_routes_same_run_to_checkpoint_adapter(routed_training):
+    instance, plan = routed_training
+    sidecar = instance.runs_root / 'original-model/reports/training_acceleration.json'
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text('{}')  # The subprocess performs strict content verification.
+    captured = {}
+    def run(args, *unused, **kwargs):
+        captured.update(args=args, kwargs=kwargs)
+        raise RuntimeError('routing verified')
+    instance._run_process = run
+    with pytest.raises(RuntimeError, match='routing verified'):
+        instance._execute_training_job({'plan_id': plan['plan_id'], 'resume_training_run_id': 'original-model'})
+    args = captured['args']
+    assert 'my_strategy.scripts.resume_training_fast' in args
+    assert args[args.index('--resume-training-run-id') + 1] == 'original-model'
+    assert args[args.index('--source-native-run-id') + 1] == 'completed-native'
+    assert '--prepare-source-only' not in args
+    assert captured['kwargs']['source_reuse']['resume_training_run_id'] == 'original-model'
 
 
 @pytest.mark.parametrize('invalid', ['no_source', 'source_prepare'])
