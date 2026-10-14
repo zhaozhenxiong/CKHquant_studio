@@ -17,7 +17,7 @@ import gzip
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePath, PurePosixPath
 import re
 import sqlite3
 import tempfile
@@ -61,16 +61,24 @@ def _sha_bytes(value: bytes) -> str:
 
 def _sha_file(path: Path) -> str:
     """Hash an ordinary stable file, including same-size/same-mtime edits."""
+    path_before = path.stat()
     with path.open("rb") as source:
         before = os.fstat(source.fileno())
         result = hashlib.sha256()
         while chunk := source.read(1024 * 1024):
             result.update(chunk)
         after = os.fstat(source.fileno())
-    observed = path.stat()
+    # Keep each metadata API separate: Windows can expose creation time via
+    # path.stat().st_ctime but change time via fstat().st_ctime.
+    # Reopening the pathname still detects replacement of the file we hashed.
+    with path.open("rb") as current:
+        observed = os.fstat(current.fileno())
+    # Preserve the pathname API's own full identity as an additional guard.
+    path_after = path.stat()
     fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
     if any(getattr(before, field) != getattr(after, field) or
-           getattr(after, field) != getattr(observed, field) for field in fields):
+           getattr(after, field) != getattr(observed, field) or
+           getattr(path_before, field) != getattr(path_after, field) for field in fields):
         raise ValueError("cache dependency changed while hashing")
     return result.hexdigest()
 
@@ -83,7 +91,7 @@ def _name(value: str, what: str) -> str:
 
 def _relative_file(root: Path, value: str | Path) -> tuple[str, Path]:
     """Only canonical relative paths inside the caller's explicit root."""
-    text = str(value)
+    text = value.as_posix() if isinstance(value, PurePath) else str(value)
     relative = PurePosixPath(text)
     if (not text or "\\" in text or relative.is_absolute() or
             any(part in {".", ".."} for part in text.split("/")) or

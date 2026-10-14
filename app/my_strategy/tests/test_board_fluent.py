@@ -2,6 +2,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import multiprocessing
+from pathlib import Path
 import sqlite3
 
 import pandas as pd
@@ -71,14 +72,19 @@ def test_readonly_missing_does_not_create_and_exact_eight_tables(tmp_path):
     assert store.status()['market'] is None
 
 
-def test_generation_contract_binds_both_same_named_source_files(monkeypatch):
+@pytest.mark.parametrize('changed_source', ['storage/board_fluent.py', 'services/board_fluent.py'])
+def test_generation_contract_binds_both_same_named_source_files(monkeypatch, changed_source):
     before=service.generation_contract()
     assert set(before['code_hashes'])=={'storage/board_fluent.py','services/board_fluent.py'}
     original=service._file_hash
-    monkeypatch.setattr(service,'_file_hash',lambda path:'0'*64 if str(path).endswith('/storage/board_fluent.py') else original(path))
+    # inspect.getfile uses native separators; the contract uses POSIX keys on every OS.
+    monkeypatch.setattr(service,'_file_hash',lambda path:'0'*64 if Path(path).as_posix().endswith('/'+changed_source) else original(path))
     after=service.generation_contract()
-    assert after['code_hashes']['storage/board_fluent.py']!=before['code_hashes']['storage/board_fluent.py']
-    assert after['code_hashes']['services/board_fluent.py']==before['code_hashes']['services/board_fluent.py']
+    for source, checksum in before['code_hashes'].items():
+        if source == changed_source:
+            assert after['code_hashes'][source] != checksum
+        else:
+            assert after['code_hashes'][source] == checksum
     assert digest(after)!=digest(before)
 
 

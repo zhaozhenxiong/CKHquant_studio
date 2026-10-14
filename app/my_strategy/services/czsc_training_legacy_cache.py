@@ -252,7 +252,7 @@ def _reference_replay(plan_holder, cache_path, identity):
                 raise ValueError("legacy reference head is nonempty without a verified checkpoint")
             directory.rmdir()
         result = original_fit(data, directory, fold, cfg, contract)
-        files = {str((directory / name).relative_to(root)): _file_hash(directory / name)
+        files = {(directory / name).relative_to(root).as_posix(): _file_hash(directory / name)
                  for name in ("model.joblib", "manifest.json")}
         cache.put_checkpoint(token, root, {"manifest": _encode(result)}, files)
         return result

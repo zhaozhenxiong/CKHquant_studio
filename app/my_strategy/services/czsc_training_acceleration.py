@@ -45,7 +45,7 @@ def _files(root, directory):
     directory = Path(directory).resolve(); root = Path(root).resolve()
     if not directory.is_relative_to(root):
         raise ValueError("checkpoint output outside run")
-    return [str(p.relative_to(root)) for p in sorted(directory.rglob("*")) if p.is_file()]
+    return [p.relative_to(root).as_posix() for p in sorted(directory.rglob("*")) if p.is_file()]
 
 
 def _reference_directory(root, directory):
@@ -200,7 +200,7 @@ def accelerated_pipeline(cpu_workers, device="cpu", cache_path=None, *, resume_p
             return pd.read_parquet(destination) if load else None
         result = original["_pool_parquets"](paths, destination, load=load)
         cache.put_checkpoint(token, context.run_dir(), {"output": str(destination)},
-                             [str(destination.relative_to(context.run_dir()))])
+                             [destination.relative_to(context.run_dir()).as_posix()])
         return result
     def trend(data, directory, fold, cfg, *, contract):
         return checkpoint("trend_head", {"data": frame_identity(data), "fold": fold, "cfg": cfg, "contract": contract},
@@ -250,7 +250,7 @@ def accelerated_pipeline(cpu_workers, device="cpu", cache_path=None, *, resume_p
         result = checkpoint("holding_population", {"cfg": cfg, "records": records,
             "manifest_sha256": _file_hash(manifest), "exits_sha256": _file_hash(exits),
             "reference_population": dataset.get("reference_population"), "reference_mode": dataset.get("reference_mode")},
-            freeze, lambda _: [str(x.relative_to(root)) for x in (manifest, exits, frozen)])
+            freeze, lambda _: [x.relative_to(root).as_posix() for x in (manifest, exits, frozen)])
         p.audit_holding_population(result, root, cfg, records)
         dataset["holding_population"] = copy.deepcopy(result)
         return result

@@ -267,6 +267,7 @@ def test_probe_worker_uses_real_independent_seeds_next_open_and_complete_costed_
     monkeypatch.setattr(czsc_trend_consensus,'prepare_trend_decisions',lambda *a,**k:{'rows':copy.deepcopy(prepared),'config_hash':'synthetic-consensus','direction_points':[]})
     record={'symbol':'000001.SZ','sha256':'synthetic-stock'}
     result=quality._probe_worker((record,days,cfg,str(tmp_path),[],[]))
+    assert all('\\' not in asset['path'] for asset in result['files'].values())
     assert result['rows']==1
     artifact=read_account_artifact(tmp_path/result['files']['probes.json']['path'])
     probe=artifact['probes'][0]

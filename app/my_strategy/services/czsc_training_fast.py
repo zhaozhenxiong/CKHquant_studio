@@ -372,13 +372,13 @@ def _checkpoint_files(summary, root, output):
         path = _inside(root, asset['path'])
         if _file_hash(path) != asset['sha256']:
             raise ValueError('completed training checkpoint output SHA mismatch')
-        files[str(path.relative_to(root))] = asset['sha256']
+        files[path.relative_to(root).as_posix()] = asset['sha256']
     if output.is_dir():
         # Include manifests and compact account graphs, even when an original
         # summary lists the files before its final manifest is written.
         for path in output.iterdir():
             if path.is_file():
-                files[str(_inside(root, path).relative_to(root))] = _file_hash(path)
+                files[_inside(root, path).relative_to(root).as_posix()] = _file_hash(path)
     if not files:
         raise ValueError('empty completed training checkpoint')
     return files

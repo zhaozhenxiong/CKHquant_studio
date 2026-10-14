@@ -7,8 +7,9 @@ import hashlib
 import json
 import multiprocessing
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -77,6 +78,85 @@ def test_dependencies_rehashed_even_if_size_and_mtime_unchanged(tmp_path):
         store.put_json("probabilities", "new", [1], deps)
     source.unlink()
     assert store.get_json("probabilities", "input", deps) is None
+
+
+@pytest.mark.parametrize("field", ["st_dev", "st_ino", "st_ctime_ns"])
+def test_file_hash_uses_consistent_descriptor_metadata_on_windows(tmp_path, monkeypatch, field):
+    """Simulate differing path-stat/fstat representations without hiding drift."""
+    from my_strategy.services import czsc_training_cache as cache
+    path = tmp_path / "stable.json"
+    path.write_bytes(b"verified content")
+    fstat = cache.os.fstat
+    def descriptor_stat(fd):
+        value = fstat(fd)
+        fields = {key: getattr(value, key) for key in
+                  ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")}
+        fields[field] += 1 << 64
+        return SimpleNamespace(**fields)
+    monkeypatch.setattr(cache.os, "fstat", descriptor_stat)
+    assert cache._sha_file(path) == sha(b"verified content")
+
+
+@pytest.mark.parametrize("field", ["st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns"])
+def test_file_hash_still_rejects_descriptor_metadata_changes(tmp_path, monkeypatch, field):
+    from my_strategy.services import czsc_training_cache as cache
+    path = tmp_path / "changing.json"
+    path.write_bytes(b"content")
+    fstat = cache.os.fstat
+    observations = []
+    def descriptor_stat(fd):
+        value = fstat(fd)
+        fields = {key: getattr(value, key) for key in
+                  ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")}
+        if observations:
+            fields[field] += 1
+        observations.append(fields)
+        return SimpleNamespace(**fields)
+    monkeypatch.setattr(cache.os, "fstat", descriptor_stat)
+    with pytest.raises(ValueError, match="changed while hashing"):
+        cache._sha_file(path)
+
+
+def test_file_hash_rejects_full_width_path_identity_drift_even_if_descriptor_identity_matches(tmp_path, monkeypatch):
+    from my_strategy.services import czsc_training_cache as cache
+    path = tmp_path / "full-width-identity"
+    path.write_bytes(b"stable content")
+    original_stat, observed = Path.stat, []
+    def path_stat(self, *args, **kwargs):
+        value = original_stat(self, *args, **kwargs)
+        if self != path:
+            return value
+        fields = {key: getattr(value, key) for key in
+                  ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")}
+        if observed:
+            fields["st_ino"] += 1 << 64
+        observed.append(fields)
+        return SimpleNamespace(**fields)
+    monkeypatch.setattr(Path, "stat", path_stat)
+    with pytest.raises(ValueError, match="changed while hashing"):
+        cache._sha_file(path)
+
+
+def test_file_hash_reopens_path_and_rejects_same_content_replacement(tmp_path, monkeypatch):
+    from my_strategy.services import czsc_training_cache as cache
+    path, replacement = tmp_path / "source", tmp_path / "replacement"
+    path.write_bytes(b"same-size-content")
+    replacement.write_bytes(path.read_bytes())
+    before = path.stat()
+    os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+    original_open, opens = Path.open, []
+    def open_path(self, *args, **kwargs):
+        if self == path:
+            opens.append(self)
+            # A deterministic cross-platform simulation of the pathname being
+            # replaced after reading, while the original descriptor stays open.
+            if len(opens) > 1:
+                return original_open(replacement, *args, **kwargs)
+        return original_open(self, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", open_path)
+    with pytest.raises(ValueError, match="changed while hashing"):
+        cache._sha_file(path)
+    assert len(opens) == 2
 
 
 @pytest.mark.parametrize("deps", [{"relative.json": "0" * 64}, {"/missing": "bad"}, []])
@@ -155,7 +235,7 @@ def completed_stock(tmp_path):
     (stock / "observations.parquet").write_bytes(b"existing parquet fixture")
     (stock / "account.json").write_text('{"completed": false}')
     (stock / "manifest.json").write_text('{"committed": true}')
-    return root, [str(path.relative_to(root)) for path in sorted(stock.iterdir())]
+    return root, [path.relative_to(root).as_posix() for path in sorted(stock.iterdir())]
 
 
 def test_complete_checkpoint_reuses_summary_and_all_files_read_only(tmp_path, completed_stock):
@@ -174,6 +254,26 @@ def test_complete_checkpoint_reuses_summary_and_all_files_read_only(tmp_path, co
     different.mkdir()
     assert store.get_checkpoint("all-identity-inputs", different) is None
     assert {name: ((root / name).read_bytes(), (root / name).stat().st_mtime_ns) for name in files} == originals
+
+
+def test_native_windows_path_objects_publish_canonical_posix_checkpoint_keys(tmp_path, completed_stock):
+    root, files = completed_stock
+    store = TrainingCache(tmp_path / "cache.db")
+    native_files = {PureWindowsPath(name): sha((root / name).read_bytes()) for name in files}
+    store.put_checkpoint("portable", root, {"complete": True}, native_files)
+    assert store.get_checkpoint("portable", root) == {"complete": True}
+    payload = json.loads(gzip.decompress((store.objects_root / row(store)["object_path"]).read_bytes()))
+    assert sorted(payload["files"]) == sorted(files)
+    assert all("\\" not in name for name in payload["files"])
+
+
+@pytest.mark.parametrize("path", [PureWindowsPath("C:/outside"), PureWindowsPath("C:relative"),
+    PureWindowsPath("//server/share/outside"), PureWindowsPath("../outside")])
+def test_windows_path_objects_cannot_escape_checkpoint_root(tmp_path, completed_stock, path):
+    root, _ = completed_stock
+    store = TrainingCache(tmp_path / "cache.db")
+    with pytest.raises(ValueError, match="canonical relative path"):
+        store.put_checkpoint("escape", root, {}, [path])
 
 
 @pytest.mark.parametrize("index", range(3))
@@ -205,7 +305,8 @@ def test_missing_file_or_uncommitted_publication_never_hits(tmp_path, completed_
     assert store.get_checkpoint("k", root) is None
 
 
-@pytest.mark.parametrize("path", ["../outside", "/absolute", "a/../b", "./a", "a//b", "C:\\outside"])
+@pytest.mark.parametrize("path", ["../outside", "/absolute", "a/../b", "./a", "a//b", "C:\\outside",
+    "features\\000001_SZ\\manifest.json", "features\\..\\outside", "\\\\server\\share\\outside"])
 def test_checkpoint_rejects_path_escape_and_noncanonical_paths(tmp_path, completed_stock, path):
     root, _ = completed_stock
     store = TrainingCache(tmp_path / "cache.db")

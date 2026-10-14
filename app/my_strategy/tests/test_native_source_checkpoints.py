@@ -103,6 +103,22 @@ def test_pool_replenishes_before_first_slow_stock_and_bounds_inflight(monkeypatc
     assert events[-1]['eta_seconds']==0 and events[-1]['failed']==0
 
 
+@pytest.mark.parametrize('payloads,cpu_workers', [([],1),([1,2],1),([1,2],2)])
+def test_completed_batch_has_zero_eta_with_unchanged_clock(monkeypatch,capsys,payloads,cpu_workers):
+    # A short batch can finish within one Windows monotonic-clock tick.
+    monkeypatch.setattr(source.time,'monotonic',lambda:100.)
+    monkeypatch.setattr(source,'ProcessPoolExecutor',lambda max_workers,mp_context:ThreadPoolExecutor(max_workers=max_workers))
+    result=source._map_batches(lambda value:value*2,payloads,cpu_workers=cpu_workers,
+        prepare_batch_size=4,stage='native')
+    assert result==[value*2 for value in payloads]
+    events=[json.loads(line.split(' ',1)[1]) for line in capsys.readouterr().out.splitlines()]
+    assert events[-1]['completed']==len(payloads)
+    assert events[-1]['eta_seconds']==0
+    assert events[-1]['elapsed_seconds']==0 and events[-1]['throughput_per_minute']==0
+    if payloads:
+        assert events[0]['eta_seconds'] is None
+
+
 def test_interruption_resumes_only_verified_success_and_preserves_stock_order(frozen,capsys):
     run=interrupted(frozen)
     proof=source.verify_native_checkpoint(run.name)

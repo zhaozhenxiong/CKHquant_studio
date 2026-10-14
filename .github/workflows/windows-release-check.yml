@@ -48,7 +48,11 @@ jobs:
           assert direct['archive_info']['hashes']['sha256'] == expected['sha256']
           print('Verified installed CZSC is the bundled Windows asset', expected['sha256'])
           '@ | .venv-release/Scripts/python.exe -I -
-      - run: .venv-release/Scripts/python.exe -m my_strategy.scripts.ci_guard --skip-docker
+      # The selected portable archive is produced only after all platform source
+      # tests pass. Its final common wheel still receives installed verification
+      # below; standalone checks also run the complete source test suite here.
+      - if: ${{ inputs.portable_run_id == '' }}
+        run: .venv-release/Scripts/python.exe -m my_strategy.scripts.ci_guard --skip-docker
       - if: ${{ inputs.portable_run_id != '' }}
         uses: actions/download-artifact@v4
         with:

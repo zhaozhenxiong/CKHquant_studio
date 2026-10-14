@@ -257,7 +257,7 @@ def _probe_worker(payload):
         'seed_scope':'actual_reference_probe_Broker_no_entry_prefix',
         'seed_ledgers':{str(k):s['ledger'] for k,s in seed_accounts.items()},
         'seed_contexts':{str(k):s['series_context'] for k,s in seed_accounts.items()},'probes':probes})
-    files={p.name:{'path':str(p.relative_to(root)),'sha256':_file_hash(p)} for p in directory.iterdir() if p.is_file()}
+    files={p.name:{'path':p.relative_to(root).as_posix(),'sha256':_file_hash(p)} for p in directory.iterdir() if p.is_file()}
     print('DATASET reference_quality '+record['symbol']+' entries='+str(len(rows))+' exits=0',flush=True)
     return {'symbol':record['symbol'],'rows':len(rows),'files':files,'source_record_sha256':record['sha256']}
 
@@ -435,7 +435,7 @@ def _qualification_worker(payload,*,persist=True):
         'label_counts':_label_counts(observations)}
     directory=root/'validation/reference_quality/stocks'/record['symbol'].replace('.','_');directory.mkdir(parents=True)
     write_account_artifact(directory/'qualification.json',{'population':POPULATION,'symbol':record['symbol'],'windows':result})
-    files={p.name:{'path':str(p.relative_to(root)),'sha256':_file_hash(p)} for p in directory.iterdir() if p.is_file()}
+    files={p.name:{'path':p.relative_to(root).as_posix(),'sha256':_file_hash(p)} for p in directory.iterdir() if p.is_file()}
     print('DATASET reference_quality_fee '+record['symbol']+' entries='+str(len(artifact['probes']))+' exits=0',flush=True)
     return {'symbol':record['symbol'],'windows':[{'window':r['window'],'arms':r['arms']} for r in result],'files':files}
 
@@ -461,10 +461,10 @@ def run_reference_quality(records,calendar,config,context,trend_bundles,ma_bundl
         'continuation_policy_hash':config['E1_policy_hash'],'calendar_hash':stable_hash(calendar),
         'probe_initial_cash':PROBE_CASH,'records':summaries,'failures':[],
         'trend_catalog_hash':stable_hash(trend_bundles),'ma_exit_catalog_hash':stable_hash(ma_bundles),
-        'pooled_path':str(pooled.relative_to(root)),'pooled_sha256':_file_hash(pooled)}
+        'pooled_path':pooled.relative_to(root).as_posix(),'pooled_sha256':_file_hash(pooled)}
     manifest['population_hash']=stable_hash(manifest);path=directory/'manifest.json';_save(path,manifest)
     population={'population':POPULATION,'population_hash':manifest['population_hash'],'protocol_hash':protocol['protocol_hash'],
-        'manifest_path':str(path.relative_to(root)),'manifest_sha256':_file_hash(path),'pooled_path':str(pooled.relative_to(root)),
+        'manifest_path':path.relative_to(root).as_posix(),'manifest_sha256':_file_hash(path),'pooled_path':pooled.relative_to(root).as_posix(),
         'pooled_sha256':_file_hash(pooled),'source_snapshot_hash':config['source_snapshot_hash'],
         'pipeline_contract_hash':config['pipeline_contract_hash'],'continuation_policy_hash':config['E1_policy_hash'],
         'calendar_hash':stable_hash(calendar),'symbols':[r['symbol'] for r in records]}
@@ -476,7 +476,7 @@ def run_reference_quality(records,calendar,config,context,trend_bundles,ma_bundl
         try:
             directory=context.subdir('models',HEAD,fold['name']);m=train_reference_head(data,directory,fold,config,contract)
             bundles.append({'name':fold['name'],'fold':fold,'available_at':m['available_at'],
-                'heads':{HEAD:{'path':str(directory.relative_to(root)),'manifest_sha256':m['manifest_sha256']}}})
+                'heads':{HEAD:{'path':directory.relative_to(root).as_posix(),'manifest_sha256':m['manifest_sha256']}}})
             print('REFERENCE_QUALITY_HEAD '+fold['name']+' '+str(m['sample_counts']),flush=True)
         except ValueError as exc:
             if 'insufficient mature' not in str(exc) and 'require both classes' not in str(exc):raise
@@ -498,7 +498,7 @@ def run_reference_quality(records,calendar,config,context,trend_bundles,ma_bundl
         'aggregation':protocol['qualification']['aggregation']}
     qpath=context.subdir('validation','reference_quality')/'qualification.json';_save(qpath,qualification)
     block={'head':HEAD,'protocol':protocol,'protocol_hash':protocol['protocol_hash'],'population':population,'target_contract':contract,
-        'bundles':bundles,'unavailable_heads':unavailable,'qualification':{'path':str(qpath.relative_to(root)),
+        'bundles':bundles,'unavailable_heads':unavailable,'qualification':{'path':qpath.relative_to(root).as_posix(),
             'sha256':_file_hash(qpath),'report_hash':stable_hash(qualification),'status':qualification['status'],'passed':qualification['passed']},
         'status':'qualified' if qualification['passed'] else 'unqualified','publication_allowed':False,
         'required_for_core_selection':False,'label_counts':label_counts}

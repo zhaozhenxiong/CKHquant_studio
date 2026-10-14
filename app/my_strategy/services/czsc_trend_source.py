@@ -253,11 +253,12 @@ def _map_batches(worker, payloads, *, cpu_workers, prepare_batch_size, stage,
     def publish(inflight):
         elapsed = time.monotonic() - started
         rate = (completed - baseline) / elapsed if elapsed > 0 else 0
+        remaining = max(0, total - completed - failed)
         details = progress_details() if progress_details else {}
         print('SOURCE_BATCH ' + json.dumps(dict(stage=stage, completed=completed, total=total,
             failed=failed, reused=reused, inflight=inflight, processed=processed,
             elapsed_seconds=round(elapsed, 3), throughput_per_minute=round(rate * 60, 3),
-            eta_seconds=round(max(0, total - completed - failed) / rate, 1) if rate > 0 else None,
+            eta_seconds=0 if remaining == 0 else round(remaining / rate, 1) if rate > 0 else None,
             max_inflight=maximum, actual_device='cpu', **details)), flush=True)
 
     def accept(index, result, inflight):
@@ -822,10 +823,11 @@ def _prepare_native_source_unlocked(raw_source_run_id, *, config=None, cpu_worke
                 checkpoint=_save_stock_checkpoint(root,checkpoint)
                 accept(checkpoint)
                 elapsed=time.monotonic()-started;rate=(len(completed)-reused)/elapsed if elapsed>0 else 0
+                remaining=max(0,len(raw_by_symbol)-len(completed))
                 print('SOURCE_BATCH '+json.dumps(dict(stage='native',completed=len(completed),total=len(raw_by_symbol),
                     failed=len(failures),reused=reused,inflight=0,processed=cache_stats['cache_hits'],
                     elapsed_seconds=round(elapsed,3),throughput_per_minute=round(rate*60,3),
-                    eta_seconds=round(max(0,len(raw_by_symbol)-len(completed))/rate,1) if rate>0 else None,
+                    eta_seconds=0 if remaining==0 else round(remaining/rate,1) if rate>0 else None,
                     max_inflight=max(1,min(2*cpu_workers,prepare_batch_size)),actual_device='cpu',
                     cache_hits=cache_stats['cache_hits'],cache_misses=cache_stats['cache_misses'],
                     checkpoint_available=True)),flush=True)

@@ -54,7 +54,7 @@ def population(tmp_path, symbols=('000001.SZ', '600000.SH')):
         frames.append(frame)
         write_account_artifact(directory / 'probes.json', dict(population=quality.POPULATION,
                                symbol=record['symbol'], probes=[]))
-        files = {p.name: dict(path=str(p.relative_to(root)), sha256=adapter._file_hash(p))
+        files = {p.name: dict(path=p.relative_to(root).as_posix(), sha256=adapter._file_hash(p))
                  for p in directory.iterdir()}
         summaries.append(dict(symbol=record['symbol'], rows=2, files=files,
                               source_record_sha256=record['sha256'], source_record=record))
@@ -66,7 +66,7 @@ def population(tmp_path, symbols=('000001.SZ', '600000.SH')):
                     source_snapshot_hash='source', pipeline_contract_hash='pipeline', continuation_policy_hash='e1',
                     calendar_hash=stable_hash(calendar), probe_initial_cash=quality.PROBE_CASH,
                     records=summaries, failures=[], trend_catalog_hash=stable_hash(trends), ma_exit_catalog_hash=stable_hash(ma),
-                    pooled_path=str(pooled.relative_to(root)), pooled_sha256=adapter._file_hash(pooled))
+                    pooled_path=pooled.relative_to(root).as_posix(), pooled_sha256=adapter._file_hash(pooled))
     _resign(root, manifest)
     return dict(root=root, proof={}, config=cfg, records=records, calendar=dict(dates=calendar),
                 trends=trends, ma=ma, cached_E1={r['symbol']: r for r in e1['records']}, reused={},
@@ -83,6 +83,43 @@ def test_verify_complete_population_and_pooled_without_recalculation(tmp_path, m
     assert len(plan['proof']) == 13
     assert events[-1]['verified_reference_stocks'] == 2
     assert str(plan['root'] / 'dataset/E1/entries.parquet') in plan['proof']
+
+
+def test_reference_population_writer_produces_resumable_canonical_manifest(tmp_path, monkeypatch):
+    plan, manifest = population(tmp_path)
+    root = plan['root']
+    summaries = [{k: v for k, v in item.items() if k != 'source_record'} for item in manifest['records']]
+    monkeypatch.setattr(pipeline, '_bounded_results', lambda *args: iter(copy.deepcopy(summaries)))
+
+    def stop_before_training(data):
+        raise RuntimeError('population persisted; stop before model fitting')
+
+    def subdir(*parts):
+        path = root.joinpath(*parts)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    monkeypatch.setattr(quality, '_label_counts', stop_before_training)
+    with pytest.raises(RuntimeError, match='population persisted'):
+        quality.run_reference_quality(plan['records'], plan['calendar']['dates'], plan['config'],
+            types.SimpleNamespace(run_dir=lambda: root, subdir=subdir), plan['trends'], plan['ma'], 2, [])
+    produced = json.loads((root / 'dataset/reference_quality/manifest.json').read_text())
+    assert produced['pooled_path'] == 'dataset/reference_quality/observations.parquet'
+    assert all('\\' not in asset['path'] for record in produced['records'] for asset in record['files'].values())
+    assert adapter.verify_completed_reference(plan)['reused']['reference_pooled'] is True
+
+
+@pytest.mark.parametrize('path', [
+    r'dataset\reference_quality\observations.parquet',
+    'dataset/reference_quality/../reference_quality/observations.parquet',
+    './dataset/reference_quality/observations.parquet',
+])
+def test_reference_pool_rejects_resigned_noncanonical_path(tmp_path, path):
+    plan, manifest = population(tmp_path)
+    manifest['pooled_path'] = path
+    _resign(plan['root'], manifest)
+    with pytest.raises(ValueError, match='identity mismatch'):
+        adapter.verify_completed_reference(plan)
 
 
 @pytest.mark.parametrize('field', ['source_snapshot_hash', 'pipeline_contract_hash', 'continuation_policy_hash',
