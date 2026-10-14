@@ -15,6 +15,7 @@ import math
 import os
 from pathlib import Path
 import queue
+import re
 import signal
 import sqlite3
 import subprocess
@@ -42,6 +43,50 @@ class RevisionConflict(ValueError):
 
 class ModelQualificationError(ValueError):
     """Intact research artifacts lack heads or statistical coverage for selection."""
+
+
+_JSON_LOG_PREFIXES = frozenset({"PROGRESS", "DIAGNOSTIC_PROGRESS", "REFERENCE_QUALITY_PROGRESS", "RESUME_PROGRESS",
+    "POLICY_STOCK_DONE", "HEAD", "SOURCE_BATCH"})
+_LOG_RECORD = re.compile(r"(?<![A-Za-z0-9_])(?:" + "|".join(sorted(_JSON_LOG_PREFIXES | {
+    "RAW_SOURCE_RUN_ID", "NATIVE_SOURCE_RUN_ID", "TRAIN_RUN_ID", "COMPLETED", "CAPACITY_PROBE",
+    "DIAGNOSTIC_RUN_ID", "DATASET", "STAGE"}, key=len, reverse=True)) + r") ")
+
+
+def _training_log_records(line, diagnostic):
+    """Read complete protocol records without treating a shared stdout line as a frame.
+
+    Parent and worker prints can share one physical line. Decode a JSON object
+    before looking for the next marker so marker-like text inside strings stays
+    part of that object. Syntax noise is auditable; semantic checks stay with
+    the consumer and must still fail closed.
+    """
+    decoder = json.JSONDecoder()
+    position = 0
+    while match := _LOG_RECORD.search(line, position):
+        prefix = match.group().rstrip()
+        start = match.end()
+        if prefix in _JSON_LOG_PREFIXES:
+            start += len(line[start:]) - len(line[start:].lstrip())
+            try:
+                value, end = decoder.raw_decode(line, start)
+            except json.JSONDecodeError as exc:
+                diagnostic(prefix, match.start(), str(exc))
+                position = start
+                continue
+            position = end
+            if not isinstance(value, dict):
+                diagnostic(prefix, match.start(), "JSON event must be an object")
+                continue
+            yield prefix + " " + line[start:end]
+        else:
+            following = _LOG_RECORD.search(line, start)
+            end = following.start() if following else len(line)
+            position = end
+            record = line[match.start():end].strip()
+            if not record[len(prefix):].strip():
+                diagnostic(prefix, match.start(), "log record has no payload")
+                continue
+            yield record
 
 
 def _field(key, label, group, kind, default, minimum=None, maximum=None, unit="", choices=None, impact="retrain"):
@@ -1255,6 +1300,11 @@ class TrainingCenter:
                     **{k:v for k,v in payload.items() if k not in {"stage","completed","total"}})
         plan = self.load_plan(spec["plan_id"], spec.get("parameters"), claim=True,
             progress=verification_progress,check_cancel=check_cancel)
+        resume_training = spec.get("resume_training_run_id")
+        if resume_training is not None:
+            resume_training = _identifier(resume_training)
+            if spec.get("stage", "complete") != "complete" or not plan.get("source_reuse"):
+                raise ValueError("训练阶段恢复必须使用已核验的完整native来源和complete阶段")
         from my_strategy.services.czsc_research_calendar import load_verified_calendar
         calendar, _ = load_verified_calendar(plan["calendar_run_id"],runs_root=self.runs_root)
         if stable_hash([d for d in calendar if d <= plan["data_end"]]) != plan["calendar_hash"]:
@@ -1266,10 +1316,13 @@ class TrainingCenter:
         config_path = context.subdir("config") / "strategy.json"; _save(config_path, plan["config"])
         cohort_path = context.subdir("config") / "cohort.json"; _save(cohort_path, {"symbols": plan["cohort"],
             "plan_hash": plan["plan_hash"], "liquidity_universe": plan.get("liquidity_universe")})
-        args = [sys.executable, "-u", "-m", "my_strategy.scripts.train_trend", "--end", plan["data_end"],
+        training_module = "my_strategy.scripts.resume_trend_training" if resume_training else "my_strategy.scripts.train_trend"
+        args = [sys.executable, "-u", "-m", training_module, "--end", plan["data_end"],
             "--cohort-file", str(cohort_path), "--calendar-run-id", plan["calendar_run_id"],
             "--cpu-workers", str(plan["parameters"]["cpu_workers"]), "--device", plan["parameters"]["device"], "--config", str(config_path),
             "--stock-batch-size", str(plan["parameters"]["stock_batch_size"])]
+        if resume_training:
+            args.extend(["--resume-training-run-id", resume_training])
         stage = spec.get("stage", "complete")
         reuse = plan.get("source_reuse")
         if reuse:
@@ -1283,7 +1336,8 @@ class TrainingCenter:
         if reuse:
             initial_ids = dict(raw_source_run_id=reuse["raw_source_run_id"],source_native_run_id=reuse["source_native_run_id"])
             result_ids = self._run_process(args,context.subdir("logs")/"training.log",progress,check_cancel,
-                initial_ids=initial_ids,source_total=len(plan["cohort"]),source_reuse=reuse)
+                initial_ids=initial_ids,source_total=len(plan["cohort"]),
+                source_reuse={**reuse, **({"resume_training_run_id": resume_training} if resume_training else {})})
         else:
             initial_ids = {}
             if plan.get("raw_source_reuse"):
@@ -1298,6 +1352,11 @@ class TrainingCenter:
                       historical_union_count=len(plan["cohort"]), latest_eligible_count=plan.get("latest_eligible_count"),
                       stock_batch_size=plan["parameters"]["stock_batch_size"])
         if reuse: result.update(source_reused=True,source_reuse=copy.deepcopy(reuse),reused_model_or_label=False)
+        if resume_training:
+            if model_id != resume_training:
+                raise ValueError("恢复子进程返回了不同模型run，拒绝冒充同阶段续训")
+            result.update(training_resumed=True, resume_training_run_id=resume_training,
+                          resume_from_job_id=spec.get("resume_from_job_id"))
         if not model_id:
             if stage != "source_prepare": raise ValueError("训练子进程未返回可核验模型运行身份")
             result.update(status="source_prepared", selection=dict(status="not_requested"))
@@ -1514,11 +1573,14 @@ class TrainingCenter:
                 messages.put(None)
             reader = threading.Thread(target=collect, daemon=True); reader.start()
             result_ids = dict(initial_ids or {}); done = False; population_progress = {}; diagnostic_progress = {}; reference_progress = {}
+            resume_completed = 0
             last_progress={}
             def publish_progress(payload):
                 last_progress.clear();last_progress.update(copy.deepcopy(payload))
                 if progress:progress(payload)
-            with log_path.open("w", encoding="utf-8") as handle:
+            with (log_path.open("w", encoding="utf-8") as handle,
+                    log_path.with_suffix(".parser.jsonl").open("w", encoding="utf-8") as parser_log):
+                line_number = 0
                 if source_reuse:
                     event=dict(source_native_run_id=source_reuse["source_native_run_id"],
                         raw_source_run_id=source_reuse["raw_source_run_id"],
@@ -1527,98 +1589,117 @@ class TrainingCenter:
                         source_reused=True,reused_model_or_label=False)
                     handle.write("SOURCE_REUSE_VERIFIED "+json.dumps(event,ensure_ascii=False)+"\n"); handle.flush()
                     if progress: publish_progress(dict(stage="frozen_source_verification",completed=source_total,total=source_total,
-                        message="复用已实际核验的完整冻结输入，所有模型头在新运行重新训练",children=copy.deepcopy(result_ids),source_reused=True))
+                        message=("复用已核验冻结输入，核验并继续原模型已完成阶段" if source_reuse.get("resume_training_run_id")
+                                 else "复用已实际核验的完整冻结输入，所有模型头在新运行重新训练"),
+                        children=copy.deepcopy(result_ids),source_reused=True))
                 while not done:
                     if check_cancel: check_cancel()
                     try: line = messages.get(timeout=.25)
                     except queue.Empty: continue
                     if line is None: done=True; continue
-                    handle.write(line); handle.flush(); text = line.strip()
-                    identity_changed=False
-                    for prefix, key in (("RAW_SOURCE_RUN_ID ", "raw_source_run_id"), ("NATIVE_SOURCE_RUN_ID ", "source_native_run_id"), ("TRAIN_RUN_ID ", "model_run_id"), ("COMPLETED ", "model_run_id"), ("CAPACITY_PROBE ", "model_run_id"), ("DIAGNOSTIC_RUN_ID ","diagnostic_run_id")):
-                        if text.startswith(prefix):
-                            result_ids[key] = text[len(prefix):].split()[0];identity_changed=True
-                    dataset_event=None
-                    if text.startswith("PROGRESS "):
-                        event=json.loads(text[len("PROGRESS "):])
-                        population=event.get("population");fold=event.get("fold")
-                        if (event.get("stage")!="dataset" or event.get("scope")!="current_population_only"
-                                or type(event.get("completed")) is not int or type(event.get("total")) is not int
-                                or event["total"]!=source_total or not 0<=event["completed"]<=source_total
-                                or not isinstance(population,str)
-                                or not (population in {"E0","E1"} and fold is None or
-                                    isinstance(fold,str) and fold and population=="final_population/"+fold)
-                                or event["completed"]<population_progress.get(population,0)):
-                            raise ValueError("人口进度与冻结股票总数、单折身份或已完成数量不同")
-                        population_progress[population]=event["completed"]
-                        dataset_event=dict(stage=population,population=population,fold=fold,
-                            completed=event["completed"],total=event["total"],scope=event["scope"],
-                            message=text[-500:],children=copy.deepcopy(result_ids))
-                    diagnostic_event=None
-                    if text.startswith("DIAGNOSTIC_PROGRESS "):
-                        event=json.loads(text[len("DIAGNOSTIC_PROGRESS "):]);fold=event.get("fold")
-                        if (event.get("stage")!="diagnostics" or event.get("scope")!="current_diagnostic_fold_stocks"
-                                or not isinstance(fold,str) or not fold
-                                or type(event.get("completed")) is not int or type(event.get("total")) is not int
-                                or event["total"]!=source_total or not 0<=event["completed"]<=source_total
-                                or event["completed"]<diagnostic_progress.get(fold,0)):
-                            raise ValueError("诊断进度与冻结单折股票人口、scope或完成数量不同")
-                        diagnostic_progress[fold]=event["completed"]
-                        diagnostic_event={**event,"children":copy.deepcopy(result_ids)}
-                    reference_event=None
-                    if text.startswith("REFERENCE_QUALITY_PROGRESS "):
-                        event=json.loads(text[len("REFERENCE_QUALITY_PROGRESS "):]);stage=event.get("stage")
-                        if (stage not in {"reference_quality_population", "reference_quality_fee_qualification"}
-                                or event.get("scope")!="current_reference_population_stocks" or event.get("fold") is not None
-                                or type(event.get("completed")) is not int or type(event.get("total")) is not int
-                                or event["total"]!=source_total or not 0<=event["completed"]<=source_total
-                                or event["completed"]<reference_progress.get(stage,0)):
-                            raise ValueError("参考质量进度与冻结股票人口、scope或完成数量不同")
-                        reference_progress[stage]=event["completed"]
-                        reference_event={**event,"children":copy.deepcopy(result_ids),"actual_device":"cpu","device":"cpu"}
-                    if progress:
-                        if reference_event is not None:
-                            publish_progress(reference_event)
-                        elif dataset_event is not None:
-                            publish_progress(dataset_event)
-                        elif diagnostic_event is not None:
-                            publish_progress(diagnostic_event)
-                        elif text.startswith("POLICY_STOCK_DONE "):
-                            event=json.loads(text[len("POLICY_STOCK_DONE "):])
-                            if (event.get("total")!=source_total or type(event.get("current")) is not int
-                                    or not 0<=event["current"]<=source_total or event.get("device")!="cpu"):
-                                raise ValueError("政策完成事件与冻结股票人口或实际CPU设备不同")
-                            publish_progress(dict(stage="independent_policy_selection",completed=event["current"],total=event["total"],
-                                failed=event.get("failed",0),actual_device=event["device"],device=event["device"],message=text[-500:],
-                                children=copy.deepcopy(result_ids),symbol=event.get("symbol"),fold=event.get("fold")))
-                        elif text.startswith("HEAD "):
-                            event=json.loads(text[len("HEAD "):]); actual=event.get("device") or "unknown"
-                            publish_progress(dict(stage="model_head",completed=0,total=0,actual_device=actual,
-                                device=actual,
-                                head=event.get("head"),fold=event.get("fold"),architecture=event.get("architecture"),
-                                training_resources=event.get("training_resources"),message=text[-500:],children=copy.deepcopy(result_ids)))
-                        elif text.startswith("SOURCE_BATCH "):
-                            batch = json.loads(text[len("SOURCE_BATCH "):])
-                            if (batch.get("total") != source_total or batch.get("stage") not in {"raw","native"}
-                                    or type(batch.get("completed")) is not int or not 0 <= batch["completed"] <= source_total):
-                                raise ValueError("来源进度与冻结人口不同")
-                            details = {k:v for k,v in batch.items() if k not in {"stage","completed","total"}}
-                            if "inflight" in details: details["in_flight"] = details.pop("inflight")
-                            if "throughput_per_minute" in details: details["stocks_per_minute"] = details.pop("throughput_per_minute")
-                            details.setdefault("actual_device","cpu")
-                            publish_progress(dict(stage="raw_source_freeze" if batch["stage"] == "raw" else "native_source_prepare",
-                                completed=batch["completed"], total=batch["total"], message=text[-500:], children=copy.deepcopy(result_ids),**details))
-                        elif text.startswith("DATASET "):
-                            # Per-stock detail is retained in the log. Only the
-                            # parent emits complete single-population progress.
-                            pass
-                        elif text.startswith("STAGE "):
-                            publish_progress(dict(stage=text.split()[1],completed=0,total=0,
-                                message=text[-500:],children=copy.deepcopy(result_ids)))
-                        elif identity_changed:
-                            payload=copy.deepcopy(last_progress) or dict(stage="training",completed=0,total=0)
-                            payload.update(message=text[-500:],children=copy.deepcopy(result_ids))
-                            publish_progress(payload)
+                    handle.write(line); handle.flush(); line_number += 1
+                    def parser_diagnostic(prefix, offset, error):
+                        parser_log.write(json.dumps(dict(line_number=line_number, offset=offset,
+                            prefix=prefix, error=error, raw_line_sha256=hashlib.sha256(line.encode("utf-8")).hexdigest(),
+                            excerpt=line[offset:offset+500]), ensure_ascii=False)+"\n")
+                        parser_log.flush()
+                    for text in _training_log_records(line, parser_diagnostic):
+                        if text.startswith("RESUME_PROGRESS "):
+                            event = json.loads(text[len("RESUME_PROGRESS "):])
+                            if (event.get("stage") != "training_resume_verification"
+                                    or type(event.get("completed")) is not int or type(event.get("total")) is not int
+                                    or event["total"] != source_total * 3
+                                    or not resume_completed <= event["completed"] <= event["total"]):
+                                raise ValueError("恢复资产核验进度与原冻结人口或已核验数不同")
+                            resume_completed = event["completed"]
+                            publish_progress({**event, "children": copy.deepcopy(result_ids),
+                                "scope": "frozen_training_resume_assets", "actual_device": "cpu", "device": "cpu"})
+                            continue
+                        identity_changed=False
+                        for prefix, key in (("RAW_SOURCE_RUN_ID ", "raw_source_run_id"), ("NATIVE_SOURCE_RUN_ID ", "source_native_run_id"), ("TRAIN_RUN_ID ", "model_run_id"), ("COMPLETED ", "model_run_id"), ("CAPACITY_PROBE ", "model_run_id"), ("DIAGNOSTIC_RUN_ID ","diagnostic_run_id")):
+                            if text.startswith(prefix):
+                                result_ids[key] = text[len(prefix):].split()[0];identity_changed=True
+                        dataset_event=None
+                        if text.startswith("PROGRESS "):
+                            event=json.loads(text[len("PROGRESS "):])
+                            population=event.get("population");fold=event.get("fold")
+                            if (event.get("stage")!="dataset" or event.get("scope")!="current_population_only"
+                                    or type(event.get("completed")) is not int or type(event.get("total")) is not int
+                                    or event["total"]!=source_total or not 0<=event["completed"]<=source_total
+                                    or not isinstance(population,str)
+                                    or not (population in {"E0","E1"} and fold is None or
+                                        isinstance(fold,str) and fold and population=="final_population/"+fold)
+                                    or event["completed"]<population_progress.get(population,0)):
+                                raise ValueError("人口进度与冻结股票总数、单折身份或已完成数量不同")
+                            population_progress[population]=event["completed"]
+                            dataset_event=dict(stage=population,population=population,fold=fold,
+                                completed=event["completed"],total=event["total"],scope=event["scope"],
+                                message=text[-500:],children=copy.deepcopy(result_ids))
+                        diagnostic_event=None
+                        if text.startswith("DIAGNOSTIC_PROGRESS "):
+                            event=json.loads(text[len("DIAGNOSTIC_PROGRESS "):]);fold=event.get("fold")
+                            if (event.get("stage")!="diagnostics" or event.get("scope")!="current_diagnostic_fold_stocks"
+                                    or not isinstance(fold,str) or not fold
+                                    or type(event.get("completed")) is not int or type(event.get("total")) is not int
+                                    or event["total"]!=source_total or not 0<=event["completed"]<=source_total
+                                    or event["completed"]<diagnostic_progress.get(fold,0)):
+                                raise ValueError("诊断进度与冻结单折股票人口、scope或完成数量不同")
+                            diagnostic_progress[fold]=event["completed"]
+                            diagnostic_event={**event,"children":copy.deepcopy(result_ids)}
+                        reference_event=None
+                        if text.startswith("REFERENCE_QUALITY_PROGRESS "):
+                            event=json.loads(text[len("REFERENCE_QUALITY_PROGRESS "):]);stage=event.get("stage")
+                            if (stage not in {"reference_quality_population", "reference_quality_fee_qualification"}
+                                    or event.get("scope")!="current_reference_population_stocks" or event.get("fold") is not None
+                                    or type(event.get("completed")) is not int or type(event.get("total")) is not int
+                                    or event["total"]!=source_total or not 0<=event["completed"]<=source_total
+                                    or event["completed"]<reference_progress.get(stage,0)):
+                                raise ValueError("参考质量进度与冻结股票人口、scope或完成数量不同")
+                            reference_progress[stage]=event["completed"]
+                            reference_event={**event,"children":copy.deepcopy(result_ids),"actual_device":"cpu","device":"cpu"}
+                        if progress:
+                            if reference_event is not None:
+                                publish_progress(reference_event)
+                            elif dataset_event is not None:
+                                publish_progress(dataset_event)
+                            elif diagnostic_event is not None:
+                                publish_progress(diagnostic_event)
+                            elif text.startswith("POLICY_STOCK_DONE "):
+                                event=json.loads(text[len("POLICY_STOCK_DONE "):])
+                                if (event.get("total")!=source_total or type(event.get("current")) is not int
+                                        or not 0<=event["current"]<=source_total or event.get("device")!="cpu"):
+                                    raise ValueError("政策完成事件与冻结股票人口或实际CPU设备不同")
+                                publish_progress(dict(stage="independent_policy_selection",completed=event["current"],total=event["total"],
+                                    failed=event.get("failed",0),actual_device=event["device"],device=event["device"],message=text[-500:],
+                                    children=copy.deepcopy(result_ids),symbol=event.get("symbol"),fold=event.get("fold")))
+                            elif text.startswith("HEAD "):
+                                event=json.loads(text[len("HEAD "):]); actual=event.get("device") or "unknown"
+                                publish_progress(dict(stage="model_head",completed=0,total=0,actual_device=actual,
+                                    device=actual,
+                                    head=event.get("head"),fold=event.get("fold"),architecture=event.get("architecture"),
+                                    training_resources=event.get("training_resources"),message=text[-500:],children=copy.deepcopy(result_ids)))
+                            elif text.startswith("SOURCE_BATCH "):
+                                batch = json.loads(text[len("SOURCE_BATCH "):])
+                                if (batch.get("total") != source_total or batch.get("stage") not in {"raw","native"}
+                                        or type(batch.get("completed")) is not int or not 0 <= batch["completed"] <= source_total):
+                                    raise ValueError("来源进度与冻结人口不同")
+                                details = {k:v for k,v in batch.items() if k not in {"stage","completed","total"}}
+                                if "inflight" in details: details["in_flight"] = details.pop("inflight")
+                                if "throughput_per_minute" in details: details["stocks_per_minute"] = details.pop("throughput_per_minute")
+                                details.setdefault("actual_device","cpu")
+                                publish_progress(dict(stage="raw_source_freeze" if batch["stage"] == "raw" else "native_source_prepare",
+                                    completed=batch["completed"], total=batch["total"], message=text[-500:], children=copy.deepcopy(result_ids),**details))
+                            elif text.startswith("DATASET "):
+                                # Per-stock detail is retained in the log. Only the
+                                # parent emits complete single-population progress.
+                                pass
+                            elif text.startswith("STAGE "):
+                                publish_progress(dict(stage=text.split()[1],completed=0,total=0,
+                                    message=text[-500:],children=copy.deepcopy(result_ids)))
+                            elif identity_changed:
+                                payload=copy.deepcopy(last_progress) or dict(stage="training",completed=0,total=0)
+                                payload.update(message=text[-500:],children=copy.deepcopy(result_ids))
+                                publish_progress(payload)
             code = process.wait()
             if code: raise ValueError(f"训练阶段失败，退出码 {code}；日志：{log_path}")
         except BaseException:

@@ -162,6 +162,8 @@ class TrainingJobRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     plan_id: str = Field(pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,179}$')
     parameters: dict[str, Any] | None = None
+    resume_training_run_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,179}$')
+    resume_from_job_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,179}$')
 
 
 class ModelValidationJobRequest(BaseModel):

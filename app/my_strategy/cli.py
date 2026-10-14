@@ -13,6 +13,8 @@ from my_strategy.runtime_env import configure_utf8_stdio
 
 
 DELEGATES = {
+    "resume-trend-training": ["-m", "my_strategy.scripts.resume_trend_training"],
+    "run-training-job": ["-m", "my_strategy.scripts.run_training_job"],
     "build-board-fluent": ["-m", "my_strategy.scripts.build_board_fluent"],
     "sync-daily-features": ["-m", "my_strategy.scripts.sync_daily_features"],
     "refresh-native-cache": ["-m", "my_strategy.scripts.refresh_native_cache"],

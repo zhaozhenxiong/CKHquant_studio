@@ -698,6 +698,87 @@ def test_process_population_progress_resets_each_fold_and_ignores_stock_details(
     assert all(item["completed"]<=item["total"] for item in events if "completed" in item)
 
 
+def test_process_accepts_original_progress_dataset_join_and_keeps_raw_stdout(tmp_path):
+    line = ('PROGRESS {"stage":"dataset","population":"E1","fold":null,'
+        '"completed":2044,"total":3194,"scope":"current_population_only"}'
+        'DATASET E1 600739.SH entries=13 exits=36')
+    events = []
+    path = tmp_path / "joined.log"
+    center.TrainingCenter._run_process([sys.executable, "-u", "-c", "print("+repr(line)+",flush=True)"],
+        path, events.append, None, source_total=3194)
+    assert [(e["stage"], e["completed"], e["total"]) for e in events] == [("E1",2044,3194)]
+    assert path.read_text() == line + "\n"
+    assert path.with_suffix(".parser.jsonl").read_text() == ""
+
+
+def test_process_decodes_all_json_records_on_one_line_without_splitting_strings(tmp_path):
+    def record(prefix, value):
+        return prefix + " " + json.dumps(value, separators=(",", ":"))
+    message = 'worker said PROGRESS {"total":999} DATASET example HEAD {}'
+    line = "".join([
+        record("SOURCE_BATCH", dict(stage="native", completed=3, total=3)),
+        record("HEAD", dict(head="trend", device="cpu", message=message)),
+        record("POLICY_STOCK_DONE", dict(current=1, total=3, device="cpu")),
+        *[record("PROGRESS", dict(stage="dataset", population="E1", fold=None,
+            completed=count, total=3, scope="current_population_only", message=message)) for count in (1,2)],
+        record("DIAGNOSTIC_PROGRESS", dict(stage="diagnostics", fold="production",
+            completed=1, total=3, scope="current_diagnostic_fold_stocks")),
+        record("REFERENCE_QUALITY_PROGRESS", dict(stage="reference_quality_population", fold=None,
+            completed=2, total=3, scope="current_reference_population_stocks")),
+        "TRAIN_RUN_ID joined-model"])
+    events = []
+    path = tmp_path / "many-records.log"
+    ids = center.TrainingCenter._run_process([sys.executable,"-u","-c","print("+repr(line)+",flush=True)"],
+        path, events.append, None, source_total=3)
+    assert ids["model_run_id"] == "joined-model"
+    assert [e["stage"] for e in events] == ["native_source_prepare", "model_head",
+        "independent_policy_selection", "E1", "E1", "diagnostics", "reference_quality_population",
+        "reference_quality_population"]
+    assert [e["completed"] for e in events if e.get("population")=="E1"] == [1,2]
+    assert path.read_text() == line + "\n"
+    assert path.with_suffix(".parser.jsonl").read_text() == ""
+
+
+@pytest.mark.parametrize("prefix", ["PROGRESS", "DIAGNOSTIC_PROGRESS", "REFERENCE_QUALITY_PROGRESS",
+    "POLICY_STOCK_DONE", "HEAD", "SOURCE_BATCH"])
+def test_process_audits_malformed_json_and_recovers_next_joined_event(tmp_path, prefix):
+    valid = "PROGRESS " + json.dumps(dict(stage="dataset", population="E0", fold=None,
+        completed=1, total=3, scope="current_population_only"))
+    lines = ["warning: unstructured output {", prefix + " {broken}" + valid,
+        prefix + " []", "TRAIN_RUN_ID recovered-model"]
+    events = []
+    path = tmp_path / "syntax-noise.log"
+    command = [sys.executable,"-u","-c","\n".join("print("+repr(line)+",flush=True)" for line in lines)]
+    ids = center.TrainingCenter._run_process(command, path, events.append, None, source_total=3)
+    assert ids["model_run_id"] == "recovered-model"
+    assert [(e["stage"],e["completed"],e["total"]) for e in events] == [("E0",1,3),("E0",1,3)]
+    assert path.read_text() == "\n".join(lines) + "\n"
+    diagnostics = [json.loads(line) for line in path.with_suffix(".parser.jsonl").read_text().splitlines()]
+    assert [d["line_number"] for d in diagnostics] == [2,3]
+    assert all(d["prefix"]==prefix and len(d["raw_line_sha256"])==64 for d in diagnostics)
+    assert diagnostics[1]["error"] == "JSON event must be an object"
+
+
+def test_process_joined_records_still_reject_semantic_progress_regression(tmp_path):
+    def record(completed):
+        return "PROGRESS " + json.dumps(dict(stage="dataset", population="E1", fold=None,
+            completed=completed, total=3, scope="current_population_only"))
+    line = record(2) + record(1)
+    command = [sys.executable,"-u","-c","print("+repr(line)+",flush=True)"]
+    with pytest.raises(ValueError, match="人口进度"):
+        center.TrainingCenter._run_process(command,tmp_path/"regression.log",None,None,source_total=3)
+
+
+def test_process_malformed_json_cannot_mask_nonzero_child_exit(tmp_path):
+    line = "HEAD {broken}"
+    command = [sys.executable,"-u","-c","print("+repr(line)+",flush=True); raise SystemExit(7)"]
+    path = tmp_path / "child-failure.log"
+    with pytest.raises(ValueError, match="退出码 7"):
+        center.TrainingCenter._run_process(command,path,None,None,source_total=3)
+    assert path.read_text() == line + "\n"
+    assert json.loads(path.with_suffix(".parser.jsonl").read_text())["prefix"] == "HEAD"
+
+
 @pytest.mark.parametrize("change",[{"completed":4},{"completed":-1},{"completed":True},
     {"total":4},{"population":"final_population/foreign"},{"scope":"all_folds_summed"}])
 def test_process_rejects_wrong_population_progress_even_without_callback(tmp_path,change):

@@ -18,6 +18,8 @@ Native 准备使用有界逐股调度、分段计时、原子检查点与同 run
 
 ## 模块边界
 
+中断模型训练可通过独立恢复适配器继续同一未完成run。原生成源码、配置、来源、日历与已完成资产必须实际核验；已完成模型头、训练特征及逐股标签只读复用，未提交manifest的半品不能冒充完成。恢复代码另行冻结SHA和同run租约，不改变原算法、时间资格或最终费用验收。粘连JSON日志按完整对象解析，语法异常保留审计，有效事件的严格进度契约和非零退出失败不得放宽。见 `my_strategy/docs/training_resume.md`。
+
 - `adapters/czsc_adapter.py`：原始 SQLite 日线只读输入契约。
 - `services/czsc_analysis.py`、`czsc_native_evidence.py`：冻结结构及因果来源证据。
 - `services/czsc_trend_*`：当前趋势、实际研究人口、训练、推理与完整资格。
