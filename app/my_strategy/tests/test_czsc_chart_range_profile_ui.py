@@ -32,7 +32,7 @@ let coordinateShift=0;
 function series(){return{setData(){},setMarkers(){},applyOptions(){},priceScale:()=>({applyOptions(){}}),priceToCoordinate:price=>350-(price-8)*60+coordinateShift};}
 const chart={addCandlestickSeries:series,addHistogramSeries:series,addLineSeries:series,removeSeries(){},resize(){},
   subscribeCrosshairMove(){},subscribeClick(){},timeScale:()=>scale,priceScale:()=>({width:()=>50})};
-global.LightweightCharts={createChart:()=>chart,LineStyle:{Solid:0,Dashed:2}};global.window={LightweightCharts};
+global.LightweightCharts={createChart:()=>chart,LineStyle:{Solid:0,Dashed:2}};global.window={LightweightCharts,addEventListener:()=>{}};
 const code=fs.readFileSync(process.argv[1],'utf8').replace('init().catch(showError);',
   'globalThis.rangeTest={state,renderAnalysis,syncChartRange,applyChartRange,zoomChart,drawChipProfile,resizeCharts};');
 vm.runInThisContext(code);

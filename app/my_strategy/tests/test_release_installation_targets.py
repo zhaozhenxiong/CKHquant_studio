@@ -12,18 +12,22 @@ import pytest
 def no_model_installation_probe(monkeypatch):
     import verify_installation
 
-    status = {"mode": "rule_observation_no_model", "current_selection": None, "active_model": None, "models": []}
-    result = {"strategy_version": "trend_consensus", "research": {"model_run_id": None, "account_simulated": False},
+    status = {"model_family": "current", "strategy_version": "reference_position_v1",
+              "current_selection": None, "active_model_run_id": None, "active_model": None,
+              "models": [], "selection_events": [], "certification": {"publication_allowed": False}}
+    position = {"schema": "reference_position_v1", "account_scope": "none", "reference_only": True,
+        "target_position_fraction": 0., "previous_reference_target": 0., "change_fraction": 0.,
+        "reference_delta": 0., "change_basis": "previous_reference_target_for_same_symbol",
+        "risk_budget_fraction": .01, "stale": True, "predictive_gate_passed": False, "action": "WAIT"}
+    result = {"strategy_version": "reference_position_v1", "research": {"model_run_id": None, "account_simulated": False},
               "run_id": "installation-analysis", "publication_allowed": False,
               "analysis_mode": "reference", "account_scope": "none", "account_actions": None,
               "source_reference_points": [], "reference_points": [],
               "chart_evidence": {"statistics": {"visible_window": {"broker_fills": 0}}, "rows": [{
-                  "direction": "BUY", "reference_risk_plan": {"risk_budget_fraction": .01},
-                  "position_reference": {"account_scope": "none", "reference_only": True,
-                      "target_position_fraction": None, "reference_quality_threshold": .1,
-                      "reference_buy_total_threshold": .5}, "agents": {
-                  "ma": {"model_available": False, "p_up": None, "p_down": None, "p_neutral": None},
-                  "high_return": {"probability": None}, "reference_quality": {"probability": None}}}]}}
+                  "direction": "UNAVAILABLE", "action": "WAIT", "emitted": False,
+                  "position_reference": position, "agents": {
+                  "ma": {"status": "model_unavailable", "in_scope": False,
+                         "p_up": None, "p_down": None, "p_neutral": None}}}]}}
     calls = []
 
     def request(base, path, method="GET", body=None):
@@ -34,74 +38,70 @@ def no_model_installation_probe(monkeypatch):
         return result
 
     monkeypatch.setattr(verify_installation, "request", request)
-    return verify_installation.verify_no_model_trend, status, result, calls
+    return verify_installation.verify_no_model_reference, status, result, calls
 
 
 def test_installation_verifier_accepts_only_current_untrained_default(no_model_installation_probe):
     verify, _, _, calls = no_model_installation_probe
     result = verify("http://isolated", "fixture-calendar", "2024-12-30")
-    assert result["status"] == "passed" and result["strategy"] == "trend_consensus"
+    assert result["status"] == "passed" and result["strategy"] == "reference_position_v1"
     assert result["model_run_id"] is None and result["probabilities"] is None
     assert result["publication_allowed"] is False and result["analysis_rows"] == 1
     assert result["account_simulated"] is False and result["unqualified_allocation_blocked"] is True
-    body = calls[1][3]
-    assert body == {"symbol": "000001.SZ", "start": "2024-01-01", "end": "2024-12-30",
-                    "model_family": "current", "calendar_run_id": "fixture-calendar",
-                    "device": "cpu"}
-    assert "consensus_version" not in body  # Exercise the actual public default.
+    assert result["target_position_fraction"] == result["change_fraction"] == 0. and result["stale"]
+    assert calls[1][3] == {"symbol": "000001.SZ", "start": "2024-01-01", "end": "2024-12-30",
+                    "model_family": "current", "calendar_run_id": "fixture-calendar", "device": "cpu"}
 
 
 @pytest.mark.parametrize("key,value", [
-    ("mode", "configured_run_auto_prior_heads"),
+    ("strategy_version", "trend_consensus"), ("model_family", "legacy"),
     ("current_selection", {"run_id": "workstation-model"}),
-    ("models", [{"run_id": "workstation-model"}]),
-    ("active_model", {"run_id": "workstation-model"}),
+    ("models", [{"run_id": "workstation-model"}]), ("active_model_run_id", "workstation-model"),
+    ("active_model", {"run_id": "workstation-model"}), ("selection_events", [{"run_id": "workstation-model"}]),
+    ("certification", {"publication_allowed": True}),
 ])
 def test_installation_verifier_rejects_wrong_default_or_workstation_model(no_model_installation_probe, key, value):
     verify, status, _, calls = no_model_installation_probe
     status[key] = value
-    with pytest.raises(RuntimeError, match="Public defaults must select trend consensus without a workstation model"):
+    with pytest.raises(RuntimeError, match="Public defaults must select reference_position_v1 without a workstation model"):
         verify("http://isolated", "fixture-calendar", "2024-12-30")
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("case", ["legacy_analysis", "bound_model", "empty_rows"])
+@pytest.mark.parametrize("case", ["legacy_analysis", "bound_model", "empty_rows", "publication"])
 def test_installation_verifier_rejects_invalid_untrained_analysis(no_model_installation_probe, case):
     verify, _, result, _ = no_model_installation_probe
     if case == "legacy_analysis":
-        result["strategy_version"] = "czsc_trend_consensus"
+        result["strategy_version"] = "trend_consensus"
     elif case == "bound_model":
         result["research"]["model_run_id"] = "workstation-model"
+    elif case == "publication":
+        result["publication_allowed"] = True
     else:
         result["chart_evidence"]["rows"] = []
-    with pytest.raises(RuntimeError, match="Untrained installation failed its actual default trend analysis"):
+    with pytest.raises(RuntimeError, match="Untrained installation failed its actual default reference analysis"):
         verify("http://isolated", "fixture-calendar", "2024-12-30")
 
 
-@pytest.mark.parametrize("key,value", [("model_available", True), ("p_up", 0.0), ("p_down", 0.5), ("p_neutral", 1.0)])
-def test_installation_verifier_rejects_fabricated_ma_probabilities(no_model_installation_probe, key, value):
+@pytest.mark.parametrize("key,value", [("status", "scored"), ("in_scope", True),
+    ("p_up", 0.0), ("p_down", 0.5), ("p_neutral", 1.0)])
+def test_installation_verifier_rejects_fabricated_probabilities(no_model_installation_probe, key, value):
     verify, _, result, _ = no_model_installation_probe
     result["chart_evidence"]["rows"][0]["agents"]["ma"][key] = value
-    with pytest.raises(RuntimeError, match="Untrained installation fabricated MA probabilities"):
+    with pytest.raises(RuntimeError, match="Untrained installation fabricated reference direction probabilities"):
         verify("http://isolated", "fixture-calendar", "2024-12-30")
 
 
-@pytest.mark.parametrize("probability", [0.0, 0.5])
-def test_installation_verifier_rejects_fabricated_high_return_probability(no_model_installation_probe, probability):
-    verify, _, result, _ = no_model_installation_probe
-    result["chart_evidence"]["rows"][0]["agents"]["high_return"]["probability"] = probability
-    with pytest.raises(RuntimeError, match="Untrained installation fabricated high-return probability"):
-        verify("http://isolated", "fixture-calendar", "2024-12-30")
-
-
-@pytest.mark.parametrize("case", ["quality_probability", "account_simulation", "broker_fill", "missing_source_points",
-    "wrong_reference_clock", "unqualified_target", "lower_quality_gate", "lower_total_gate", "higher_risk_budget",
-    "actual_exit_probability"])
-def test_installation_verifier_preserves_account_free_unqualified_reference(no_model_installation_probe, case):
+@pytest.mark.parametrize("case", ["quality_probability", "high_return_probability", "account_simulation", "broker_fill",
+    "missing_source_points", "wrong_reference_clock", "unqualified_target", "missing_stale", "wrong_delta",
+    "wrong_previous", "manual_change_basis", "higher_risk_budget", "actual_exit_probability", "fake_final_point"])
+def test_installation_verifier_preserves_account_free_unscored_reference(no_model_installation_probe, case):
     verify, _, result, _ = no_model_installation_probe
     row = result["chart_evidence"]["rows"][0]
     if case == "quality_probability":
-        row["agents"]["reference_quality"]["probability"] = .9
+        row["agents"]["reference_quality"] = {"probability": .9}
+    elif case == "high_return_probability":
+        row["high_return_probability"] = .5
     elif case == "account_simulation":
         result["research"]["account_simulated"] = True
     elif case == "broker_fill":
@@ -113,27 +113,70 @@ def test_installation_verifier_preserves_account_free_unqualified_reference(no_m
             "reference_price_source": "signal_day_close", "reference_price_date": "2024-01-08"}]
     elif case == "unqualified_target":
         row["position_reference"]["target_position_fraction"] = .2
-    elif case == "lower_quality_gate":
-        row["position_reference"]["reference_quality_threshold"] = .05
-    elif case == "lower_total_gate":
-        row["position_reference"]["reference_buy_total_threshold"] = .4
+    elif case == "missing_stale":
+        row["position_reference"]["stale"] = False
+    elif case == "wrong_delta":
+        row["position_reference"]["change_fraction"] = -.2
+    elif case == "wrong_previous":
+        row["position_reference"]["previous_reference_target"] = .2
+    elif case == "manual_change_basis":
+        row["position_reference"]["change_basis"] = "manual_inventory"
     elif case == "higher_risk_budget":
-        row["reference_risk_plan"]["risk_budget_fraction"] = .02
+        row["position_reference"]["risk_budget_fraction"] = .02
+    elif case == "fake_final_point":
+        result["reference_points"] = [{"side": "SELL", "change_fraction": 0.}]
     else:
-        row["position_reference"]["exit_probability"] = .6
+        row["exit_probability"] = .6
     with pytest.raises(RuntimeError):
         verify("http://isolated", "fixture-calendar", "2024-12-30")
 
 
-def test_installation_verifier_accepts_source_sell_and_final_exposure_reduction(no_model_installation_probe):
+def test_installation_verifier_preserves_independent_source_sell_without_forced_target_sale(no_model_installation_probe):
     verify, _, result, _ = no_model_installation_probe
-    row = result["chart_evidence"]["rows"][0]
-    row["direction"] = "SELL"
-    row["position_reference"]["target_position_fraction"] = 0.
     result["source_reference_points"] = [{"side": "SELL", "date": "2024-01-05",
         "reference_price_source": "signal_day_close", "reference_price_date": "2024-01-05"}]
     actual = verify("http://isolated", "fixture-calendar", "2024-12-30")
-    assert actual["source_reference_sides"] == ["SELL"]
+    assert actual["source_reference_sides"] == ["SELL"] and actual["final_reference_points"] == 0
+    assert actual["target_position_fraction"] == actual["change_fraction"] == 0.
+
+
+@pytest.fixture
+def reference_training_capabilities(monkeypatch, tmp_path):
+    import verify_installation
+    from my_strategy.services import reference_training as training
+    payloads = {"/api/training/capabilities": training.capabilities(),
+                "/api/training/profiles": training.profiles(metadata_root=tmp_path / "metadata"),
+                "/api/training/status": training.status(metadata_root=tmp_path / "metadata", runs_root=tmp_path / "runs")}
+    monkeypatch.setattr(verify_installation, "request", lambda base, path: payloads[path])
+    return verify_installation.verify_training_center, payloads
+
+
+def test_installation_training_center_has_reference_device_and_defaults(reference_training_capabilities):
+    verify, _ = reference_training_capabilities
+    result = verify("http://isolated")
+    assert result["strategy_version"] == "reference_position_v1" and result["field_count"] == 13
+    assert result["defaults"]["device"] == "auto" and result["defaults"]["batch_size"] == 8192
+    assert result["training_job_submitted"] is False and result["publication_allowed"] is False
+
+
+@pytest.mark.parametrize("case", ["legacy_family", "legacy_defaults", "cpu_default", "weaker_risk", "old_trainable_head", "publication"])
+def test_installation_training_center_rejects_stale_or_weakened_contract(reference_training_capabilities, case):
+    verify, payloads = reference_training_capabilities
+    capabilities = payloads["/api/training/capabilities"]
+    if case == "legacy_family":
+        capabilities["strategy_version"] = "trend_consensus"
+    elif case == "legacy_defaults":
+        capabilities["defaults"]["min_net_return"] = .08
+    elif case == "cpu_default":
+        capabilities["defaults"]["device"] = "cpu"
+    elif case == "weaker_risk":
+        payloads["/api/training/profiles"]["default_profile"]["parameters"]["risk_budget"] = .05
+    elif case == "old_trainable_head":
+        capabilities["stages"].append({"key": "entry", "trainable": True})
+    else:
+        capabilities["qualification"]["publication_allowed"] = True
+    with pytest.raises(RuntimeError):
+        verify("http://isolated")
 
 
 @pytest.mark.parametrize("code", [200, 400, 405])
@@ -189,20 +232,22 @@ def test_application_wheel_resource_copies_redact_host_paths_without_changing_so
     assert "Users" not in (runtime / "vendor/wheels/wheel-index.json").read_text()
 
 
-def test_installation_probe_reloads_new_direction_MA_exit_and_entry_targets(monkeypatch, tmp_path):
-    from verify_installation import trend_model_probe
+def test_installation_probe_fits_calibrates_reloads_current_reference_model(monkeypatch, tmp_path):
+    from verify_installation import model_probe
     monkeypatch.setenv("KHQUANT_ARTIFACT_ROOT", str(tmp_path / "isolated-artifacts"))
-    result = trend_model_probe("cpu")
-    assert result["fixture"] == "synthetic_installation_labels_only"
-    assert result["market_effectiveness_certified"] is False and result["publication_allowed"] is False
-    heads = result["heads"]
-    assert heads["trend_direction"]["classes"] == ["UP", "DOWN", "NEUTRAL"]
-    assert heads["trend_direction"]["input_columns"] == 20
-    assert heads["ma_exit"]["input_columns"] == 30 and heads["ma_exit"]["stage"] == "E0"
-    assert "exit_next_open_minus_frozen_continue" in heads["ma_exit"]["target"]
-    assert heads["entry"]["stage"] == "E1" and "high_return_and_initial_risk" in heads["entry"]["target"]
-    quality = heads["reference_quality"]
-    assert quality["population"] == "account_free_daily_original_BUY_risk_probes"
-    assert quality["account_input_columns"] == [] and quality["fee_qualified"] is False
-    assert quality["publication_allowed"] is False and "complete_fee_net_8pct_and_2R" in quality["target"]
-    assert all(head["prediction_rows"] == 4 and head["save_reload_identical"] and head["actual_device"] == "cpu" for head in heads.values())
+    result = model_probe("cpu")
+    assert result["training_device"] == result["inference"]["device"] == "cpu"
+    assert "trend_consensus" not in result
+    model = result["reference_position_v1"]
+    assert model["fixture"] == "synthetic_installation_labels_only"
+    assert model["market_effectiveness_certified"] is False and model["publication_allowed"] is False
+    assert model["active_model_registered"] is False and model["account_simulated"] is False
+    assert model["family"] == "reference_position_v1" and model["classes"] == ["UP", "DOWN", "NEUTRAL"]
+    assert model["input_columns"] == 58 and model["architecture"] in {"linear", "mlp32x16"}
+    assert model["training_device"] == model["calibration_device"] == model["inference_device"] == "cpu"
+    assert model["numeric_dtype"] == "float32" and model["price_label_dtype"] == "float64"
+    assert model["prediction_rows"] == 4 and model["unscored_rows"] == 2
+    assert model["save_reload_identical"] and model["missing_input_stays_unscored"]
+    assert model["calibration_method"] == "chronological_positive_temperature_no_intercepts"
+    assert model["selection_source"] == "purged_train_internal_only" and model["temperature"] > 0
+    assert len(model["weights_sha256"]) == 64

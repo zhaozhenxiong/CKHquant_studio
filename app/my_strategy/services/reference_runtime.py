@@ -15,8 +15,8 @@ from my_strategy.core.run_context import stable_hash
 REFERENCE_FAMILY = "reference_position_v1"
 DISPLAY_NAME = "参考买卖点与逐股仓位"
 DEFAULT_POSITION_POLICY = {
-    "version": REFERENCE_FAMILY, "max_stock_weight": .20, "risk_budget": .005,
-    "position_step": .025, "hysteresis": .005, "edge_entry": .05, "edge_full": .35,
+    "version": REFERENCE_FAMILY, "max_stock_weight": .20, "risk_budget": .01,
+    "position_step": .025, "hysteresis": .01, "edge_entry": .05, "edge_full": .35,
     "wait_band": .03, "atr_stop_multiple": 2.5, "min_stop_distance": .01,
     "max_stop_distance": .25,
 }

@@ -20,6 +20,7 @@ const fs=require('fs'),vm=require('vm'),assert=require('node:assert/strict');
 global.KHQuantChartEvidence=require(require('path').join(require('path').dirname(process.argv[1]),'chart_evidence.js'));
 const elements=new Map();function element(id){if(!elements.has(id))elements.set(id,{value:'',textContent:'',innerHTML:'',hidden:false,disabled:false,querySelector:()=>element(id+'-child')});return elements.get(id);}
 global.document={getElementById:element};
+global.window={addEventListener:()=>{}};
 const source=fs.readFileSync(process.argv[1],'utf8').replace('init().catch(showError);','globalThis.scanTest={state,renderScan};');
 vm.runInThisContext(source);const {state,renderScan}=scanTest;
 element('scan-filter').value='all';

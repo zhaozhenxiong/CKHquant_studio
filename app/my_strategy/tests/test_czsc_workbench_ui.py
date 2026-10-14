@@ -58,7 +58,7 @@ const chart = {addCandlestickSeries:() => (candles=series()),addHistogramSeries:
   resize() {},timeScale:() => ({subscribeVisibleLogicalRangeChange() {},fitContent() {},getVisibleLogicalRange:() => ({from:0,to:1}),height:() => 20,timeToCoordinate:(time) => time.endsWith('02') ? 30 : 80}),
   priceScale:() => ({width:() => 50})};
 global.LightweightCharts = {createChart:() => chart,LineStyle:{Solid:0,Dashed:2}};
-global.window = {LightweightCharts};
+global.window = {LightweightCharts,addEventListener:()=>{}};
 const source = fs.readFileSync(process.argv[1],'utf8').replace('init().catch(showError);',
   'globalThis.overlayTest = {state,renderAnalysis,renderIndicatorReadout,emptyChart};');
 vm.runInThisContext(source);

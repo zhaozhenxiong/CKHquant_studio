@@ -191,3 +191,14 @@ process.stdout.write(evidence.agentOverviewHtml(row));
     html = subprocess.run(["node", "-e", script, str(source)], check=True, capture_output=True, text=True).stdout
     assert "联合方向模型" in html and "上涨 60%" in html and "买方 70 / 100" in html
     assert "权重" not in html and "实际贡献" not in html and "高收益" not in html
+
+
+def test_reference_factory_position_defaults_match_training_and_auto_inherits_model():
+    from my_strategy.services.reference_runtime import DEFAULT_POSITION_POLICY
+    from my_strategy.services.reference_training import DEFAULTS
+    from my_strategy.web_dashboard.api import AnalysisRequest, TaskSpec
+    for key in ("risk_budget", "hysteresis", "max_stock_weight", "position_step"):
+        assert DEFAULT_POSITION_POLICY[key] == DEFAULTS[key]
+    # An unspecified override must remain absent until the chosen run is resolved.
+    assert AnalysisRequest(symbol="000001.SZ").consensus_config is None
+    assert TaskSpec(symbols=["000001.SZ"]).consensus_config is None

@@ -26,6 +26,7 @@ function element(id) {
   return elements.get(id);
 }
 global.document={getElementById:element};
+global.window={addEventListener:()=>{}};
 global.KHQuantChartEvidence=require(require('path').join(require('path').dirname(process.argv[1]),'chart_evidence.js'));
 const source=fs.readFileSync(process.argv[1],'utf8').replace('init().catch(showError);',
   'globalThis.progressTest={state,renderComputeResult,renderScanComputePlan,taskDetail,taskActions,refreshCompute};');

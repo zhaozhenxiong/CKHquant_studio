@@ -22,6 +22,7 @@ function element(id) {
   return elements.get(id);
 }
 global.document={getElementById:element};
+global.window={addEventListener:()=>{}};
 global.sessionStorage={getItem:() => null};
 global.fetch=async () => { throw new Error('network unavailable'); };
 global.KHQuantMarkers={describe:() => ''};

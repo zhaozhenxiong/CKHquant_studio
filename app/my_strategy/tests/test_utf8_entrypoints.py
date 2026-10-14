@@ -99,7 +99,7 @@ main()
 
 
 @pytest.mark.parametrize("arguments, expected", [
-    (["--help"], "当前趋势共识策略"),
+    (["--help"], "参考买卖点与每股仓位"),
     (["analyze", "--help"], "计算设备"),
 ])
 def test_real_cli_help_is_utf8_under_cp1252(tmp_path, arguments, expected):

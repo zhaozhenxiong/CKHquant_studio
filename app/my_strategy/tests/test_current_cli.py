@@ -25,26 +25,31 @@ def test_current_entry_rejects_old_model_family_option(name):
         cli.build_parser().parse_args([name,"--initial-cash","100000"])
 
 
-def test_train_cli_delegates_frozen_input_and_effective_parameters_without_training(monkeypatch):
+def test_train_cli_preflights_reference_source_and_effective_parameters_without_training(monkeypatch, tmp_path, capsys):
+    from my_strategy.services import model_training_center
     recorded = []
-    monkeypatch.setattr(subprocess, "call", lambda args, **kwargs: recorded.append((args, kwargs)) or 0)
-    assert cli.main(["train-trend", "--end", "2026-10-12", "--raw-source-run-id", "immutable-raw", "--stocks", "600519.SH,000001.SZ",
-                     "--config", "/tmp/current.json", "--stock-batch-size", "360", "--prepare-source-only"]) == 0
-    arguments, context = recorded[0]
-    assert arguments[1:3] == ["-m", "my_strategy.scripts.train_trend"]
-    assert arguments[arguments.index("--symbols") + 1:-1] == ["600519.SH", "000001.SZ"]
-    assert arguments[arguments.index("--stock-batch-size") + 1] == "360"
-    assert "--cohort-size" not in arguments and "--capacity-tiers" not in arguments
-    assert arguments[arguments.index("--raw-source-run-id") + 1] == "immutable-raw"
-    assert arguments[-1] == "--prepare-source-only"
-    assert "--device" not in arguments and "--cpu-workers" not in arguments
-    assert context["env"]["PYTHONIOENCODING"] == "utf-8"
+    class Center:
+        def preflight(self, parameters, **kwargs):
+            recorded.append((parameters, kwargs))
+            return {"valid": True, "plan": {"plan_id": "frozen-reference-plan"}}
+        def run_training_job(self, *args, **kwargs):
+            pytest.fail("preflight-only launched training")
+    monkeypatch.setattr(model_training_center, "TrainingCenter", Center)
+    monkeypatch.setattr(subprocess, "call", lambda *args, **kwargs: pytest.fail("reference CLI delegated legacy training"))
+    config = tmp_path / "reference.json"
+    config.write_text(json.dumps({"epochs": 3, "batch_size": 2048}))
+    assert cli.main(["train-reference", "--end", "2026-10-12", "--source-native-run-id", "immutable-native",
+                     "--config", str(config), "--device", "mps", "--preflight-only", "--json"]) == 0
+    parameters, context = recorded[0]
+    assert parameters == {"epochs": 3, "batch_size": 2048, "end": "2026-10-12", "device": "mps"}
+    assert context["source_native_run_id"] == "immutable-native" and callable(context["progress"])
+    assert json.loads(capsys.readouterr().out)["plan"]["plan_id"] == "frozen-reference-plan"
 
 
-def test_two_symbol_inputs_fail_before_training_process(monkeypatch, capsys):
-    monkeypatch.setattr(subprocess, "call", lambda *args, **kwargs: pytest.fail("ambiguous plan launched training"))
+def test_old_symbol_training_arguments_cannot_launch_retired_training(monkeypatch, capsys):
+    monkeypatch.setattr(subprocess, "call", lambda *args, **kwargs: pytest.fail("retired plan launched training"))
     assert cli.main(["train-trend", "--end", "2026-10-12", "--symbols", "600519.SH", "--stocks", "000001.SZ"]) == 1
-    assert "不能同时" in capsys.readouterr().err
+    assert "旧训练入口已退役" in capsys.readouterr().err
 
 
 def test_scan_uses_current_shared_entry_without_changing_model_selection(monkeypatch, capsys):

@@ -127,7 +127,7 @@ class FuyaoBoardProvider:
         self.request_count += 1; self._last_request = time.monotonic()
         try:
             response = self.session.get(BASE_URL + path, params=params,
-                headers={'X-api-key': self._api_key, 'Accept': 'application/json', 'User-Agent': 'KHQuant/0.1.6'},
+                headers={'X-api-key': self._api_key, 'Accept': 'application/json', 'User-Agent': 'KHQuant/0.1.7'},
                 timeout=self.timeout, allow_redirects=False)
         except requests.RequestException as exc:
             raise BoardSourceError('Fuyao transport request failed: ' + type(exc).__name__) from None

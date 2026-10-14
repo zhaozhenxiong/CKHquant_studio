@@ -1,10 +1,10 @@
 {
-  "strategy": "trend_consensus",
-  "display_name": "趋势共识策略",
+  "strategy": "reference_position_v1",
+  "display_name": "参考买卖点与每股仓位",
   "model_run_id": null,
-  "model_selection": "qualified_selection_registry",
+  "model_selection": "reference_current_registry",
   "deployment_scope": "research",
   "publication_allowed": false,
   "independent_validation": "pending",
-  "notes": "旧模型已归档退役。当前合格模型由训练中心事务选择；未选中时保持观察和真实成交约束。"
+  "notes": "公开安装不含模型与行情。概率用于研究诊断；每股目标和增减受预测基线、来源时间和风险约束，不模拟成交。"
 }

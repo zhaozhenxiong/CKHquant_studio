@@ -18,126 +18,77 @@ from urllib.request import Request, urlopen
 
 
 def model_probe(device: str) -> dict:
-    """Only current synthetic serialization operators, never retired training."""
-    current = trend_model_probe(device)
-    return {"training_device": current["heads"]["entry"]["actual_device"],
-            "inference": {"device": current["heads"]["entry"]["inference_device"], "save_reload_identical": True},
-            "prediction_rows": current["heads"]["entry"]["prediction_rows"],
-            "fixture": "synthetic_installation_only", "trend_consensus": current}
+    """Exercise the current numeric model without creating a qualified registry entry."""
+    current = reference_model_probe(device)
+    return {"training_device": current["training_device"],
+            "inference": {"device": current["inference_device"], "save_reload_identical": True},
+            "prediction_rows": current["prediction_rows"],
+            "fixture": "synthetic_installation_only", "reference_position_v1": current}
 
 
-def trend_model_probe(device: str) -> dict:
-    """Exercise new serialization/inference targets with explicitly synthetic labels."""
+def reference_model_probe(device: str) -> dict:
+    """Fit, calibrate and reload the shipped reference model on synthetic labels.
+
+    This is an operator/serialization test. The fixture is deliberately not a
+    source-qualified market population and never enters the active-model registry.
+    """
     import numpy as np
     import pandas as pd
-    from my_strategy.core.run_context import stable_hash
-    from my_strategy.services.czsc_trend_contracts import strategy_config, TRAINING_POPULATION, SPLIT_POLICY, ECONOMIC_WEIGHTING
-    from my_strategy.services.czsc_trend_dataset import make_contract
-    from my_strategy.services.czsc_trend_features import ENTRY_FEATURE_COLUMNS, L1_MA_EXIT_COLUMNS
-    from my_strategy.services.czsc_market_profiles import MA_TREND_COLUMNS
-    from my_strategy.services.czsc_trend_model import TrendSession, SCHEMA_HASH, train_trend_head, trend_contract
-    from my_strategy.services.czsc_trend_interval_model import HeadSession, bind_inputs, train_head
+    from my_strategy.services import reference_model as model
 
-    dates = pd.bdate_range("2023-01-02", periods=190)
+    dates = pd.bdate_range("2023-01-02", periods=360)
     days = dates.strftime("%Y-%m-%d").tolist()
-    columns = list(dict.fromkeys([*ENTRY_FEATURE_COLUMNS, *L1_MA_EXIT_COLUMNS]))
-    frame = pd.DataFrame({key: np.sin(np.arange(len(days)) / 7 + index) for index, key in enumerate(columns)})
-    frame = frame.assign(date=days, symbol="INSTALLATION.TEST", label=np.arange(len(days)) % 3,
+    rng = np.random.default_rng(20261015)
+    frame = pd.DataFrame(rng.normal(size=(len(days), len(model.FEATURE_COLUMNS))).astype(np.float32),
+                         columns=model.FEATURE_COLUMNS)
+    frame = frame.assign(symbol="INSTALLATION.TEST", date=days, label=np.arange(len(days)) % 3,
                          label_end=(dates + pd.offsets.BDay(1)).strftime("%Y-%m-%d"),
-                         label_available=True, input_eligible=True, model_input_eligible=True,
-                         observation_id=[stable_hash({"synthetic_day": day}) for day in days],
-                         economic_group_id=[f"synthetic_episode_{index}" for index in range(len(days))])
-    cfg = strategy_config({"epochs": 2, "batch_size": 32, "min_train_rows": 30, "min_calibration_rows": 20,
-        "trend": {"min_train_per_class": 2, "min_calibration_per_class": 2, "min_policy_per_class": 2}})
-    cfg.update(source_snapshot_hash="synthetic-installation-source", pipeline_contract_hash="synthetic-installation-protocol",
-               candidate_policy_hash="synthetic-installation-candidates", E0_policy_hash="synthetic-E0",
-               E1_policy_hash="synthetic-E1-pinned-exit")
-    fold = {"name": "installation_only", "train_end": days[89], "calibration_start": days[91],
-            "calibration_end": days[119], "policy_start": days[121], "policy_end": days[149],
-            "validation_end": days[149]}
-    cfg["reference_population"] = {"version": TRAINING_POPULATION, "fold": fold,
-        "population_end": fold["policy_end"], "prior_entry_catalog": [], "prior_entry_catalog_hash": stable_hash([]),
-        "split_policy": SPLIT_POLICY, "economic_weighting": ECONOMIC_WEIGHTING}
-    frame["attempt_id"] = [f"synthetic-attempt-{i}" for i in range(len(days))]
-    frame["original_event_ids"] = [[f"synthetic-original-{i}"] for i in range(len(days))]
-    frame["original_opportunity_ids"] = frame["original_event_ids"]
-    frame["original_event_first_pre_gate_dates"] = [json.dumps({f"synthetic-original-{i}":day}) for i,day in enumerate(days)]
-    directory = Path(os.environ["KHQUANT_ARTIFACT_ROOT"]) / "installation-trend-model"
-    contract = trend_contract(cfg, source_snapshot_hash=cfg["source_snapshot_hash"],
-                              pipeline_contract_hash=cfg["pipeline_contract_hash"])
-    frame.attrs["label_contract"] = contract
-    manifest = train_trend_head(frame, directory / "direction", fold, cfg, contract=contract)
-    probe = frame.iloc[151:155].copy()
-    probe.attrs["schema_hash"] = SCHEMA_HASH
-    first_session, reloaded_session = TrendSession(), TrendSession()
-    first, _ = first_session.predict(probe, directory / "direction", expected_contract=contract)
-    reloaded, _ = reloaded_session.predict(probe, directory / "direction", expected_contract=contract)
-    if first.shape != (4, 3) or not np.isfinite(first).all() or not np.allclose(first.sum(axis=1), 1.) or not np.array_equal(first, reloaded):
-        raise RuntimeError("Installed three-class trend serialization/inference failed")
-    heads = {"trend_direction": {"classes": manifest["classes"], "input_columns": len(MA_TREND_COLUMNS),
-              "prediction_rows": len(first), "save_reload_identical": True, "actual_device": manifest["actual_device"],
-              "training_device": manifest["actual_device"], "inference_device": first_session.diagnostics["actual_device"],
-              "inference_diagnostics": dict(first_session.diagnostics),
-              "reload_inference_diagnostics": dict(reloaded_session.diagnostics)}}
-    for head, inputs, stage in (("ma_exit", L1_MA_EXIT_COLUMNS, "E0"), ("entry", ENTRY_FEATURE_COLUMNS, "E1")):
-        target = make_contract(head, cfg, days, stage)
-        dataset = frame.copy()
-        dataset["label"] = np.arange(len(dataset)) % 2
-        if head == "ma_exit": dataset["episode_id"] = [f"synthetic-held-{i}" for i in range(len(dataset))]
-        dataset.attrs["label_contract"] = target
-        saved = train_head(dataset, inputs, directory / head, fold, cfg, head=head,
-                           architecture="linear", device=device, contract=target)
-        probe = bind_inputs(dataset.iloc[151:155], inputs, head)
-        first_session, reloaded_session = HeadSession(), HeadSession()
-        first = first_session.predict(probe, directory / head, expected_head=head, expected_contract=target)
-        reloaded = reloaded_session.predict(probe, directory / head, expected_head=head, expected_contract=target)
-        if not np.isfinite(first).all() or not ((first >= 0) & (first <= 1)).all() or not np.array_equal(first, reloaded):
-            raise RuntimeError(f"Installed {head} serialization/inference failed")
-        heads[head] = {"target": target["target"], "stage": stage, "input_columns": len(inputs),
-                       "prediction_rows": len(first), "save_reload_identical": True,
-                       "actual_device": saved["actual_device"], "training_device": saved["actual_device"],
-                       "inference_device": first_session.diagnostics["actual_device"],
-                       "inference_diagnostics": dict(first_session.diagnostics),
-                       "reload_inference_diagnostics": dict(reloaded_session.diagnostics),
-                       "training_resources": saved.get("training_resources", {})}
-    from my_strategy.services import czsc_reference_quality as quality
-    quality_rows = []
-    for index, day in enumerate(days):
-        atom, label = f"synthetic-reference-{index}", index % 2
-        quality_rows.append({**{key: 0. for key in quality.COLUMNS},
-            quality.COLUMNS[0]: 4. if label else -4., "symbol": "INSTALLATION.TEST", "date": day,
-            "label_end": (dates[index] + pd.offsets.BDay(1)).strftime("%Y-%m-%d"),
-            "label": label, "label_available": True, "input_eligible": True, "risk_available": True,
-            "attempt_id": atom, "economic_group_id": atom, "opportunity_id": atom,
-            "original_event_ids": json.dumps([atom]),
-            "original_event_first_pre_gate_dates": json.dumps({atom: day})})
-    quality_data = quality._frame(quality_rows)
-    quality_contract = quality._target_contract(cfg, {
-        "population_hash": "synthetic-installation-reference-population",
-        "protocol_hash": "synthetic-installation-reference-protocol",
-        "trend_catalog_hash": "synthetic-installation-reference-trend-catalog",
-        "ma_exit_catalog_hash": "synthetic-installation-reference-exit-catalog"})
-    quality_directory = directory / quality.HEAD
-    quality_manifest = quality.train_reference_head(quality_data, quality_directory, fold, cfg, quality_contract)
-    quality_bundles = [{"name": fold["name"], "available_at": quality_manifest["available_at"],
-        "heads": {quality.HEAD: {"path": quality.HEAD, "manifest_sha256": quality_manifest["manifest_sha256"]}}}]
-
-    def quality_predictions():
-        cache = {}
-        return np.array([quality._predict_prior(row, row["date"], quality_bundles, directory,
-            quality_contract, cache)[0] for row in quality_data.iloc[151:155].to_dict("records")], dtype=float)
-
-    first, reloaded = quality_predictions(), quality_predictions()
-    if (first.shape != (4,) or not np.isfinite(first).all() or not ((first >= 0) & (first <= 1)).all()
-            or not np.array_equal(first, reloaded)):
-        raise RuntimeError("Installed independent reference quality serialization/inference failed")
-    heads[quality.HEAD] = {"target": quality.TARGET, "population": quality.POPULATION,
-        "input_columns": len(quality.COLUMNS), "account_input_columns": [],
-        "prediction_rows": len(first), "save_reload_identical": True,
-        "actual_device": quality_manifest["actual_device"], "training_device": "cpu", "inference_device": "cpu",
-        "fee_qualified": False, "publication_allowed": False}
-    return {"heads": heads, "fixture": "synthetic_installation_labels_only",
-            "market_effectiveness_certified": False, "publication_allowed": False}
+                         label_available=True, input_eligible=True)
+    frame.loc[::7, model.WYCKOFF_COLUMNS[0]] = np.nan
+    frame.attrs["schema_hash"] = model.SCHEMA_HASH
+    split = {"name": "synthetic_installation_only", "train_end": days[219],
+             "calibration_start": days[220], "calibration_end": days[269],
+             "policy_start": days[270], "policy_end": days[319],
+             "test_start": days[320], "test_end": days[-1]}
+    directory = Path(os.environ["KHQUANT_ARTIFACT_ROOT"]) / "installation-reference-model"
+    fitted = model.fit_fold(frame, split, directory, device=device,
+        config={"epochs": 2, "inner_epochs": 1, "batch_size": 128,
+                "min_train_per_class": 5, "min_segment_per_class": 2})
+    manifest, validation = fitted["manifest"], fitted["validation"]
+    probe = frame.iloc[321:327].copy()
+    probe.iloc[-1, probe.columns.get_loc("input_eligible")] = False
+    probe.iloc[-2, probe.columns.get_loc(model.FEATURE_COLUMNS[0])] = np.nan
+    first_session = model.load_model(directory, device=device)
+    reloaded_session = model.load_model(directory, device=device)
+    first, reloaded = first_session.predict(probe), reloaded_session.predict(probe)
+    if (first.shape != (6, 3) or not np.isfinite(first[:4]).all()
+            or not ((first[:4] >= 0) & (first[:4] <= 1)).all()
+            or not np.allclose(first[:4].sum(axis=1), 1., atol=1e-6)
+            or not np.isnan(first[4:]).all()
+            or not np.array_equal(first, reloaded, equal_nan=True)):
+        raise RuntimeError("Installed reference model serialization/probabilities/missing-input handling failed")
+    actual = manifest["training_device"]
+    if (str(first_session.device) != actual or str(reloaded_session.device) != actual
+            or (device != "auto" and actual != device)
+            or any(validation[key].get("device") != actual for key in ("calibration", "policy", "test"))):
+        raise RuntimeError("Installed reference fit/calibration/inference did not use the requested device")
+    if (validation.get("candidate_selection", {}).get("source") != "purged_train_internal_only"
+            or validation.get("calibration_method") != "chronological_positive_temperature_no_intercepts"
+            or not math.isfinite(manifest["temperature"]) or manifest["temperature"] <= 0
+            or validation.get("independent_forward_evidence") is not False
+            or manifest.get("historical_availability_claim") is not False):
+        raise RuntimeError("Installed reference selection/calibration/time semantics changed")
+    return {"family": model.FAMILY, "classes": manifest["classes"], "input_columns": len(model.FEATURE_COLUMNS),
+            "architecture": manifest["architecture"], "training_device": actual,
+            "calibration_device": validation["calibration"]["device"], "inference_device": str(first_session.device),
+            "numeric_dtype": manifest["numeric_dtype"], "price_label_dtype": manifest["price_label_dtype"],
+            "prediction_rows": 4, "unscored_rows": 2, "save_reload_identical": True,
+            "missing_input_stays_unscored": True, "weights_sha256": manifest["weights_sha256"],
+            "calibration_method": validation["calibration_method"], "temperature": manifest["temperature"],
+            "selection_source": validation["candidate_selection"]["source"],
+            "fixture": "synthetic_installation_labels_only", "account_simulated": False,
+            "active_model_registered": False, "market_effectiveness_certified": False,
+            "publication_allowed": False}
 
 
 def request(base: str, path: str, method: str = "GET", body: dict | None = None):
@@ -190,87 +141,97 @@ def fixture_calendar(state: Path, dates: list[str]) -> str:
     return run_id
 
 
-def verify_no_model_trend(base: str, calendar_id: str, end: str) -> dict:
-    status = request(base, "/api/training/status")
-    if (status.get("mode") != "rule_observation_no_model" or status.get("current_selection") is not None
-            or status.get("active_model") is not None or status.get("models")):
-        raise RuntimeError("Public defaults must select trend consensus without a workstation model")
+def _assert_untrained_status(status: dict) -> None:
+    if (status.get("model_family") != "current" or status.get("strategy_version") != "reference_position_v1"
+            or status.get("current_selection") is not None or status.get("active_model_run_id") is not None
+            or status.get("active_model") is not None or status.get("models") or status.get("selection_events")
+            or status.get("certification", {}).get("publication_allowed") is not False):
+        raise RuntimeError("Public defaults must select reference_position_v1 without a workstation model")
+
+
+def verify_no_model_reference(base: str, calendar_id: str, end: str) -> dict:
+    _assert_untrained_status(request(base, "/api/training/status"))
     result = request(base, "/api/analysis", "POST", {"symbol": "000001.SZ", "start": "2024-01-01", "end": end,
         "model_family": "current", "calendar_run_id": calendar_id, "device": "cpu"})
     rows = result.get("chart_evidence", {}).get("rows", [])
-    if not rows or result.get("strategy_version") != "trend_consensus" or result.get("research", {}).get("model_run_id") is not None:
-        raise RuntimeError("Untrained installation failed its actual default trend analysis")
-    for row in rows:
-        agent = row["agents"]["ma"]
-        if agent.get("model_available") is not False or any(agent.get(key) is not None for key in ("p_up", "p_down", "p_neutral")):
-            raise RuntimeError("Untrained installation fabricated MA probabilities")
-        if row["agents"]["high_return"].get("probability") is not None:
-            raise RuntimeError("Untrained installation fabricated high-return probability")
-        if row["agents"].get("reference_quality", {}).get("probability") is not None:
-            raise RuntimeError("Untrained installation fabricated reference quality probability")
+    if (not rows or result.get("strategy_version") != "reference_position_v1"
+            or result.get("research", {}).get("model_run_id") is not None
+            or result.get("publication_allowed") is not False):
+        raise RuntimeError("Untrained installation failed its actual default reference analysis")
     if (result.get("analysis_mode") != "reference" or result.get("account_scope") != "none"
             or result.get("account_actions") is not None or result.get("research", {}).get("account_simulated") is not False
             or result.get("chart_evidence", {}).get("statistics", {}).get("visible_window", {}).get("broker_fills") != 0):
         raise RuntimeError("Installed ordinary analysis unexpectedly simulated an account")
     source_points, final_points = result.get("source_reference_points"), result.get("reference_points")
     if not isinstance(source_points, list) or not isinstance(final_points, list):
-        raise RuntimeError("Installed analysis omitted independent source/final B/S collections")
-    for point in source_points + final_points:
+        raise RuntimeError("Installed analysis omitted independent source/target B/S collections")
+    for point in source_points:
         if (point.get("side") not in {"BUY", "SELL"} or point.get("reference_price_source") != "signal_day_close"
                 or point.get("reference_price_date") != point.get("date")):
-            raise RuntimeError("Installed B/S reference changed its direction or price clock")
+            raise RuntimeError("Installed source B/S reference changed its direction or price clock")
+    # A fresh installation starts at zero. Missing scores preserve this reference
+    # state; source SELL points cannot manufacture a target reduction or a fill.
+    if final_points:
+        raise RuntimeError("Untrained installation fabricated target-change points")
     for row in rows:
+        agents = row.get("agents", {})
+        agent = agents.get("ma", {})
+        if (agent.get("status") != "model_unavailable" or agent.get("in_scope") is not False
+                or any(agent.get(key) is not None for key in ("p_up", "p_down", "p_neutral"))):
+            raise RuntimeError("Untrained installation fabricated reference direction probabilities")
+        if (any(agents.get(head, {}).get("probability") is not None for head in ("high_return", "reference_quality"))
+                or row.get("high_return_probability") is not None or row.get("exit_probability") is not None):
+            raise RuntimeError("Untrained installation reintroduced retired target probabilities")
         position = row.get("position_reference") or {}
-        risk = row.get("reference_risk_plan") or {}
-        if (position.get("account_scope") != "none" or position.get("reference_only") is not True
-                or position.get("entry_probability") is not None or position.get("exit_probability") is not None
-                or position.get("reference_quality_probability") is not None
-                or position.get("reference_quality_threshold") != .1 or position.get("reference_buy_total_threshold") != .5
-                or risk.get("risk_budget_fraction") != .01
-                or position.get("target_position_fraction") != (0. if row.get("direction") == "SELL" else None)):
-            raise RuntimeError("Untrained installation fabricated an allocation or weakened a reference gate")
+        if (position.get("schema") != "reference_position_v1" or position.get("account_scope") != "none"
+                or position.get("reference_only") is not True or position.get("stale") is not True
+                or position.get("predictive_gate_passed") is not False
+                or position.get("action") != "WAIT" or position.get("target_position_fraction") != 0.
+                or position.get("previous_reference_target") != 0. or position.get("change_fraction") != 0.
+                or position.get("reference_delta") != 0.
+                or position.get("change_basis") != "previous_reference_target_for_same_symbol"
+                or position.get("risk_budget_fraction") != .01
+                or row.get("action") != "WAIT" or row.get("emitted") is not False):
+            raise RuntimeError("Untrained installation changed the stale zero reference path")
     return {"status": "passed", "strategy": result["strategy_version"], "model_run_id": None,
-        "ma_model_available": False, "probabilities": None, "analysis_rows": len(rows),
-        "analysis_mode": "reference", "account_scope": "none", "account_simulated": False,
+        "probabilities": None, "analysis_rows": len(rows), "analysis_mode": "reference",
+        "account_scope": "none", "account_simulated": False,
         "source_reference_points": len(source_points), "final_reference_points": len(final_points),
         "source_reference_sides": sorted({point["side"] for point in source_points}),
-        "reference_quality_probability": None, "unqualified_allocation_blocked": True,
-        "run_id": result["run_id"], "publication_allowed": result.get("publication_allowed"),
+        "target_position_fraction": 0., "change_fraction": 0., "stale": True,
+        "unqualified_allocation_blocked": True, "run_id": result["run_id"], "publication_allowed": False,
         "fixture": "synthetic_unverified_prices_and_synthetic_schedule_only"}
 
 
-
 def verify_training_center(base: str) -> dict:
-    """Read-only schema/default checks; never submit synthetic training as a job."""
+    """Read-only current parameter checks; never submit synthetic training as a job."""
     capabilities = request(base, "/api/training/capabilities")
     profiles = request(base, "/api/training/profiles")
-    status = request(base, "/api/training/status")
-    if capabilities.get("model_family") != "current" or capabilities.get("strategy_version") != "trend_consensus":
-        raise RuntimeError("Installed training capabilities do not use the current strategy")
+    _assert_untrained_status(request(base, "/api/training/status"))
+    if capabilities.get("model_family") != "current" or capabilities.get("strategy_version") != "reference_position_v1":
+        raise RuntimeError("Installed training capabilities do not use the current reference strategy")
     fields = capabilities.get("schema", {}).get("fields")
     if not isinstance(fields, list) or not fields or len({field["key"] for field in fields}) != len(fields):
         raise RuntimeError("Installed default parameter schema is incomplete")
     by_key = {field["key"]: field for field in fields}
-    declared_defaults = capabilities.get("defaults")
-    if not isinstance(declared_defaults, dict) or set(declared_defaults) != set(by_key):
-        raise RuntimeError("Installed editable parameter fields do not match the registered defaults")
-    default = profiles.get("default_profile", {}).get("parameters", {})
-    for key, floor in (("min_train_rows", 100), ("min_calibration_rows", 30), ("min_net_return", .08),
-                       ("min_r_multiple", 2.), ("liquidity_lookback_sessions", 20), ("liquidity_min_median_amount", 30000000.)):
-        if key not in by_key or by_key[key]["min"] < floor or default.get(key, 0) < floor:
-            raise RuntimeError("Installed training schema/default weakened a constraint: " + key)
-    if default.get("end", "missing") is not None or default.get("epochs") != 20 or default.get("training_batch_size") != 2048:
-        raise RuntimeError("Installed factory defaults must retain nullable latest cutoff and registered training resources")
-    if (status.get("mode") != "rule_observation_no_model" or status.get("models")
-            or status.get("active_model") is not None or status.get("current_selection") is not None
-            or status.get("certification", {}).get("publication_allowed") is not False):
-        raise RuntimeError("Installed training status incorrectly qualifies a workstation model")
-    return {"status": "passed", "model_family": "current", "strategy_version": "trend_consensus",
+    expected = {"device": "auto", "feature_start": "2023-01-01", "end": None,
+        "source_native_run_id": None, "horizon_sessions": 10, "epochs": 12, "batch_size": 8192,
+        "cpu_workers": 4, "seed": 42, "max_stock_weight": .20, "risk_budget": .01,
+        "position_step": .025, "hysteresis": .01}
+    if (capabilities.get("defaults") != expected or set(by_key) != set(expected)
+            or any(by_key[key].get("default") != value for key, value in expected.items())
+            or profiles.get("default_profile", {}).get("parameters") != expected):
+        raise RuntimeError("Installed reference defaults or registered parameter schema changed")
+    if (set(by_key["device"].get("options", [])) != {"auto", "cuda", "mps", "cpu"}
+            or set(by_key["horizon_sessions"].get("options", [])) != {10, 20}
+            or capabilities.get("actual_auto_device") not in {"cuda", "mps", "cpu"}
+            or capabilities.get("qualification", {}).get("publication_allowed") is not False
+            or {stage["key"] for stage in capabilities.get("stages", []) if stage.get("trainable")} != {"reference_model"}):
+        raise RuntimeError("Installed reference device/stage/qualification contract changed")
+    return {"status": "passed", "model_family": "current", "strategy_version": "reference_position_v1",
             "default_revision": profiles["default_revision"], "field_count": len(fields),
             "field_keys": sorted(by_key), "nullable_latest_end": True,
-            "schema_constraint_floors": {key: by_key[key]["min"] for key in
-                ("min_train_rows", "min_calibration_rows", "min_net_return", "min_r_multiple",
-                 "liquidity_lookback_sessions", "liquidity_min_median_amount")},
+            "actual_auto_device": capabilities["actual_auto_device"], "defaults": expected,
             "training_job_submitted": False, "publication_allowed": False}
 
 
@@ -316,6 +277,7 @@ print(json.dumps({'version':distribution.version,'package_path':str(path),'prefi
     doctor = command("-m", "my_strategy.cli", "doctor", "--check-write", "--strict", "--json")
     model = command(str(Path(__file__).resolve()), "--internal-probe", "--device", device)
     command("-m", "my_strategy.cli", "update-data", "--help", json_output=False)
+    command("-m", "my_strategy.cli", "train-reference", "--help", json_output=False)
     analysis = command("-m", "my_strategy.cli", "analyze", "--symbol", "000001.SZ", "--start", "2024-01-01", "--calendar-run-id", calendar_id, "--device", device, "--json")
     scan = command("-m", "my_strategy.cli", "scan", "--stocks", "000001.SZ", "--start", "2024-01-01", "--calendar-run-id", calendar_id, "--device", device, "--cpu-workers", "1", "--json")
     retired_commands = ("backtest", "backtest-batch")
@@ -351,7 +313,7 @@ print(json.dumps({'version':distribution.version,'package_path':str(path),'prefi
                 for path, method, body in retired_routes:
                     expect_removed_route(base, path, method, body)
                 if restart == 0:
-                    trend_without_model = verify_no_model_trend(base, calendar_id, dates[-1])
+                    reference_without_model = verify_no_model_reference(base, calendar_id, dates[-1])
                     training_center = verify_training_center(base)
                     request(base, "/api/watchlist", "POST", {"symbols": ["000001.SZ"]})
                 else:
@@ -370,8 +332,8 @@ print(json.dumps({'version':distribution.version,'package_path':str(path),'prefi
               "retired_routes_rejected": [f"{method} {path}" for path, method, _ in retired_routes],
               "retired_commands_rejected": list(retired_commands),
               "analysis_run": analysis.get("run_id"), "scan_run": scan.get("run_id"),
-              "update_entrypoint": True,
-              "default_trend_without_model": trend_without_model,
+              "update_entrypoint": True, "reference_training_entrypoint": True,
+              "default_reference_without_model": reference_without_model,
               "input": "synthetic_installation_fixture; does not certify market data or returns"}
     if output:
         output.parent.mkdir(parents=True, exist_ok=True)

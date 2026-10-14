@@ -163,10 +163,10 @@ assert(popup.details.every(node=>node.open),'a new date starts with useful agent
 
 def test_scan_history_before_display_start_drills_with_causal_model_context():
     run_js(r'''
-const source={strategy_version:'trend_consensus',request:{start:'2026-10-01',research:true,model_family:'current',
+const source={strategy_version:'reference_position_v1',request:{start:'2026-10-01',research:true,model_family:'current',
   model_run_id:'saved-model',usage_mode:'historical',model_policy:'auto',calendar_run_id:'verified-calendar',
-  account_start:'2023-01-01',account_initial_cash:100000,consensus_version:'trend_consensus',
-  consensus_config:{version:'trend_consensus',quality_weight:.1}},
+  account_start:'2023-01-01',account_initial_cash:100000,consensus_version:'reference_position_v1',
+  consensus_config:{version:'reference_position_v1',risk_budget:.01}},
   data_range:{start:'2026-10-01',end:'2026-10-12'},market_history:{window_start:'2026-09-01'}};
 await workbench.analyzeSymbol('002436.SZ','2026-09-15',source);
 assert.equal(lastAnalysisQuery.start,'2026-09-01');assert.equal(lastAnalysisQuery.end,'2026-09-15');
@@ -183,19 +183,19 @@ assert.equal(lastAnalysisQuery.start,'2026-09-15','an older run without a window
 
 def test_reference_checkpoint_controls_keep_model_context_without_simulated_account():
     run_js(r'''
-workbench.state.research={calendar_run_id:'calendar',default_consensus_version:'trend_consensus',
- models:[{run_id:'new-run',schema_family:'trend_consensus'}]};
-workbench.state.pendingResearchContexts.analysis={model_run_id:'new-run',consensus_version:'trend_consensus',
- account_start:'2023-01-01',account_initial_cash:150000,consensus_config:{version:'trend_consensus'}};
+workbench.state.research={calendar_run_id:'calendar',default_consensus_version:'reference_position_v1',
+ models:[{status:'completed',run_id:'new-run',family:'reference_position_v1',strategy_version:'reference_position_v1'}]};
+workbench.state.pendingResearchContexts.analysis={model_run_id:'new-run',consensus_version:'reference_position_v1',
+ account_start:'2023-01-01',account_initial_cash:150000,consensus_config:{version:'reference_position_v1'}};
 element('analysis-mode').value='research';element('analysis-model-family').value='current';
 element('analysis-model').value='new-run';element('analysis-model-policy').value='auto';element('analysis-usage-mode').value='historical';
 const actual=workbench.researchSpec('analysis');
-assert.equal(actual.consensus_version,'trend_consensus');assert.equal(actual.model_run_id,'new-run');
+assert.equal(actual.consensus_version,'reference_position_v1');assert.equal(actual.model_run_id,'new-run');
 assert.equal(actual.analysis_mode,'reference');assert.equal(actual.account_start,undefined);assert.equal(actual.account_initial_cash,undefined);
-assert.equal(actual.consensus_config.version,'trend_consensus');
-const context=workbench.resultResearchContext({strategy_version:'trend_consensus',research:{model_run_id:'new-run'},
- request:{consensus_version:'trend_consensus',account_start:'2023-01-01',account_initial_cash:150000}});
-assert.equal(context.consensus_version,'trend_consensus');assert.equal('account_initial_cash' in context,false);
+assert.equal(actual.consensus_config.version,'reference_position_v1');
+const context=workbench.resultResearchContext({strategy_version:'reference_position_v1',research:{model_run_id:'new-run'},
+ request:{consensus_version:'reference_position_v1',account_start:'2023-01-01',account_initial_cash:150000}});
+assert.equal(context.consensus_version,'reference_position_v1');assert.equal('account_initial_cash' in context,false);
 ''')
 
 
@@ -207,11 +207,11 @@ Object.defineProperty(select,'innerHTML',{configurable:true,get(){return html;},
  html=String(value);this.options=[...html.matchAll(/<option value="([^"]*)"/g)].map(match=>({value:match[1]}));selected='';}});
 Object.defineProperty(select,'value',{configurable:true,get(){return selected;},set(value){
  selected=this.options.some(option=>option.value===value) ? value : '';}});
-workbench.state.research={calendar_run_id:'calendar',default_consensus_version:'trend_consensus',
- models:[{run_id:'recent-run',schema_family:'trend_consensus'}]};
+workbench.state.research={calendar_run_id:'calendar',default_consensus_version:'reference_position_v1',
+ models:[{status:'completed',run_id:'recent-run',family:'reference_position_v1',strategy_version:'reference_position_v1'}]};
 const context={research:true,model_family:'current',model_run_id:'old-explicit-run',model_policy:'auto',
- usage_mode:'historical',consensus_version:'trend_consensus',account_start:'2023-01-01',
- account_initial_cash:150000,consensus_config:{version:'trend_consensus',high_return_threshold:.1}};
+ usage_mode:'historical',consensus_version:'reference_position_v1',account_start:'2023-01-01',
+ account_initial_cash:150000,consensus_config:{version:'reference_position_v1',max_stock_weight:.1}};
 workbench.applyResearchContext('analysis',context);
 assert.equal(select.value,'old-explicit-run');
 assert(select.options.some(option=>option.value==='old-explicit-run'));
@@ -239,9 +239,9 @@ for(const id of ['analysis-model','analysis-checkpoint']){
  Object.defineProperty(select,'value',{configurable:true,get(){return selected;},set(value){
   selected=this.options.some(option=>option.value===value) ? value : '';}});
 }
-workbench.state.research={default_consensus_version:'trend_consensus',models:[]};
+workbench.state.research={default_consensus_version:'reference_position_v1',models:[]};
 element('analysis-end').value='2026-10-12';
-for(const version of ['trend_consensus']){
+for(const version of ['reference_position_v1']){
  const saved={research:true,model_family:'current',model_run_id:'older-'+version,model_policy:'pinned',
   model_fold:'2026Q3',usage_mode:'historical',consensus_version:version,consensus_config:{version}};
  workbench.applyResearchContext('analysis',saved);
@@ -256,14 +256,14 @@ for(const version of ['trend_consensus']){
 
 def test_retired_saved_context_is_rejected_without_changing_current_model():
     run_js(r'''
-workbench.state.research={models:[{run_id:'active-current',model_family:'current',strategy_version:'trend_consensus'}]};
+workbench.state.research={models:[{status:'completed',run_id:'active-current',model_family:'current',strategy_version:'reference_position_v1'}]};
 element('analysis-model-family').value='current';element('analysis-mode').value='research';
 workbench.populateResearchModels('analysis');
 assert.throws(()=>workbench.applyResearchContext('analysis',{research:true,model_family:'high_return',model_run_id:'retired',consensus_version:'czsc_trend_consensus'}),/已退役/);
 assert.equal(workbench.state.pendingResearchContexts.analysis,undefined);
 assert(!element('analysis-model').innerHTML.includes('retired'));
 assert(workbench.researchSpec('analysis').model_family==='current');
-const currentContext={research:true,model_family:'current',consensus_version:'trend_consensus',model_run_id:'active-current',usage_mode:'forward'};
+const currentContext={research:true,model_family:'current',consensus_version:'reference_position_v1',model_run_id:'active-current',usage_mode:'forward'};
 workbench.applyResearchContext('analysis',currentContext);
 assert.equal(workbench.researchSpec('analysis').usage_mode,'forward');
 const savedPending=workbench.state.pendingResearchContexts.analysis;

@@ -171,7 +171,7 @@ def test_scan_uses_existing_overlays_once_per_stock_and_persists_bounded_facts(t
     from types import SimpleNamespace
     from my_strategy.web_dashboard import trend_strategy as route
     from my_strategy.adapters import czsc_adapter
-    from my_strategy.services import czsc_trend_runtime as runtime, czsc_trend_support
+    from my_strategy.services import reference_training as runtime, czsc_trend_support
     from my_strategy.storage import czsc_results
     from my_strategy.services import czsc_market_history
 
@@ -181,7 +181,7 @@ def test_scan_uses_existing_overlays_once_per_stock_and_persists_bounded_facts(t
     monkeypatch.setattr(czsc_adapter, "latest_market_date", lambda end=None: DATES[-1])
     monkeypatch.setattr(czsc_adapter, "list_symbols", lambda: [{"symbol": "a", "name": "A"}, {"symbol": "b", "name": "B"}])
     monkeypatch.setattr(czsc_trend_support, "_calendar", lambda value: (DATES, "calendar"))
-    monkeypatch.setattr(runtime, "load_model_run", lambda value, **kwargs: (None, None))
+    monkeypatch.setattr(runtime, "load_reference_run", lambda value, **kwargs: (None, None))
     monkeypatch.setattr(route, "create_run_context", lambda **values: context)
     monkeypatch.setattr(czsc_results, "ResultStore", lambda: real_store)
     monkeypatch.setattr(czsc_market_history, "load_classification", lambda symbols: ({s: {"id": "unknown", "name": "未知行业"} for s in symbols},
@@ -197,8 +197,8 @@ def test_scan_uses_existing_overlays_once_per_stock_and_persists_bounded_facts(t
     result = route.scan_trend_consensus()
     assert calls == ["a", "b"]
     assert result["market_history"]["universe_size"] == 2
-    assert result["strategy_version"] == result["market_history"]["strategy_version"] == "trend_consensus"
-    assert result["market_history"]["contract"]["strategy_version"] == "trend_consensus"
+    assert result["strategy_version"] == result["market_history"]["strategy_version"] == "reference_position_v1"
+    assert result["market_history"]["contract"]["strategy_version"] == "reference_position_v1"
     assert len(result["market_history"]["daily"]) == 3
     assert market_history_facts("scan", db_path=db)["total"] == 6
     assert real_store.get("scan")["market_history"] == result["market_history"]

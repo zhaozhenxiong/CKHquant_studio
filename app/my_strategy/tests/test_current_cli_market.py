@@ -1,4 +1,4 @@
-"""Actual current CLI analysis/scan/backtest with isolated synthetic market files."""
+"""Actual reference CLI analysis/scan with isolated synthetic market files."""
 import json
 import math
 import os
@@ -45,11 +45,17 @@ def test_current_cli_rebuilds_observation_and_persists_without_workstation_model
         "--calendar-run-id", "synthetic-calendar", "--device", "cpu", "--cpu-workers", "1", "--json"], cwd=cwd, env=env, capture_output=True, text=True, timeout=90)
     assert completed.returncode == 0, completed.stderr
     result = json.loads(completed.stdout)
-    assert result["run_id"] and result["strategy_version"] == "trend_consensus"
+    assert result["run_id"] and result["strategy_version"] == "reference_position_v1"
     if command == "analyze":
         assert result["symbol"] == "000001.SZ" and result["data_end"] == end
         assert result["research"]["model_run_id"] is None
-        assert result["chart_evidence"]["rows"]
+        rows = result["chart_evidence"]["rows"]
+        assert rows and result["analysis_mode"] == "reference" and result["account_scope"] == "none"
+        assert result["research"]["account_simulated"] is False
+        assert all(row["position_reference"]["target_position_fraction"] == 0 for row in rows)
+        assert all(row["position_reference"]["change_fraction"] == 0 for row in rows)
+        assert all(row["position_reference"]["stale"] for row in rows)
+        assert not result["reference_points"]
         assert result["run_context"]["source"] == "cli"
     else:
         assert result["coverage"]["success"] == 1 and result["coverage"]["failed"] == 0

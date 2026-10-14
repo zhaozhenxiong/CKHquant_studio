@@ -135,8 +135,8 @@ def test_analysis_rejects_removed_account_parameters(field):
 def test_automatic_requests_inherit_actual_selected_consensus_without_default_override():
     from my_strategy.web_dashboard.api import TaskRequest
     automatic=AnalysisRequest(symbol='002436.SZ')
-    assert automatic.consensus_config is None and automatic.consensus_version=='trend_consensus'
+    assert automatic.consensus_config is None and automatic.consensus_version=='reference_position_v1'
     scan=TaskRequest(kind='scan').spec
-    assert scan.consensus_config is None and scan.consensus_version=='trend_consensus'
-    explicit=AnalysisRequest(symbol='002436.SZ',consensus_config={'buy_base_threshold':.45})
-    assert explicit.consensus_config['buy_base_threshold']==.45
+    assert scan.consensus_config is None and scan.consensus_version=='reference_position_v1'
+    explicit=AnalysisRequest(symbol='002436.SZ',consensus_config={'max_stock_weight':.15})
+    assert explicit.consensus_config['max_stock_weight']==.15
