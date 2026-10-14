@@ -16,6 +16,7 @@ from my_strategy.execution.broker import BrokerSimulator
 from my_strategy.execution.cost_model import CostModel
 from my_strategy.execution.order import Order
 from my_strategy.services import model_training_center as center
+# Archive-specific contracts remain tested against the explicit legacy implementation.
 from my_strategy.services.czsc_trend_contracts import strategy_config
 from my_strategy.storage.czsc_results import ResultStore
 from my_strategy.services.czsc_account_artifacts import read_account_artifact, write_account_artifact
@@ -24,7 +25,7 @@ from my_strategy.services.czsc_account_artifacts import read_account_artifact, w
 @pytest.fixture
 def service(tmp_path):
     store = ResultStore(tmp_path / "results.db", tmp_path / "runs")
-    return center.TrainingCenter(store=store, metadata_root=tmp_path / "metadata")
+    return center.LegacyTrainingCenter(store=store, metadata_root=tmp_path / "metadata")
 
 
 def account(symbol, dates, profit=.05, multiplier=1., model_id="candidate", source_hash="raw-sha"):
@@ -58,7 +59,7 @@ def test_defaults_revision_cas_persist_and_dont_mutate_frozen_config(service):
     result = service.save_default({"epochs":3}, expected_revision=0)
     assert result["default_profile"]["parameters"]["epochs"] == 3
     with pytest.raises(center.RevisionConflict): service.save_default({"epochs":4}, expected_revision=0)
-    fresh = center.TrainingCenter(store=service.store, db_path=service.db_path)
+    fresh = center.LegacyTrainingCenter(store=service.store, db_path=service.db_path)
     assert fresh.profiles()["default_revision"] == 1
     cfg = center._configuration(result["default_profile"]["parameters"], "2027-04-01")
     assert cfg["epochs"] == 3 and cfg["batch_size"] == 2048
@@ -327,7 +328,7 @@ def test_subprocess_cancel_terminates_own_child_tree(tmp_path):
     def check():
         if cancelled.is_set(): raise RuntimeError("cancel requested")
     with pytest.raises(RuntimeError,match="cancel requested"):
-        center.TrainingCenter._run_process([sys.executable,"-u","-c",code],tmp_path/"child.log",progress,check)
+        center.LegacyTrainingCenter._run_process([sys.executable,"-u","-c",code],tmp_path/"child.log",progress,check)
     assert child_pids
     deadline=time.monotonic()+2
     while psutil.pid_exists(child_pids[0]) and time.monotonic()<deadline:
@@ -404,9 +405,9 @@ def test_revalidation_frozen_parameters_cannot_be_redefined():
     plan=dict(config=config,data_end=values["end"],parameters=values)
     report=dict(strategy_version="trend_consensus",status="completed",data_end=values["end"],config=copy.deepcopy(config))
     add_current_derivations(report,plan)
-    center.TrainingCenter._validate_trained_plan(report,plan)
+    center.LegacyTrainingCenter._validate_trained_plan(report,plan)
     report["config"]["account"]["commission"]=0.
-    with pytest.raises(ValueError,match="account"): center.TrainingCenter._validate_trained_plan(report,plan)
+    with pytest.raises(ValueError,match="account"): center.LegacyTrainingCenter._validate_trained_plan(report,plan)
 
 
 @pytest.mark.parametrize("stocks",[12,60])
@@ -473,7 +474,7 @@ def test_archived_fixed_size_defaults_migrate_once_without_rewriting_history(ser
     with sqlite3.connect(service.db_path) as conn:
         conn.execute("INSERT INTO training_profiles VALUES ('personal',4,'old',?,?,?)",(serialized,stable_hash(archived),"before"))
         conn.execute("UPDATE training_default SET profile_id='personal',revision=4 WHERE id=1")
-    migrated=center.TrainingCenter(store=service.store,db_path=service.db_path)
+    migrated=center.LegacyTrainingCenter(store=service.store,db_path=service.db_path)
     saved=migrated.profiles()["default_profile"]
     assert saved["revision"]==5 and saved["parameters"]["end"] is None
     assert saved["parameters"]["liquidity_min_median_amount"]==30000000
@@ -481,7 +482,7 @@ def test_archived_fixed_size_defaults_migrate_once_without_rewriting_history(ser
     assert "cohort_size" not in saved["parameters"]
     with sqlite3.connect(service.db_path) as conn:
         assert conn.execute("SELECT parameters FROM training_profiles WHERE revision=4").fetchone()[0]==serialized
-    assert center.TrainingCenter(store=service.store,db_path=service.db_path).profiles()["default_revision"]==5
+    assert center.LegacyTrainingCenter(store=service.store,db_path=service.db_path).profiles()["default_revision"]==5
 
 
 def _preflight_dependencies(monkeypatch, universe):
@@ -615,7 +616,7 @@ def test_cancel_kills_own_group_when_child_ignores_sigterm(tmp_path):
         if cancelled.is_set(): raise RuntimeError("cancel own isolated group")
     try:
         with pytest.raises(RuntimeError,match="cancel own"):
-            center.TrainingCenter._run_process([sys.executable,"-u","-c",code],tmp_path/"group.log",progress,check)
+            center.LegacyTrainingCenter._run_process([sys.executable,"-u","-c",code],tmp_path/"group.log",progress,check)
         assert pids, "The cancellation must observe an actual owned child"
         for pid in pids:
             try:
@@ -675,7 +676,7 @@ def test_transaction_rechecks_active_reference_work(verified_comparison):
 
 def test_training_center_has_no_retired_account_constructor_fields(service):
     import inspect
-    parameters=inspect.signature(center.TrainingCenter).parameters
+    parameters=inspect.signature(center.LegacyTrainingCenter).parameters
     assert "holdings_path" not in parameters and "personal_db" not in parameters
     assert not hasattr(service,"holding_guard") and not hasattr(service,"holdings_path")
     assert service._selection_reasons()==[]
@@ -691,7 +692,7 @@ def test_process_population_progress_resets_each_fold_and_ignores_stock_details(
         event("final_population/production","production",0),event("final_population/production","production",2)]
     command=[sys.executable,"-u","-c","\n".join("print("+repr(line)+",flush=True)" for line in lines)]
     events=[]
-    center.TrainingCenter._run_process(command,tmp_path/"progress.log",events.append,None,source_total=3)
+    center.LegacyTrainingCenter._run_process(command,tmp_path/"progress.log",events.append,None,source_total=3)
     counts=[(item["population"],item["completed"],item["total"]) for item in events if "population" in item]
     assert counts==[("E1",0,3),("E1",3,3),("final_population/first",0,3),
         ("final_population/first",3,3),("final_population/production",0,3),("final_population/production",2,3)]
@@ -704,7 +705,7 @@ def test_process_accepts_original_progress_dataset_join_and_keeps_raw_stdout(tmp
         'DATASET E1 600739.SH entries=13 exits=36')
     events = []
     path = tmp_path / "joined.log"
-    center.TrainingCenter._run_process([sys.executable, "-u", "-c", "print("+repr(line)+",flush=True)"],
+    center.LegacyTrainingCenter._run_process([sys.executable, "-u", "-c", "print("+repr(line)+",flush=True)"],
         path, events.append, None, source_total=3194)
     assert [(e["stage"], e["completed"], e["total"]) for e in events] == [("E1",2044,3194)]
     assert path.read_text() == line + "\n"
@@ -728,7 +729,7 @@ def test_process_decodes_all_json_records_on_one_line_without_splitting_strings(
         "TRAIN_RUN_ID joined-model"])
     events = []
     path = tmp_path / "many-records.log"
-    ids = center.TrainingCenter._run_process([sys.executable,"-u","-c","print("+repr(line)+",flush=True)"],
+    ids = center.LegacyTrainingCenter._run_process([sys.executable,"-u","-c","print("+repr(line)+",flush=True)"],
         path, events.append, None, source_total=3)
     assert ids["model_run_id"] == "joined-model"
     assert [e["stage"] for e in events] == ["native_source_prepare", "model_head",
@@ -749,7 +750,7 @@ def test_process_audits_malformed_json_and_recovers_next_joined_event(tmp_path, 
     events = []
     path = tmp_path / "syntax-noise.log"
     command = [sys.executable,"-u","-c","\n".join("print("+repr(line)+",flush=True)" for line in lines)]
-    ids = center.TrainingCenter._run_process(command, path, events.append, None, source_total=3)
+    ids = center.LegacyTrainingCenter._run_process(command, path, events.append, None, source_total=3)
     assert ids["model_run_id"] == "recovered-model"
     assert [(e["stage"],e["completed"],e["total"]) for e in events] == [("E0",1,3),("E0",1,3)]
     assert path.read_text() == "\n".join(lines) + "\n"
@@ -766,7 +767,7 @@ def test_process_joined_records_still_reject_semantic_progress_regression(tmp_pa
     line = record(2) + record(1)
     command = [sys.executable,"-u","-c","print("+repr(line)+",flush=True)"]
     with pytest.raises(ValueError, match="人口进度"):
-        center.TrainingCenter._run_process(command,tmp_path/"regression.log",None,None,source_total=3)
+        center.LegacyTrainingCenter._run_process(command,tmp_path/"regression.log",None,None,source_total=3)
 
 
 def test_process_malformed_json_cannot_mask_nonzero_child_exit(tmp_path):
@@ -774,7 +775,7 @@ def test_process_malformed_json_cannot_mask_nonzero_child_exit(tmp_path):
     command = [sys.executable,"-u","-c","print("+repr(line)+",flush=True); raise SystemExit(7)"]
     path = tmp_path / "child-failure.log"
     with pytest.raises(ValueError, match="退出码 7"):
-        center.TrainingCenter._run_process(command,path,None,None,source_total=3)
+        center.LegacyTrainingCenter._run_process(command,path,None,None,source_total=3)
     assert path.read_text() == line + "\n"
     assert json.loads(path.with_suffix(".parser.jsonl").read_text())["prefix"] == "HEAD"
 
@@ -788,7 +789,7 @@ def test_process_rejects_wrong_population_progress_even_without_callback(tmp_pat
     line="PROGRESS "+json.dumps(event)
     command=[sys.executable,"-u","-c","print("+repr(line)+",flush=True)"]
     with pytest.raises(ValueError,match="人口进度"):
-        center.TrainingCenter._run_process(command,tmp_path/"invalid-progress.log",None,None,source_total=3)
+        center.LegacyTrainingCenter._run_process(command,tmp_path/"invalid-progress.log",None,None,source_total=3)
 
 
 def test_process_detail_logs_and_identity_updates_preserve_dataset_progress(tmp_path):
@@ -799,7 +800,7 @@ def test_process_detail_logs_and_identity_updates_preserve_dataset_progress(tmp_
         "TRAIN_RUN_ID fresh-model"]
     command=[sys.executable,"-u","-c","\n".join("print("+repr(line)+",flush=True)" for line in lines)]
     events=[]
-    ids=center.TrainingCenter._run_process(command,tmp_path/"detail.log",events.append,None,source_total=3)
+    ids=center.LegacyTrainingCenter._run_process(command,tmp_path/"detail.log",events.append,None,source_total=3)
     assert ids["model_run_id"]=="fresh-model"
     assert len(events)==3
     assert [(item["stage"],item["completed"],item["total"]) for item in events]==[
@@ -816,7 +817,7 @@ def test_process_diagnostic_progress_counts_only_frozen_fold_stocks(tmp_path):
         "DIAGNOSTIC_RUN_ID diagnostic-result"]
     command=[sys.executable,"-u","-c","\n".join("print("+repr(line)+",flush=True)" for line in lines)]
     events=[]
-    center.TrainingCenter._run_process(command,tmp_path/"diagnostic-progress.log",events.append,None,source_total=3)
+    center.LegacyTrainingCenter._run_process(command,tmp_path/"diagnostic-progress.log",events.append,None,source_total=3)
     assert [(item.get("fold"),item["completed"],item["total"]) for item in events]==[
         (None,0,0),("first",3,3),("production",1,3),("production",1,3)]
     assert events[-1]["children"]["diagnostic_run_id"]=="diagnostic-result"
@@ -830,7 +831,7 @@ def test_process_rejects_diagnostic_rows_or_wrong_frozen_population(tmp_path,cha
     line="DIAGNOSTIC_PROGRESS "+json.dumps(event)
     command=[sys.executable,"-u","-c","print("+repr(line)+",flush=True)"]
     with pytest.raises(ValueError,match="诊断进度"):
-        center.TrainingCenter._run_process(command,tmp_path/"bad-diagnostic-progress.log",None,None,source_total=3)
+        center.LegacyTrainingCenter._run_process(command,tmp_path/"bad-diagnostic-progress.log",None,None,source_total=3)
 
 
 def test_status_reports_effective_incumbent_date_while_replacement_waits(service,monkeypatch):
@@ -881,7 +882,7 @@ def test_reference_quality_progress_keeps_separate_complete_stock_populations(tm
         'TRAIN_RUN_ID model-result']
     command=[sys.executable,'-u','-c','\n'.join('print('+repr(line)+',flush=True)' for line in lines)]
     events=[]
-    center.TrainingCenter._run_process(command,tmp_path/'reference-progress.log',events.append,None,source_total=3)
+    center.LegacyTrainingCenter._run_process(command,tmp_path/'reference-progress.log',events.append,None,source_total=3)
     records=[e for e in events if e.get('scope')=='current_reference_population_stocks']
     assert [(e['stage'],e['completed'],e['total']) for e in records]==[
         ('reference_quality_population',3,3),('reference_quality_fee_qualification',1,3),
@@ -898,7 +899,7 @@ def test_reference_progress_rejects_wrong_stock_population_without_callback(tmp_
     line='REFERENCE_QUALITY_PROGRESS '+json.dumps(value)
     command=[sys.executable,'-u','-c','print('+repr(line)+',flush=True)']
     with pytest.raises(ValueError,match='参考质量进度'):
-        center.TrainingCenter._run_process(command,tmp_path/'bad-reference-progress.log',None,None,source_total=3)
+        center.LegacyTrainingCenter._run_process(command,tmp_path/'bad-reference-progress.log',None,None,source_total=3)
 
 
 def test_reference_summary_reports_independent_fee_qualification_as_optional():

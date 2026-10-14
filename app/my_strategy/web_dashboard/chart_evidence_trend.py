@@ -14,7 +14,17 @@ def decorate_analysis(result, *, raw, overlay, start=None):
         raise ValueError("图表模型体系未登记")
     if overlay.get("analysis_mode") != "reference":
         raise ValueError("图表账户回放入口已退役；只提供B/S与仓位参考")
-    display_name = family_module(family, "contracts").DISPLAY_NAME
+    display_name = overlay.get("display_name") or family_module(family, "contracts").DISPLAY_NAME
+    position_schema = family == "reference_position_v1"
+    def describe_event(event, action, *, source=False):
+        if not position_schema:
+            return
+        event.update(reference_position_schema=family, target_change_action=action)
+        if source:
+            change = {"BUY": "增加", "SELL": "减少"}.get(action, "未变化")
+            event["source_relationship_text"] = f"同日参考目标{change}；来源点独立保留"
+        else:
+            event["reference_display_label"] = {"BUY": "参考增仓", "SELL": "参考减仓"}.get(action, "参考目标保持")
     out = copy.deepcopy(result)
     visible = {str(b.get("date") or b.get("time"))[:10] for b in result["frequencies"]["日线"]["bars"]}
     observed = {str(r["date"])[:10]: r for r in raw.to_dict("records")}
@@ -32,6 +42,8 @@ def decorate_analysis(result, *, raw, overlay, start=None):
             ohlc={key: float(bar[key]) for key in ("open", "high", "low", "close")},
             consensus=direction_rows.get(day))
         risk = row.get("reference_risk_plan") or {}
+        for event in row.get("source_reference_points", []):
+            describe_event(event, row.get("action"), source=True)
         for event in row.get("events", []):
             event.update(evidence_date=day, reference_price=float(bar["close"]), reference_price_date=day,
                 reference_price_source="signal_day_close", reference_price_basis=basis)
@@ -40,6 +52,7 @@ def decorate_analysis(result, *, raw, overlay, start=None):
                 eligible = (event.get("candidate_direction_valid") is True
                     and event.get("confirmed") is True and event.get("input_eligible") is True)
             event["direction_eligible"] = eligible is True
+            describe_event(event, row.get("action"), source=True)
             event["reference_risk_eligible"] = (event["direction_eligible"] and event.get("side") == "BUY"
                 and risk.get("status") == "available" and event.get("event_id") in risk.get("source_event_ids", []))
         for source in ("ma", "structure", "wyckoff"):
@@ -57,12 +70,21 @@ def decorate_analysis(result, *, raw, overlay, start=None):
         day = str(point.get("date") or point.get("signal_date"))[:10]
         point.update(reference_price=float(observed[day]["close"]), reference_price_date=day,
             reference_price_source="signal_day_close", reference_price_basis=basis)
+        describe_event(point, direction_rows.get(day, {}).get("action", "WAIT"),
+            source=point.get("reference_layer") == "source")
     request_context_hash = stable_hash({"series_context_hash": overlay.get("source_context_hash"),
         "as_of": result.get("decision_date", result["data_end"]), "display_start": start,
         "display_end": result["data_end"], "projection": "daily_weekly_monthly_original_clock"})
     direction["rows"] = [r for r in direction.get("rows", []) if str(r["date"])[:10] in visible]
     direction["events"] = [e for e in direction.get("events", direction.get("direction_points", [])) if str(e["date"])[:10] in visible]
     direction["direction_points"] = direction["events"]
+    if position_schema:
+        for row in direction["rows"]:
+            for key in ("events", "source_reference_points"):
+                for event in row.get(key, []):
+                    describe_event(event, row.get("action"), source=True)
+        for event in direction["events"]:
+            describe_event(event, event.get("action") or event.get("side"))
     wfull = copy.deepcopy(overlay.get("wyckoff_events", []))
     wvisible = [e for e in wfull if str(e.get("first_available_at") or e.get("available_at"))[:10] in visible]
     for event in wvisible:
@@ -82,7 +104,8 @@ def decorate_analysis(result, *, raw, overlay, start=None):
         models_enabled=overlay.get("models_enabled", True), structure_only=overlay.get("structure_only", False))
     out["events"] = [{**e, "time": str(e.get("first_available_at") or e.get("available_at"))[:10],
         "action": str(e.get("side", "")).lower(), "signal": e.get("event_type", "来源参考"),
-        "reason": "原始方向证据；B/S是独立方向参考，非成交或账户操作"}
+        "reason": "原始规则来源；与逐股参考目标变化独立展示，参考价不是成交价。" if position_schema else
+            "原始方向证据；B/S是独立方向参考，非成交或账户操作"}
         for row in rows for e in row.get("events", [])]
     out["chart_evidence"] = {"version": "czsc_trend_chart_evidence", "display_name": display_name,
         "analysis_mode": "reference", "reference_only": True, "rows": rows,
@@ -102,6 +125,8 @@ def decorate_analysis(result, *, raw, overlay, start=None):
         "publication_allowed": False, "pricing_assumptions": copy.deepcopy(overlay.get("pricing_assumptions", {})),
         "analysis_mode": "reference", "account_scope": "none", "account_simulated": False,
         "request_context_hash": request_context_hash, "source_context_hash": overlay.get("source_context_hash"),
-        "models_enabled": overlay.get("models_enabled", True)}
+        "models_enabled": overlay.get("models_enabled", True),
+        "reference_position_schema": overlay.get("position_reference", {}).get("schema"),
+        "historical_reconstruction": any(r.get("historical_reconstruction") for r in rows)}
     out["research"].pop("high_return_target", None)
     return out

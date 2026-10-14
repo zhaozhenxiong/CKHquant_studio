@@ -24,6 +24,7 @@ from my_strategy.services.czsc_trend_support import _save,_file_hash
 from my_strategy.storage.czsc_results import ResultStore
 
 from my_strategy.services import model_training_center as center
+# Archive-specific contracts remain tested against the explicit legacy implementation.
 from my_strategy.web_dashboard import api
 from my_strategy.services import czsc_trend_source as current_source
 
@@ -107,7 +108,7 @@ def source(tmp_path,monkeypatch):
         population_mode='full_liquidity_union',raw_only_rebuild=True,reused_model_or_label=False,calendar_dates=dates)
     _save(native_root/'reports/native_source.json',native_report)
     for root in [raw_root,native_root]:_save(root/'data_snapshots/calendar.json',dict(verified=True,source_run_id='calendar-input',dates=dates))
-    store=ResultStore(tmp_path/'results.db',runs); service=center.TrainingCenter(store=store,metadata_root=tmp_path/'metadata')
+    store=ResultStore(tmp_path/'results.db',runs); service=center.LegacyTrainingCenter(store=store,metadata_root=tmp_path/'metadata')
     return dict(service=service,values=values,config=config,native=native_report,raw=raw_report,population=population,
         native_root=native_root,raw_root=raw_root,code=code,runs=runs,dates=dates)
 
@@ -208,7 +209,7 @@ def test_process_events_use_frozen_total_real_devices_and_new_model_id(source,tm
         'DATASET E0 000001.SZ entries=1 exits=0',
         'PROGRESS '+json.dumps(dict(stage='dataset',population='E0',fold=None,completed=1,total=3,scope='current_population_only'))]
     command=[sys.executable,'-u','-c','\n'.join('print('+repr(line)+',flush=True)' for line in lines)]
-    ids=center.TrainingCenter._run_process(command,tmp_path/'training.log',events.append,None,
+    ids=center.LegacyTrainingCenter._run_process(command,tmp_path/'training.log',events.append,None,
         initial_ids={'raw_source_run_id':'raw-input','source_native_run_id':'native-input'},source_total=3,source_reuse=proof)
     assert ids==dict(raw_source_run_id='raw-input',source_native_run_id='native-input',model_run_id='new-model')
     assert next(e for e in events if e['stage']=='independent_policy_selection')['actual_device']=='cpu'
@@ -291,7 +292,7 @@ def trained_contract_fixture(source,plan):
     'generator_code','reference_generator_code','coverage'])
 def test_post_training_source_binding_cannot_use_another_source_or_old_identity(source,change):
     plan=preflight(source);report=trained_contract_fixture(source,plan)
-    center.TrainingCenter._validate_trained_plan(report,plan)
+    center.LegacyTrainingCenter._validate_trained_plan(report,plan)
     report=copy.deepcopy(report)
     if change=='native_id':report['source_snapshot']['source_native_run_id']='wrong-native'
     elif change=='report_sha':report['source_snapshot']['source_report_sha256']='0'*64
@@ -301,7 +302,7 @@ def test_post_training_source_binding_cannot_use_another_source_or_old_identity(
     elif change=='generator_code':report['protocol_freeze']['code_hashes']['services/czsc_trend_account.py']='0'*64
     elif change=='reference_generator_code':report['protocol_freeze']['code_hashes']['services/czsc_reference_quality.py']='0'*64
     else:report['dataset_records']=report['dataset_records'][:-1]
-    with pytest.raises(ValueError):center.TrainingCenter._validate_trained_plan(report,plan)
+    with pytest.raises(ValueError):center.LegacyTrainingCenter._validate_trained_plan(report,plan)
 
 
 @pytest.mark.parametrize('change',['missing','hash','gated-account','source','continuation'])
@@ -310,14 +311,14 @@ def test_completed_training_binds_actual_E1_holding_population_without_new_head_
     # Existing head readiness gates still belong to _model. A frozen report
     # can be validated here without claiming an optional exit head passed.
     assert not report.get('model_bundles')
-    center.TrainingCenter._validate_trained_plan(report,plan)
+    center.LegacyTrainingCenter._validate_trained_plan(report,plan)
     if change=='missing':report.pop('holding_population')
     elif change=='hash':report['protocol_freeze']['holding_population_hash']='wrong'
     elif change=='gated-account':report['holding_population']['reference_mode']='final'
     elif change=='source':report['holding_population']['source_snapshot_hash']='foreign'
     else:report['holding_population']['continuation_policy_hash']='another-E1'
     with pytest.raises(ValueError,match='holding|E1|持仓'):
-        center.TrainingCenter._validate_trained_plan(report,plan)
+        center.LegacyTrainingCenter._validate_trained_plan(report,plan)
 
 
 @pytest.mark.parametrize('change',['native_none','native_list','snapshot_none','records_none','record_none','config_none',

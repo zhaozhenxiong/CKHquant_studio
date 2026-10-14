@@ -82,7 +82,7 @@ const elements=new Map();function newElement(tag='div') {return {tag,dataset:{},
 function element(id){if(!elements.has(id))elements.set(id,newElement());return elements.get(id);}
 global.document={getElementById:element,documentElement:{},createElementNS:(_,tag)=>newElement(tag),querySelectorAll:()=>[]};
 global.getComputedStyle=()=>({getPropertyValue:()=> '#123456'});global.ResizeObserver=class{observe(){}};
-global.requestAnimationFrame=()=>1;global.window={innerWidth:907,innerHeight:924};global.location={hash:''};
+global.requestAnimationFrame=()=>1;global.window={innerWidth:907,innerHeight:924,addEventListener(){}};global.location={hash:''};
 let range={from:0,to:2},crosshair,click,firstSeries;const resizeWidths=[],fitWidths=[];
 const scale={subscribeVisibleLogicalRangeChange(){},getVisibleLogicalRange:()=>range,setVisibleLogicalRange(value){range=value;},
   fitContent(){fitWidths.push(element('analysis-chart').clientWidth);},height:()=>30,timeToCoordinate:()=>50};

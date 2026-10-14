@@ -2337,3 +2337,170 @@ def selection_gate(windows, policy, stocks, has_incumbent):
     if total < policy["min_round_trips_total"]:
         reasons.append("完整交易总数少于 200"); pending = True
     return dict(passed=not reasons, pending=pending, reasons=reasons, completed_round_trips=total, paired_statistics=paired)
+
+
+# Keep the old verifier available for immutable source/diagnostic archives. New
+# submissions always use a distinct target schema and cannot resume old heads.
+LegacyTrainingCenter = TrainingCenter
+
+
+class TrainingCenter(LegacyTrainingCenter):
+    """Task-facing facade for account-free per-stock reference training."""
+
+    def _reference_call(self, method, *args, **kwargs):
+        from my_strategy.services import reference_training
+        return getattr(reference_training, method)(*args, runs_root=self.runs_root,
+            metadata_root=self.db_path.parent, **kwargs)
+
+    def capabilities(self):
+        return self._reference_call("capabilities")
+
+    def profiles(self):
+        return self._reference_call("profiles")
+
+    def save_default(self, parameters, expected_revision):
+        return self._reference_call("save_default", parameters, expected_revision=expected_revision)
+
+    def preflight(self, parameters=None, profile_id=None, *, source_native_run_id=None,
+                  raw_source_run_id=None, resume_native_run_id=None, progress=None):
+        if resume_native_run_id is not None:
+            raise ValueError("旧训练恢复入口已退役；请完成并核验来源后新建参考仓位训练计划")
+        if raw_source_run_id is not None:
+            raise ValueError("参考训练仅复用已完成并核验的 native 来源；请提供 source_native_run_id")
+        if parameters is None:
+            parameters = self.profiles()["default_profile"]["parameters"]
+        return self._reference_call("preflight", parameters,
+            source_native_run_id=source_native_run_id, raw_source_run_id=raw_source_run_id,
+            progress=progress)
+
+    def validate_plan(self, plan_id, parameters=None, *, check_code=True):
+        return self._reference_call("validate_plan", plan_id, parameters=parameters, check_code=check_code)
+
+    def run_training_job(self, spec, progress=None, check_cancel=None, run_callback=None):
+        if spec.get("resume_training_run_id") or spec.get("resume_from_job_id"):
+            raise ValueError("旧模型标签和权重不适用于 reference_position_v1；请提交新预检计划")
+        with self._training_resource(progress, check_cancel):
+            if spec.get("resume_reference_run_id"):
+                from my_strategy.services.reference_training_resume import resume_training
+                result = resume_training(_identifier(spec["resume_reference_run_id"]), plan_id=spec["plan_id"],
+                    runs_root=self.runs_root, metadata_root=self.db_path.parent,
+                    progress=progress, check_cancel=check_cancel, run_callback=run_callback)
+            else:
+                result = self._reference_call("execute_training", spec["plan_id"],
+                    parameters=spec.get("parameters"), progress=progress,
+                    check_cancel=check_cancel, run_callback=run_callback)
+            report = result.get("report", {})
+            result.update(strategy_version="reference_position_v1",
+                training_run_id=result.get("model_run_id") or result.get("train_run_id") or result.get("run_id"),
+                plan_id=report.get("plan_id") or spec["plan_id"], execution_plan_id=spec["plan_id"],
+                technical_validation=report.get("technical_validation"),
+                predictive_gate=report.get("predictive_gate"),
+                historical_union_count=report.get("historical_union_count"),
+                trained_stock_count=report.get("dataset", {}).get("stocks"))
+            return self.store.save("model-training", result)
+
+    def run_validation_job(self, spec, progress=None, check_cancel=None, run_callback=None):
+        with self._training_resource(progress, check_cancel):
+            plan = self.validate_plan(spec["plan_id"], check_code=False)
+            model_id = _identifier(spec["model_run_id"])
+            _, report = self._reference_call("load_reference_run", model_id)
+            if report.get("plan_id") != plan["plan_id"]:
+                raise ValueError("参考模型与原冻结计划不一致")
+            if check_cancel:
+                check_cancel()
+            context = create_run_context(task="reference-model-validation", as_of_date=report["data_end"],
+                config={"model_run_id":model_id,"plan_id":plan["plan_id"]}, scope="train", source="web")
+            if run_callback:
+                run_callback(context.run_id)
+            evaluation = self._reference_call("evaluate", model_id, progress=progress, check_cancel=check_cancel)
+            result = dict(run_id=context.run_id, model_run_id=model_id, training_run_id=model_id,
+                strategy_version="reference_position_v1", plan_id=plan["plan_id"],
+                original_plan_id=plan["plan_id"], status="completed", training_started=False,
+                weights_unchanged=True, publication_allowed=False, validation=evaluation,
+                comparison_status=evaluation.get("status", "pending"))
+            _save(context.subdir("reports") / "validation_job.json", result)
+            context.write_metadata({"status":"completed","model_run_id":model_id,"training_started":False})
+            return self.store.save("model-validation", result)
+
+    def active_run_id(self, as_of=None):
+        return self._reference_call("active_reference_run_id", as_of=as_of)
+
+    def active_model_run_id(self, as_of=None, scope="research"):
+        if scope not in {"research", "production"}:
+            raise ValueError("未知模型选择用途")
+        if scope == "production":
+            return None
+        return self.active_run_id(as_of)
+
+    def status(self):
+        result = self._reference_call("status")
+        models = result.setdefault("models", [])
+        for model in models:
+            model.setdefault("model_family", "current")
+            model.setdefault("display_name", "参考买卖点与每股仓位")
+            model.setdefault("trained_stock_count", (model.get("dataset") or {}).get("stocks"))
+            try:
+                report = json.loads((self.runs_root / _identifier(model["run_id"]) / "reports/reference_training.json").read_text())
+                model["historical_union_count"] = report.get("historical_union_count")
+                model["latest_eligible_count"] = report.get("source_reuse", {}).get("latest_eligible_count")
+                plan_file = self.runs_root / model["run_id"] / "config/training_plan.json"
+                if model["latest_eligible_count"] is None and plan_file.is_file():
+                    model["latest_eligible_count"] = json.loads(plan_file.read_text()).get("latest_eligible_count")
+                model["checkpoints"] = []
+                if report.get("status") == "completed":
+                    for fold in [*report.get("folds", []), report.get("production")]:
+                        if not fold:
+                            continue
+                        policy_end = fold.get("split", {}).get("policy_end")
+                        historical_start = fold.get("split", {}).get("test_start")
+                        if not historical_start and policy_end:
+                            from datetime import timedelta
+                            historical_start = (date.fromisoformat(policy_end) + timedelta(days=1)).isoformat()
+                        model["checkpoints"].append(dict(name=fold["name"], available_at=historical_start,
+                            historical_available_at=historical_start,
+                            forward_available_at=fold.get("effective_from") if fold["name"] == "production" else None,
+                            research_reconstruction=fold["name"] != "production", predictive_gate=fold.get("predictive_gate")))
+                if model["run_id"] == (result.get("active_model") or {}).get("run_id"):
+                    result["data_end"] = report.get("data_end")
+                    result["calendar_run_id"] = report.get("source_reuse", {}).get("calendar_run_id")
+                    result["active_model"].update(display_name=model["display_name"], effective_from=(report.get("production") or {}).get("effective_from"))
+            except (OSError, ValueError, KeyError):
+                model["validation_available"] = False
+        for path in sorted(self.runs_root.glob("*/reports/trend_consensus.json"), reverse=True)[:50]:
+            try:
+                report = json.loads(path.read_text())
+                models.append(dict(run_id=report["run_id"], strategy_version=report.get("strategy_version"),
+                    status=report.get("status"), data_end=report.get("data_end"), archived=True,
+                    validation_available=False, publication_allowed=False,
+                    trained_stock_count=len(report.get("dataset_records", [])),
+                    archive_reason="历史成交研究模型；新参考仓位模型使用独立标签和权重，历史诊断只读保留"))
+            except (OSError, ValueError, KeyError):
+                continue
+        return result
+
+    def current_selection(self):
+        return self._reference_call("status").get("current_selection")
+
+    def selection_events(self, limit=100):
+        from my_strategy.services import reference_training
+        if hasattr(reference_training, "selection_events"):
+            return self._reference_call("selection_events", limit=limit)
+        return {"items": self._reference_call("status").get("selection_events", [])[:limit]}
+
+    def comparison(self, run_id):
+        path = self.runs_root / _identifier(run_id) / "reports/reference_training.json"
+        if path.is_file():
+            result = self._reference_call("evaluate", run_id)
+            _, report = self._reference_call("load_reference_run", run_id)
+            result.update(strategy_version="reference_position_v1", predictive_gate=report.get("predictive_gate"),
+                predictive_metrics=[dict(name=fold["name"], metrics=fold.get("validation"),
+                    predictive_gate=fold.get("predictive_gate")) for fold in
+                    [*report.get("folds", []), report.get("production")] if fold])
+            return result
+        return super().comparison(run_id)
+
+    def rollback(self, expected_run_id, target_run_id=None):
+        from my_strategy.services import reference_training
+        if hasattr(reference_training, "rollback"):
+            return self._reference_call("rollback", expected_run_id, target_run_id=target_run_id)
+        raise ValueError("参考仓位版本须通过独立验证后选择；不能回滚到旧成交研究模型")

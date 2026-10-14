@@ -1,4 +1,4 @@
-"""Reference scores have causal prices and no simulated account population."""
+"""Archived legacy reference contracts; the public default is tested separately."""
 from __future__ import annotations
 
 import copy
@@ -54,7 +54,7 @@ def reference_inputs(monkeypatch):
 
 
 def test_independent_reference_points_use_real_multisource_support_without_account(reference_inputs):
-    out = runtime.reference_overlay(reference_inputs, DATES)
+    out = runtime.legacy_reference_overlay(reference_inputs, DATES)
     assert out["analysis_mode"] == "reference" and out["account_scope"] == "none"
     assert out["account_actions"] is None and out["compute_info"]["account_simulated"] is False
     assert [point["side"] for point in out["reference_points"]] == ["BUY", "SELL", "BUY"]
@@ -77,10 +77,10 @@ def test_independent_reference_points_use_real_multisource_support_without_accou
 
 
 def test_reference_cutoff_excludes_unclosed_day_and_future_mutations(reference_inputs):
-    first = runtime.reference_overlay(reference_inputs, DATES, as_of=DATES[1] + "T14:59:00+08:00")
+    first = runtime.legacy_reference_overlay(reference_inputs, DATES, as_of=DATES[1] + "T14:59:00+08:00")
     altered = reference_inputs.copy()
     altered.loc[altered.date > DATES[0], ["open", "high", "low", "close"]] *= 100
-    second = runtime.reference_overlay(altered, DATES, as_of=DATES[0])
+    second = runtime.legacy_reference_overlay(altered, DATES, as_of=DATES[0])
     assert first["rows"] == second["rows"]
     assert first["reference_points"] == second["reference_points"]
     assert first["latest_decision"]["date"] == DATES[0]
@@ -89,7 +89,7 @@ def test_reference_cutoff_excludes_unclosed_day_and_future_mutations(reference_i
 
 
 def test_missing_market_session_never_reuses_old_reference(reference_inputs):
-    out = runtime.reference_overlay(reference_inputs.iloc[:2], DATES, as_of=DATES[-1])
+    out = runtime.legacy_reference_overlay(reference_inputs.iloc[:2], DATES, as_of=DATES[-1])
     assert out["latest_decision"]["direction"] == "UNAVAILABLE"
     assert out["latest_decision"]["action"] == "WAIT"
     assert out["latest_decision"]["reference_close"] is None
@@ -103,7 +103,7 @@ def test_fixed_reference_cannot_use_unqualified_candidate(reference_inputs, monk
     monkeypatch.setattr(TrainingCenter, "active_model_run_id", lambda *a, **k: selected)
     monkeypatch.setattr(runtime, "load_model_run", lambda *a, **k: pytest.fail("unqualified fixed candidate must fail before loading"))
     with pytest.raises(ValueError, match="已合格且生效"):
-        runtime.reference_overlay(reference_inputs, DATES, model_run_id="unqualified-candidate")
+        runtime.legacy_reference_overlay(reference_inputs, DATES, model_run_id="unqualified-candidate")
 
 
 def test_one_source_cannot_spend_two_independent_budgets(reference_inputs, monkeypatch):
@@ -116,16 +116,16 @@ def test_one_source_cannot_spend_two_independent_budgets(reference_inputs, monke
             row["structure"]["input_eligible"] = False
         return pack
     monkeypatch.setattr(czsc_native_evidence, "build_native_evidence", auxiliary)
-    out = runtime.reference_overlay(reference_inputs, DATES)
+    out = runtime.legacy_reference_overlay(reference_inputs, DATES)
     assert out["reference_points"] == []
     assert all(row["direction"] == "WAIT" for row in out["rows"])
 
 
 def test_structure_only_reference_never_loads_or_predicts_models(reference_inputs, monkeypatch):
     from my_strategy.services import czsc_trend_pipeline
-    monkeypatch.setattr(runtime, "load_reference_model_run", lambda *a, **k: pytest.fail("structure-only must not resolve models"))
+    monkeypatch.setattr(runtime, "_load_legacy_reference_model_run", lambda *a, **k: pytest.fail("structure-only must not resolve models"))
     monkeypatch.setattr(czsc_trend_pipeline, "forward_trend", lambda *a, **k: pytest.fail("structure-only must not infer models"))
-    out = runtime.reference_overlay(reference_inputs, DATES, use_models=False,
+    out = runtime.legacy_reference_overlay(reference_inputs, DATES, use_models=False,
         model_run_id="ignored-candidate", model_fold="ignored-fold")
     assert out["structure_only"] is True and out["models_enabled"] is False
     assert out["model_run_id"] is None and out["account_actions"] is None
@@ -135,8 +135,8 @@ def test_structure_only_reference_never_loads_or_predicts_models(reference_input
 
 
 def test_scan_freezes_missing_selection_across_worker_inference(reference_inputs, monkeypatch):
-    monkeypatch.setattr(runtime, "load_reference_model_run", lambda *a, **k: pytest.fail("scan must retain its initially missing selection"))
-    out = runtime.reference_overlay(reference_inputs, DATES, model_selection_frozen=True)
+    monkeypatch.setattr(runtime, "_load_legacy_reference_model_run", lambda *a, **k: pytest.fail("scan must retain its initially missing selection"))
+    out = runtime.legacy_reference_overlay(reference_inputs, DATES, model_selection_frozen=True)
     assert out["model_run_id"] is None and out["models_enabled"] is True
     assert all(row["agents"]["ma"]["p_up"] is None for row in out["rows"])
 
@@ -146,7 +146,7 @@ def test_fixed_reference_pins_the_actual_direction_head_and_rejects_future_head(
     bundles = [{"name": "trend_prior", "available_at": "2026-06-30", "heads": {"trend_direction": {"path": "prior"}}},
         {"name": "trend_latest", "available_at": "2026-09-28", "heads": {"trend_direction": {"path": "latest"}}},
         {"name": "trend_future", "available_at": "2026-09-30", "heads": {"trend_direction": {"path": "future"}}}]
-    monkeypatch.setattr(runtime, "load_reference_model_run", lambda *a, **k: (Path("qualified"),
+    monkeypatch.setattr(runtime, "_load_legacy_reference_model_run", lambda *a, **k: (Path("qualified"),
         {"config": strategy_config(), "trend_bundles": bundles, "model_bundles": []}))
     original = czsc_trend_pipeline.forward_trend
     seen = []
@@ -154,19 +154,19 @@ def test_fixed_reference_pins_the_actual_direction_head_and_rejects_future_head(
         seen.append(selected)
         return original(frame, root, selected, *args, **kwargs)
     monkeypatch.setattr(czsc_trend_pipeline, "forward_trend", infer)
-    latest = runtime.reference_overlay(reference_inputs, DATES, model_fold="production")
+    latest = runtime.legacy_reference_overlay(reference_inputs, DATES, model_fold="production")
     assert [bundle["name"] for bundle in seen[-1]] == ["trend_latest"]
     assert latest["latest_decision"]["resolved_model_fold"] == "trend_latest"
-    runtime.reference_overlay(reference_inputs, DATES, model_fold="trend_prior")
+    runtime.legacy_reference_overlay(reference_inputs, DATES, model_fold="trend_prior")
     assert [bundle["name"] for bundle in seen[-1]] == ["trend_prior"]
     with pytest.raises(ValueError, match="尚不可用"):
-        runtime.reference_overlay(reference_inputs, DATES, model_fold="trend_future")
+        runtime.legacy_reference_overlay(reference_inputs, DATES, model_fold="trend_future")
 
 
 def test_reference_chart_and_market_history_never_project_account_fields(reference_inputs):
     from my_strategy.web_dashboard.chart_evidence_trend import decorate_analysis
     from my_strategy.services.czsc_market_history import MarketHistoryBuilder
-    overlay = runtime.reference_overlay(reference_inputs, DATES)
+    overlay = runtime.legacy_reference_overlay(reference_inputs, DATES)
     result = {"symbol": "000001.SZ", "data_end": DATES[-1], "price_basis": "unadjusted",
         "frequencies": {"日线": {"bars": [{"time": day} for day in DATES[1:]]}}}
     chart = decorate_analysis(result, raw=reference_inputs, overlay=overlay, start=DATES[1])

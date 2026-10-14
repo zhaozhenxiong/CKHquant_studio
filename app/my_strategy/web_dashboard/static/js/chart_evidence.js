@@ -11,8 +11,8 @@
   const supportScore = (value) => finite(value) ? num(Number(value) * 100) : '—';
   const consensusVersion = (row, config = null, version = '') => version || row?.version || config?.version || '';
   const weightedConsensus = (row, config = null, version = '') => consensusVersion(row,config,version) === 'trend_consensus';
-  const currentEvidenceConsensus = (row, config = null, version = '') => consensusVersion(row,config,version) === 'trend_consensus';
-  const isTrendConsensus = (row, config = null, version = '') => consensusVersion(row,config,version) === 'trend_consensus';
+  const currentEvidenceConsensus = (row, config = null, version = '') => ['trend_consensus','reference_position_v1'].includes(consensusVersion(row,config,version));
+  const isTrendConsensus = (row, config = null, version = '') => ['trend_consensus','reference_position_v1'].includes(consensusVersion(row,config,version));
   const referenceMode = (...records) => records.some((item) => item?.analysis_mode === 'reference' || item?.reference_only === true || item?.account_scope === 'none');
   const agentKeys = (row, consensus) => referenceMode(row,consensus) ? ['ma','structure','wyckoff'] : Object.keys(labels);
   function referenceMarkerInputs(result, symbol = result?.symbol) {
@@ -276,6 +276,15 @@
     }).join('')}${referenceMode(row,consensus) && referenceQualityView(row).present ? `<section class="agent-evidence reference-quality-agent"><div class="agent-heading"><strong>独立参考质量Q</strong><span>专属参考买方人口</span></div>${referenceQualitySummaryHtml(row)}<p class="subtle">此质量评分用于参考仓位资格；三路方向证据分别核验。</p></section>` : ''}</div>`;
   }
   function agentOverviewHtml(row, consensus = null, config = null) {
+    if (row?.position_reference?.schema === 'reference_position_v1' || consensusVersion(consensus,config) === 'reference_position_v1') {
+      const agents = row?.agents || consensus?.agents || {};
+      const sources = [['ma','联合方向模型'],['structure','已确认结构'],['wyckoff','因果量价']];
+      const body = sources.map(([key,label]) => {
+        const item = agents[key] || {}, text = key === 'ma' ? trendProbabilities(item).summary : `买方 ${ruleScore(item.buy_strength)} · 卖方 ${ruleScore(item.sell_strength)}`;
+        return `<tr data-agent-summary-row="${key}"><td>${esc(label)}</td><td>${esc(text)}</td><td>${esc(statusLabel(item.status))}</td></tr>`;
+      }).join('');
+      return `<section class="agent-score-overview"><strong>联合模型与来源证据</strong><div class="table-wrap"><table><thead><tr><th>来源</th><th>当前分值</th><th>状态</th></tr></thead><tbody>${body}</tbody></table></div><p class="subtle">来源规则保留解释；最终参考变化由联合方向概率与冻结仓位参数生成。</p></section>`;
+    }
     const cellStyle = 'padding:6px;font-size:11px;line-height:1.4;overflow-wrap:anywhere';
     const body = agentKeys(row,consensus).map((key) => {
       const item = row?.agents?.[key] || {}, opinion = consensus?.agents?.[key];
@@ -379,6 +388,11 @@
     if (!row) return '<section class="consensus-result"><strong>最终判断不可用</strong><p class="subtle">该结果没有已保存的多 Agent 仲裁，主图不显示最终买卖点。</p></section>';
     const side = finalSide(row), arbiter = row.agents?.arbiter, weighted = weightedConsensus(row,config,version);
     const currentVersion = consensusVersion(row,config,version);
+    if (currentVersion === 'reference_position_v1') {
+      const position = row?.position_reference;
+      const probabilities = trendProbabilities(row?.agents?.ma || row || {});
+      return `<section class="consensus-result"><strong>参考买卖点与每股仓位 · ${esc(side || '保持')}</strong><p>${esc(probabilities.summary)}</p>${position ? referencePositionSummary(position) : ''}<p class="subtle">10交易日价格方向预测；参考B/S来自目标仓位的实际变化，来源结构点独立保留。</p></section>`;
+    }
     if (currentVersion !== 'trend_consensus') return '<section class="consensus-result"><strong>该仲裁记录已退役</strong><p>历史身份不具备当前判断资格，请查看归档证据。</p></section>';
     const label = isTrendConsensus(row,config,version) ? `趋势共识策略 · 方向诊断：${side || judgmentLabel(row.action)}` : side ? `${side} · 最终${side === 'B' ? '买点' : '卖点'}` : '观察 · 本日未生成最终买卖点';
     const familyLabels = {ma:'均线／辅助结构',structure:'独立结构',wyckoff:'威科夫量价'};
@@ -452,7 +466,8 @@
       const amount = group.event_count || group.entries?.length || 1;
       const wyckoff = amount === 1 ? `W ${esc(group.event_type)}${group.confirmed ? '确认' : '待测试'}`
         : `量价${group.action === 'BUY' ? '需求' : '供给'} ×${amount} · 已确认 ${group.confirmed_count ?? group.entries?.filter((entry) => entry.row?.confirmed === true).length ?? 0}／待测试 ${group.pending_count ?? group.entries?.filter((entry) => entry.row?.confirmed !== true).length ?? 0}`;
-      return `<span class="badge ${group.action === 'BUY' ? 'buy' : 'sell'}">${group.kind === 'wyckoff' ? wyckoff : `${group.kind === 'source_reference' ? `${group.source_label || group.sources?.join('、') || '独立'}来源 ` : '最终共识 '}${group.action === 'BUY' ? 'B' : 'S'}`}</span>`;
+      const referencePosition = group.consensus_version === 'reference_position_v1' || group.entries?.some(entry => entry.row?.reference_position_schema === 'reference_position_v1');
+      return `<span class="badge ${group.action === 'BUY' ? 'buy' : 'sell'}">${group.kind === 'wyckoff' ? wyckoff : `${group.kind === 'source_reference' ? `${group.source_label || group.sources?.join('、') || '独立'}来源 ` : referencePosition ? '目标变化 ' : '最终共识 '}${group.action === 'BUY' ? 'B' : 'S'}`}</span>`;
     }).join('');
     // Show every constituent event of the displayed candle. The date selector
     // above still controls the independent daily reference snapshot.
@@ -544,10 +559,28 @@
     const proof = details.length || quality.populationHash || quality.qualificationHash ? `<details data-agent-details="reference_quality"><summary>参考质量来源与资格凭据</summary>${details.map((item) => `<p>${esc(item)}</p>`).join('')}${quality.populationHash ? `<p>专属参考人口 <code>${esc(quality.populationHash)}</code></p>` : ''}${quality.qualificationHash ? `<p>费用资格凭据 <code>${esc(quality.qualificationHash)}</code></p>` : ''}</details>` : '';
     return `<section class="reference-quality-evidence" data-reference-quality-status="${esc(quality.status)}"><h3>独立参考质量Q</h3><p class="reference-quality-qualification">${esc(quality.qualification)}</p><div class="reference-quality-grid"><div><span>参考质量概率</span><strong>${quality.scored ? probability(quality.probability) : '未评分'}</strong></div><div><span>原质量门槛</span><strong>${quality.qualityThreshold == null ? '待核验' : probability(quality.qualityThreshold)}</strong></div><div><span>参考总支持 / 原门槛</span><strong>${quality.total == null ? '未评分' : supportScore(quality.total)} / ${quality.totalThreshold == null ? '待核验' : supportScore(quality.totalThreshold)} 分</strong></div></div><p class="subtle">独立参考买方机会人口；目标为完整费用后至少8%且2R。此分数仅用于参考仓位资格，三路方向评分分别保留。</p>${quality.reasons.length ? `<p class="subtle">${esc(quality.reasons.map(reason).join('；'))}</p>` : ''}${proof}</section>`;
   }
+  function referencePositionSummary(plan) {
+    const target = plan.target_position_fraction ?? plan.target, previous = plan.previous_reference_target ?? plan.previous_reference_target_fraction;
+    const stale = plan.stale === true || plan.status === 'unavailable' || plan.status === 'stale';
+    const change = finite(plan.change_fraction) ? Number(plan.change_fraction) : null;
+    const riskReduction = stale && change != null && change < 0;
+    const predictiveGatePending = (plan.reason_codes || []).includes('reference_predictive_gate_pending');
+    const action = riskReduction ? 'S · 按风险减少参考仓位' : predictiveGatePending ? '预测基线未通过，保留参考目标' : stale ? '评分不可用 · 保留最近参考' : change == null ? '参考待初始化' : change > 0 ? 'B · 增加参考仓位' : change < 0 ? 'S · 减少参考仓位' : '保持参考仓位';
+    return `<span class="position-status">${esc(action)} · ${validProbability(target) ? probability(target) : '目标不可用'}</span><span class="stock-name">上一参考目标 ${validProbability(previous) ? probability(previous) : '尚未建立'}${(!stale || riskReduction) && change != null ? ` · 变化 ${change > 0 ? '+' : ''}${num(change * 100)} 个百分点` : ' · 本日无新调整'}</span>`;
+  }
+  function referencePositionHtml(record, plan, risk) {
+    const target = plan.target_position_fraction ?? plan.target, manual = plan.manual_comparison_change_fraction;
+    const predictiveGatePending = (plan.reason_codes || []).includes('reference_predictive_gate_pending');
+    const fields = [['收盘参考价', `${num(risk?.reference_price ?? record.reference_close)} 元`],['风险仓位上限',probability(risk?.risk_position_cap_fraction ?? plan.risk_position_cap_fraction)],['参考目标仓位',probability(target)]];
+    const manualText = finite(manual) ? `<p>与手工输入仓位比较：${Number(manual) > 0 ? '+' : ''}${num(manual * 100)} 个百分点（单独比较，不影响参考轨迹）</p>` : '';
+    const reasonText = (plan.reason_codes || []).map((code) => code === 'reference_predictive_gate_pending' ? '预测基线未通过，不生成积极增仓目标' : reason(code)).join('；');
+    return `<section class="position-reference" data-position-schema="reference_position_v1" data-position-status="${esc(plan.status)}"><header><h3>每股参考仓位变化</h3><span>${esc(plan.date || risk?.reference_price_date || record.date)}</span></header>${referencePositionSummary(plan)}<div class="position-reference-grid">${fields.map(([label,value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('')}</div>${manualText}${plan.stale ? `<p>最近有效参考 ${esc(plan.last_scored_date || plan.last_valid_date || plan.last_reference_date || '见历史')}；${predictiveGatePending ? '预测概率仅供诊断，参考目标暂不增加' : '缺失评分不视作下跌'}；已核验风险失效可单独触发减仓。</p>` : ''}<p class="subtle">仓位变化＝本次参考目标－上一参考目标；每只股票独立计算，参考上限与目标分开。${esc(reasonText)}</p></section>`;
+  }
   function positionSummaryHtml(record, includeQuality = true) {
     const plan = record?.position_reference || record?.next_session_decision?.position_reference;
     const risk = record?.reference_risk_plan || record?.next_session_decision?.reference_risk_plan;
     if (!plan) return '<span class="position-status">推荐不可用</span>';
+    if (plan.schema === 'reference_position_v1') return referencePositionSummary(plan);
     const validTarget = validProbability(plan.target_position_fraction);
     const cap = risk?.status === 'available' && validProbability(risk.risk_position_cap_fraction) ? Number(risk.risk_position_cap_fraction) : null;
     const buyTarget = referenceQualityView(record).approved;
@@ -557,6 +590,7 @@
   function positionHtml(record) {
     const risk = record?.reference_risk_plan || record?.next_session_decision?.reference_risk_plan;
     const plan = record?.position_reference || record?.next_session_decision?.position_reference;
+    if (plan?.schema === 'reference_position_v1') return referencePositionHtml(record,plan,risk);
     if (!risk || !plan) return '<section class="position-reference"><h3>仓位与风险参考</h3><p>当前未取得完整风险证据；推荐不可用。</p></section>';
     const available = risk.status === 'available', band = risk.reference_price_band;
     const status = positionSummaryHtml(record,false);
@@ -570,10 +604,10 @@
   function sourcePointsHtml(entries = []) {
     const sources = entries.filter((entry) => entry.row?.reference_layer === 'source' && entry.displayed !== false);
     if (!sources.length) return '';
-    return `<section class="source-reference-details"><h3>已确认来源 B/S ${sources.length} 条</h3>${sources.map(({row:event}) => `<p><strong>${esc(event.source_label || event.source)} ${event.action === 'SELL' || event.side === 'SELL' ? 'S · 卖方参考' : 'B · 买方参考'}${event.label ? ` · ${esc(event.label)}` : ''}</strong><br>首次可用 ${esc(event.first_available_at || event.available_at)}<br>参考价 ${num(event.reference_price)} 元 · ${esc(event.reference_price_date)}${finite(event.invalidation_price) ? `<br>来源失效价 ${num(event.invalidation_price)} 元` : ''}<br>${event.consensus_qualified ? '同日最终共识通过；来源与最终点分别记录' : '同日最终共识未通过；已确认来源参考独立保留'}</p>`).join('')}</section>`;
+    return `<section class="source-reference-details"><h3>已确认来源 B/S ${sources.length} 条</h3>${sources.map(({row:event}) => `<p><strong>${esc(event.source_label || event.source)} ${event.action === 'SELL' || event.side === 'SELL' ? 'S · 卖方参考' : 'B · 买方参考'}${event.label ? ` · ${esc(event.label)}` : ''}</strong><br>首次可用 ${esc(event.first_available_at || event.available_at)}<br>参考价 ${num(event.reference_price)} 元 · ${esc(event.reference_price_date)}${finite(event.invalidation_price) ? `<br>来源失效价 ${num(event.invalidation_price)} 元` : ''}<br>${esc(event.source_relationship_text || (event.consensus_qualified ? '同日最终共识通过；来源与最终点分别记录' : '同日最终共识未通过；已确认来源参考独立保留'))}</p>`).join('')}</section>`;
   }
 
-  const api = {referenceMode,referenceMarkerInputs,esc,date,finite,probability,ruleScore,supportScore,consensusVersion,weightedConsensus,currentEvidenceConsensus,isTrendConsensus,trendProbabilities,referenceEvidence,positionHtml,positionSummaryHtml,referenceQualityView,referenceQualityHtml,referenceQualitySummaryHtml,sourcePointsHtml,rowAt,agentView,currentAgentView,riskDetails,structureFacts,highReturnState,agentsHtml,agentOverviewHtml,judgmentLabel,opinionReasons,opinionHtml,consensusAt,mergeEvidenceRows,finalSide,consensusHtml,diagnosticsHtml,popupSelection,referenceSelection,rawEventsHtml,referenceHtml,groupDates,popupHtml,historyPage,historyHtml,statisticsHtml,selectionTransition};
+  const api = {referenceMode,referenceMarkerInputs,esc,date,finite,probability,ruleScore,supportScore,consensusVersion,weightedConsensus,currentEvidenceConsensus,isTrendConsensus,trendProbabilities,referenceEvidence,positionHtml,positionSummaryHtml,referencePositionSummary,referenceQualityView,referenceQualityHtml,referenceQualitySummaryHtml,sourcePointsHtml,rowAt,agentView,currentAgentView,riskDetails,structureFacts,highReturnState,agentsHtml,agentOverviewHtml,judgmentLabel,opinionReasons,opinionHtml,consensusAt,mergeEvidenceRows,finalSide,consensusHtml,diagnosticsHtml,popupSelection,referenceSelection,rawEventsHtml,referenceHtml,groupDates,popupHtml,historyPage,historyHtml,statisticsHtml,selectionTransition};
   api.highReturnTargetText = highReturnTargetText;
   root.KHQuantChartEvidence = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

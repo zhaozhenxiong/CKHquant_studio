@@ -18,19 +18,19 @@ assert(!html.includes('数据库复用 10 股'));
 ''')
 
 
-def test_only_new_verified_checkpoint_jobs_offer_resume():
+def test_archived_native_checkpoint_never_offers_default_training_resume():
     run_js(r'''
 const job={job_id:'cancelled-native',kind:'model_training',status:'cancelled',
   spec:{parameters:defaults},progress_detail:{stage:'native_source_prepare',current:10,total:60,
     children:{raw_source_run_id:'raw-input',source_native_run_id:'native-input'}}};
 assert(!trainingTest.renderJob(job).includes('data-training-resume'));
 job.progress_detail.checkpoint_available=true;
-assert(trainingTest.renderJob(job).includes('继续结构准备与训练'));
+assert(!trainingTest.renderJob(job).includes('data-training-resume'));
 job.status='running';assert(!trainingTest.renderJob(job).includes('data-training-resume'));
 ''')
 
 
-def test_resume_click_cold_checks_then_submits_a_new_frozen_plan():
+def test_forged_archived_resume_click_does_not_submit_a_task():
     run_js(r'''
 (async()=>{
 const job={job_id:'cancelled-native',kind:'model_training',status:'cancelled',
@@ -44,10 +44,8 @@ custom=async req=>{
 };
 const target={dataset:{trainingResume:job.job_id},closest(selector){return selector==='[data-training-resume]'?this:null;}};
 await element('training-jobs').handlers.click({target});
-const preflight=requests.find(r=>r.path==='/api/training/preflight');
-assert.deepEqual(preflight.body,{parameters:defaults,raw_source_run_id:'raw-input',resume_native_run_id:'native-input'});
-const submitted=requests.find(r=>r.path==='/api/training/jobs');
-assert.deepEqual(submitted.body,{plan_id:'resume-plan',parameters:defaults});
-assert.equal(storage.get('khquant_current_training_job'),'resumed');
+assert(!requests.some(r=>r.path==='/api/training/preflight' || r.path==='/api/training/jobs'));
+assert(element('training-error').textContent.includes('旧训练恢复入口已退役'));
+assert.equal(storage.get('khquant_current_training_job'),undefined);
 })().catch(e=>{console.error(e);process.exitCode=1;});
 ''')

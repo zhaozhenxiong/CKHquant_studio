@@ -131,16 +131,16 @@ def test_form_units_nullable_latest_and_fixed_constraint_cannot_change():
   assert(!html.includes('rebuild'));assert(!html.includes('retrain'));
   assert.equal(element('default-commission').value,'0.03');assert.equal(element('default-quality_threshold').value,'10');
   assert.equal(element('default-ma_weight').value,'35');assert(element('default-min_net_return').readOnly);
-  assert.equal(element('run-liquidity_min_median_amount').value,'3000');
-  assert.equal(element('run-liquidity_lookback_sessions').value,'20');
-  assert.equal(element('run-stock_batch_size').value,'360');
+  assert.equal(element('default-liquidity_min_median_amount').value,'3000');
+  assert.equal(element('default-liquidity_lookback_sessions').value,'20');
+  assert.equal(element('default-stock_batch_size').value,'360');
   assert(html.includes('单位：万元人民币'));assert(html.includes('仅计算分批'));
   const endTag=element('training-run-fields').innerHTML.match(/<input id="run-end"[^>]+>/)[0];assert(!endTag.includes('required'));
-  change('run-end','');change('run-stock_batch_size','240');
+  change('run-end','');
   custom=async request=>request.path.endsWith('/preflight') ? {valid:false,errors:['缺少核验日历'],plan:{plan_id:'blocked',parameters:request.body.parameters}} : undefined;
   await submit('training-form');
   const sent=requests.find(request=>request.path.endsWith('/preflight')).body.parameters;
-  assert.equal(sent.end,null);assert.equal(sent.stock_batch_size,240);assert(!('capacity_tiers' in sent));assert(!('cohort_size' in sent));assert.equal(sent.commission,.0003);
+  assert.equal(sent.end,null);assert.equal(sent.stock_batch_size,360);assert(!('capacity_tiers' in sent));assert(!('cohort_size' in sent));assert.equal(sent.commission,.0003);
   assert.equal(element('training-start').disabled,true);assert(element('training-preflight-result').innerHTML.includes('缺少核验日历'));
   element('default-min_net_return').value='0';
   custom=async request=>request.method==='PUT' ? {} : undefined;
@@ -240,7 +240,7 @@ def test_device_suggestion_is_explicit_current_run_only_and_invalidates_plan():
   await ui.refresh();
   assert(element('run-device').innerHTML.includes('MPS · 可用'));
   assert(element('run-device').innerHTML.includes('CUDA · 当前不可用，不自动回退'));
-  assert(element('training-run-fields').innerHTML.includes('不是同时运行的股票数'));
+  assert(element('training-run-fields').innerHTML.includes('CPU负责文件读取'));
   assert(element('parameters-fields').innerHTML.includes('每次训练批的样本行数'));
   assert.equal(element('default-training_batch_size').value,'2048');
   custom=async request=>request.path.endsWith('/preflight') ? {valid:true,plan:{plan_id:'resource-plan',parameters:request.body.parameters}} : undefined;
@@ -288,7 +288,7 @@ def test_stage_rules_and_actual_device_report_are_separate_from_gpu_availability
     spec:{parameters:{device:'mps',cpu_workers:6,stock_batch_size:360,training_batch_size:2048}},
     progress_detail:{stage:'independent_policy_selection',current:10,total:3194}};
   let html=ui.renderJob(job);
-  assert(html.includes('当前政策评估：CPU'));assert(html.includes('冻结请求设备：MPS'));
+  assert(html.includes('历史政策评估：CPU'));assert(html.includes('冻结请求设备：MPS'));
   assert(html.includes('本阶段实际设备报告：未报告'));
   assert(html.includes('股票准备分组 360 股 · CPU准备进程 6 · 神经训练行批 2048 行'));
   assert(!html.includes('实际设备报告：MPS'));
@@ -310,20 +310,20 @@ def test_full_population_preflight_uses_daily_eligibility_and_resource_batch_onl
 (async()=>{
   status.data_end='2026-10-12';await ui.refresh();
   assert.equal(element('run-end').value,'','empty latest date stays nullable');
-  change('run-liquidity_min_median_amount','4200');change('run-stock_batch_size','100');
+  // Archived source policy is immutable in the new training form.
   custom=async request=>request.path.endsWith('/preflight') ? {valid:true,plan:{plan_id:'full',parameters:request.body.parameters,
     requested_end:null,effective_end:'2026-10-12',date_status:{code:'latest_verified_frozen'},cohort:['a','b','c'],
-    liquidity_universe:{selected_symbols:['a','b','c'],latest_count:2,daily_counts:{'2026-10-12':2},policy:{min_median_amount:42000000},policy_hash:'policy'}}} : undefined;
+    liquidity_universe:{selected_symbols:['a','b','c'],latest_count:2,daily_counts:{'2026-10-12':2},policy:{min_median_amount:30000000},policy_hash:'policy'}}} : undefined;
   await submit('training-form');const request=requests.find(request=>request.path.endsWith('/preflight'));
-  assert.equal(request.body.parameters.liquidity_min_median_amount,42000000);assert.equal(request.body.parameters.stock_batch_size,100);
+  assert.equal(request.body.parameters.liquidity_min_median_amount,30000000);assert.equal(request.body.parameters.stock_batch_size,360);
   assert(!('cohort_size' in request.body.parameters));assert(!('capacity_tiers' in request.body.parameters));
   const html=element('training-preflight-result').innerHTML;
   assert(html.includes('历史合格并集'));assert(html.includes('3 股 · 全部参与'));assert(html.includes('2 股'));
-  assert(html.includes('每批 100 股仅分配资源，不截断人口'));assert(html.includes('4200 万元'));
+  assert(html.includes('复用来源保留逐日流动性资格及完整历史人口'));assert(html.includes('计算分批不截断股票人口'));
   assert(html.includes('policy_hash'));assert(element('training-population-status').innerHTML.includes('尚未报告'));
   assert(!element('training-run-fields').innerHTML.includes('cohort_size'));assert(!element('parameters-fields').innerHTML.includes('capacity_tiers'));
-  await ui.refresh();assert.equal(element('run-liquidity_min_median_amount').value,'4200','status refresh preserves this-run edits');
-  assert.equal(element('run-stock_batch_size').value,'100');
+  await ui.refresh();assert.equal(element('default-liquidity_min_median_amount').value,'3000');
+  assert.equal(element('default-stock_batch_size').value,'360');
 })().catch(error=>{console.error(error);process.exitCode=1;});
 ''')
 
@@ -530,8 +530,8 @@ def test_archived_completed_model_blocks_revalidation_and_keeps_original_diagnos
   assert(/data-training-validate="archived-job" disabled/.test(html));
   assert(html.includes('原任务与原诊断保留，可继续查看'));assert(html.includes('查看样本流失诊断'));
   assert(html.includes('original-diagnostic'));assert(html.includes('&lt;旧包&gt;'));assert(!html.includes('<旧包>'));
-  assert(table.includes('历史归档 · 只读'));assert(table.includes('历史头仅作档案，不提供当前资格'));
-  assert(table.includes('需新完整来源重新训练'));assert(!table.includes('样本资格通过，仍需账本比较'));
+  assert(table.includes('历史归档 · 只读'));assert(table.includes('&lt;旧包&gt;'));
+  assert(table.includes('新架构需重新训练'));assert(!table.includes('样本资格通过，仍需账本比较'));
   assert.equal(ui.validationSpec({...job,result:{...job.result,training_run_id:'not-in-current-catalog'}}),null,
     'completion receipt alone cannot certify current validation availability');
   status.models=[{run_id:'archived-model',status:'completed',archived:false,validation_available:false,archive_reason:'当前资产不可复核'}];
@@ -560,9 +560,9 @@ def test_reference_quality_failure_is_separate_from_core_model_selection():
  let html=ui.renderJob({job_id:'done',status:'succeeded',run_id:'run',result});
  for(const text of ['独立参考质量','完成头 4','完整费用资格 未通过或证据不足','参考质量与核心自动选模分别核验','参考仓位目标保持待核验','reference-pop-proof','ref-fee-proof','reference_quality_no_positive_class'])assert(html.includes(text),text);
  assert(!html.includes('<ul class="training-blockers">'));assert(html.includes('reference-quality-diagnostics'));
- status={models:[{run_id:'model',required_recent_heads_ready:true,automatic_selection_eligible:true,reference_quality:q}],active_model:null,certification:{status:'pending'},jobs:[]};
+ status={models:[{run_id:'model',archived:true,required_recent_heads_ready:true,automatic_selection_eligible:true,reference_quality:q}],active_model:null,certification:{status:'pending'},jobs:[]};
  await ui.refresh();html=element('training-selection').innerHTML;
- assert(html.includes('近期关键头齐备'));assert(html.includes('独立参考质量'));assert(html.includes('参考质量与核心自动选模分别核验'));
+ assert(html.includes('历史归档 · 只读'));assert(html.includes('新架构需重新训练'));assert(!html.includes('近期关键头齐备'));
  await ui.showResult(result);assert(element('training-jobs').innerHTML.includes('完成头 4'));
 })().catch(e=>{console.error(e);process.exitCode=1;});
 ''')

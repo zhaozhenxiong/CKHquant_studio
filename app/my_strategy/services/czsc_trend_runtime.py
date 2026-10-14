@@ -297,7 +297,7 @@ def _reference_position(row, risk, *, current_position_fraction=None,
             "推荐尚未生成；风险上限仅用于约束参考敞口，缺少完整质量资格时不建议增加仓位。"}
 
 
-def reference_overlay(features, calendar, *, model_run_id=None, model_fold=None,
+def legacy_reference_overlay(features, calendar, *, model_run_id=None, model_fold=None,
                       model_mode="historical", as_of=None, device="cpu",
                       source_context_hash=None, consensus_config=None, use_models=True,
                       model_selection_frozen=False, current_position_fraction=None):
@@ -331,7 +331,7 @@ def reference_overlay(features, calendar, *, model_run_id=None, model_fold=None,
     if frame.empty or frame.symbol.nunique() != 1 or list(frame.date) != sorted(set(frame.date)):
         raise ValueError("参考分析需要单股按日有序唯一行情")
     load_selected = use_models and not (model_selection_frozen and model_run_id is None)
-    root, report = load_reference_model_run(model_run_id, as_of=cutoff) if load_selected else (None, None)
+    root, report = _load_legacy_reference_model_run(model_run_id, as_of=cutoff) if load_selected else (None, None)
     cfg = strategy_config(report["config"]) if report else strategy_config()
     if consensus_config is not None:
         cfg["consensus"].update(validate({**cfg["consensus"], **consensus_config}))
@@ -526,7 +526,7 @@ def load_model_run(model_run_id=None, *, as_of=None, scope='research'):
     return read_run(model_run_id)
 
 
-def load_reference_model_run(model_run_id=None, *, as_of=None):
+def _load_legacy_reference_model_run(model_run_id=None, *, as_of=None):
     """A fixed reference checkpoint cannot bypass the qualified selection."""
     if model_run_id is not None:
         from my_strategy.services.model_training_center import TrainingCenter
@@ -791,3 +791,16 @@ def runtime_overlay(features, calendar, *, model_run_id=None, model_fold=None, m
             "model_loads": int(trend_stats.get("model_loads", 0)) + int(interval_stats.get("model_loads", 0)),
             "trend_inference": trend_stats, "interval_inference": interval_stats,
             "source_reason_counts": dict(counts)}}
+
+
+def load_reference_model_run(model_run_id=None, *, as_of=None):
+    """Current account-free references consume only the new version registry."""
+    from my_strategy.services.reference_training import active_reference_run_id, load_reference_run
+    selected = model_run_id or active_reference_run_id()
+    return load_reference_run(selected) if selected else (None, None)
+
+
+def reference_overlay(*args, **kwargs):
+    """Public reference path; historical broker-derived reference is retired."""
+    from my_strategy.services.reference_runtime import reference_overlay as current_overlay
+    return current_overlay(*args, **kwargs)

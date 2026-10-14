@@ -6,7 +6,7 @@
   const state = {capabilities:null, profiles:null, status:null, fields:[], parameters:{}, revision:0, plan:null, planFingerprint:null, planState:'initial',planMessage:'',busyAction:null,jobs:new Map(), validationReceipts:new Map(), busy:false, loaded:false, dirty:false,runDirty:false,timer:null, diagnosticSequence:0,layoutObserver:null};
   const active = new Set(['queued','running','cancelling']);
   const statuses = {queued:'等待开始',running:'运行中',cancelling:'正在取消',cancelled:'已取消',succeeded:'已完成',failed:'失败',pending:'待补齐证据',blocked:'阻断',eligible:'具备研究选择资格',selected:'已更新研究选择',unchanged:'保留当前选择',qualified:'已通过',unavailable:'不可用',passed:'已通过',rejected:'未通过',disabled:'自动更新已关闭',not_requested:'未申请替换'};
-  const runKeys = new Set(['end','device','cpu_workers','liquidity_min_median_amount','liquidity_lookback_sessions','stock_batch_size']);
+  const runKeys = new Set(['end','source_native_run_id','device','cpu_workers']);
   const fingerprint = value => JSON.stringify(Object.fromEntries(Object.keys(value).sort().map(key => [key,value[key]])));
   const message = value => typeof value === 'string' ? value : value?.message || value?.reason || value?.detail || value?.code || JSON.stringify(value);
   const keyOf = field => field.key || field.name;
@@ -52,7 +52,7 @@
   }
   function control(field, value, prefix) {
     const key = keyOf(field), id = `${prefix}-${key}`, readonly = field.locked === true || field.readonly === true || field.editable === false;
-    const resourceHints = {stock_batch_size:'股票准备分组上限，不是同时运行的股票数，也不是神经批量；CPU进程控制并行',cpu_workers:'CPU准备进程上限；结构、字典与真实账户状态在CPU，不代表GPU并行数',training_batch_size:'线性/MLP每次训练批的样本行数，与股票准备分组不同',device:'所选设备用于支持的线性/MLP训练；神经批推理以明确设备报告为准。指定不可用设备时拒绝，不自动换CPU'};
+    const resourceHints = {batch_size:'Torch每次训练批的样本行数；多股样本合批，全部历史合格股票参与',stock_batch_size:'股票准备分组上限，不是同时运行的股票数，也不是神经批量；CPU进程控制并行',cpu_workers:'CPU负责文件读取、已确认结构和精确价格；神经训练与批推理优先GPU',training_batch_size:'线性/MLP每次训练批的样本行数，与股票准备分组不同',device:'auto 优先CUDA、其次MPS、最后CPU；训练、批推理和校准使用Torch。明确指定的设备不可用时拒绝'};
     const hint = [key === 'liquidity_min_median_amount' ? '单位：万元人民币；保存和提交按元换算' : percentage(field) ? '单位：%' : field.unit ? `单位：${field.unit}` : '',resourceHints[key],field.impact_label || ({rebuild:'需重建来源、标签及受影响后代',retrain:'新任务重新训练',selection:'新任务的研究选择设置',resource:'仅计算分批，不限制全部合格股票人口'})[field.impact] || '新任务冻结此参数'].filter(Boolean).join(' · ');
     let input;
     if (field.type === 'boolean' || typeof value === 'boolean') input = `<input id="${esc(id)}" data-parameter="${esc(key)}" type="checkbox" ${value ? 'checked' : ''} ${readonly ? 'disabled' : ''}>`;
@@ -73,13 +73,13 @@
     $('training-profile-note').textContent = `使用已保存默认参数（修订 ${state.revision}）；本次可调整数据和资源。其他参数在参数设置中保存后生效。`;
     renderResourceControls();
   }
-  const deviceName = value => ({cpu:'CPU',mps:'MPS',cuda:'CUDA'})[value] || value || '未报告';
+  const deviceName = value => ({auto:'自动（CUDA → MPS → CPU）',cpu:'CPU',mps:'MPS',cuda:'CUDA'})[value] || value || '未报告';
   function choiceOptions(field, value) {
     const devices = Array.isArray(state.capabilities?.devices) ? state.capabilities.devices : null;
     return field.choices.map(choice => {
       const option = typeof choice === 'object' ? choice.value : choice;
       let label = typeof choice === 'object' ? choice.label || option : option;
-      const device = keyOf(field) === 'device', unavailable = device && devices && !devices.includes(option);
+      const device = keyOf(field) === 'device', unavailable = device && option !== 'auto' && devices && !devices.includes(option);
       if (device) label = `${deviceName(option)} · ${devices ? unavailable ? '当前不可用，不自动回退' : '可用' : '可用性未报告'}`;
       return `<option value="${esc(option)}" ${String(option) === String(value) ? 'selected' : ''} ${unavailable ? 'disabled' : ''}>${esc(label)}</option>`;
     }).join('');
@@ -88,7 +88,7 @@
     const devices = state.capabilities?.devices, field = state.fields.find(item => keyOf(item) === 'device');
     if (!Array.isArray(devices) || !field) return null;
     const choices = field.choices.map(choice => typeof choice === 'object' ? choice.value : choice);
-    return ['mps','cuda','cpu'].find(device => devices.includes(device) && choices.includes(device)) || null;
+    return choices.includes('auto') ? 'auto' : ['cuda','mps','cpu'].find(device => devices.includes(device) && choices.includes(device)) || null;
   }
   function renderResourceControls() {
     const devices = state.capabilities?.devices, field = state.fields.find(item => keyOf(item) === 'device');
@@ -97,7 +97,7 @@
     $('training-resource-availability').textContent = Array.isArray(devices) ? `接口报告可用训练设备：${devices.map(deviceName).join('、') || '无'}。可用性不代表任务已使用GPU。` : '设备可用性尚未报告；保留原选择，不自动换设备。';
     button.textContent = suggested ? `本次选择 ${deviceName(suggested)}` : '设备建议暂不可用';
     button.disabled = state.busy || !state.loaded || !suggested || selected === suggested;
-    const unavailable = Array.isArray(devices) && selected && !devices.includes(selected);
+    const unavailable = Array.isArray(devices) && selected && selected !== 'auto' && !devices.includes(selected);
     $('training-resource-status').textContent = `${selected ? `本次表单设备：${deviceName(selected)}。` : ''}${unavailable ? '当前不可用，预检将拒绝；不会自动回退CPU。' : '设备建议仅修改本次表单，需重新预检；不保存个人默认，也不改变已提交任务。'}`;
   }
   function applyDeviceSuggestion() {
@@ -123,17 +123,17 @@
       } else if (['integer','int','number','float'].includes(field.type)) {
         value = Number(element.value) / scale(field);
         if (!element.value.trim() || !Number.isFinite(value) || (['integer','int'].includes(field.type) && !Number.isSafeInteger(value))) throw new Error(`${field.label || key}必须为有效数值。`);
-      } else value = key === 'end' && !element.value ? null : element.value;
+      } else value = ['end','source_native_run_id'].includes(key) && !element.value ? null : element.value;
       result[key] = value;
     }
     return result;
   }
   function renderConstraints() {
     const supplied = state.capabilities.locked_constraints || state.capabilities.constraints || [];
-    const fixed = ['高收益目标保持费用后至少8%且至少2R','完整清仓和段截止成熟核验；拒单与未成熟记录不当负类','训练、校准与政策段分开；严格先验及原机会原子依赖清洗','入场模型最低100训练行、30校准行，且两段均有两类','T+1、整手、涨跌停、流动性、费用及固定持仓退出头'];
+    const fixed = ['预测下一核验交易日开盘至第10交易日收盘的价格方向；不模拟成交','训练内部选型、校准、仓位政策与留出测试按时间隔离；标签截止清洗','自然类别分布训练；缺失、未成熟与不合格样本不填作下跌','每股目标仓位的变化相对于上一参考目标；手工仓位仅单独比较','技术完整性、预测基线比较与独立前瞻资格分别报告'];
     const values = Array.isArray(supplied) && supplied.length ? supplied.map(message) : fixed;
     const html = values.map(item => `<li>${esc(item)}</li>`).join(''); $('training-constraints').innerHTML = html; $('parameters-constraints').innerHTML = `<ul>${html}</ul>`;
-    const stages = state.capabilities.stages || ['核验行情与日历','冻结原始来源与原生特征','三分类趋势与来源政策','真实参考账户与MA持仓退出','固定先验退出头续持','逐折评分前尝试与Broker克隆','高收益入场与退出观察','样本诊断、完整审计和账本评估','合格候选替换检查'];
+    const stages = state.capabilities.stages || ['核验行情、日历和可复用因果特征','新纯价格目标与时间清洗','Torch线性/MLP训练内部选型','独立校准与仓位政策选择','留出预测基线验证','每股参考目标状态机与B/S变化点'];
     $('training-stages').innerHTML = stages.map(item => `<li>${esc(typeof item === 'object' ? (item.label || item.name || item.key) + (item.status === 'not_connected' ? ' · 尚未接入' : item.status === 'observation_only' ? ' · 只作观察' : item.trainable === false ? ' · 规则与数据计算' : '') : item)}</li>`).join('');
   }
   function renderProfiles() {
@@ -146,9 +146,9 @@
   }
   function renderStatus() {
     const status = state.status || {}, model = status.active_model, certificate = status.certification || {};
-    $('training-overview').innerHTML = `<article><span>当前研究模型</span><strong>${model ? esc(model.display_name || '趋势共识完整模型包') : '尚无合格当前选择'}</strong><small>${esc(model?.run_id || '缺少合格头时保持阻断')}${model?.effective_from ? ` · 生效 ${esc(model.effective_from)}` : ''}</small></article><article><span>数据实际截止</span><strong>${esc(status.data_end || state.capabilities?.data_end || '预检时核验')}</strong><small>${status.calendar_run_id ? '已登记核验交易日历' : '预检校验日历来源与覆盖'}</small></article><article><span>正式生产资格</span><strong>${certificate.status === 'qualified' && certificate.publication_allowed === true ? '已通过独立认证' : '尚未取得'}</strong><small>${esc(certificate.reason || '研究选择不代替独立认证')}</small></article>`;
+    $('training-overview').innerHTML = `<article><span>当前研究模型</span><strong>${model ? esc(model.display_name || '参考买卖点与每股仓位') : '尚无合格当前选择'}</strong><small>${esc(model?.run_id || '未评分时保留缺失状态')}${model?.effective_from ? ` · 生效 ${esc(model.effective_from)}` : ''}</small></article><article><span>数据实际截止</span><strong>${esc(status.data_end || state.capabilities?.data_end || '预检时核验')}</strong><small>${status.calendar_run_id ? '已登记核验交易日历' : '预检校验日历来源与覆盖'}</small></article><article><span>正式生产资格</span><strong>${certificate.status === 'qualified' && certificate.publication_allowed === true ? '已通过独立认证' : '尚未取得'}</strong><small>${esc(certificate.reason || '研究选择不代替独立认证')}</small></article>`;
     const selection = status.current_selection || status.selection || {}, blockers = selection.reasons || selection.errors || status.blockers || [];
-    $('training-selection').innerHTML = `<p><strong>${esc(selection.status ? statuses[selection.status] || selection.status : '自动替换按完整证据判定')}</strong></p><p class="training-note">候选必须通过样本与关键头、依赖审计和同口径Broker账本比较；较差、零正类、缺文件或证据不足不会替换。</p>${blockers.length ? `<ul class="training-blockers">${blockers.map(item => `<li>${esc(message(item))}</li>`).join('')}</ul>` : ''}${renderModelRows(status.models || [])}`;
+    $('training-selection').innerHTML = `<p><strong>${esc(selection.status ? statuses[selection.status] || selection.status : '自动替换按完整证据判定')}</strong></p><p class="training-note">技术验证检查资产、因果时间和完整人口；预测验证比较独立留出段的LogLoss、Brier、F1及基线。独立前瞻资格另行记录。</p>${blockers.length ? `<ul class="training-blockers">${blockers.map(item => `<li>${esc(message(item))}</li>`).join('')}</ul>` : ''}${renderModelRows(status.models || [])}`;
   }
   function referenceQualityTrainingHtml(summary, diagnosticReasons = []) {
     if (!summary || typeof summary !== 'object') return '';
@@ -157,9 +157,18 @@
     const reasons = (Array.isArray(diagnosticReasons) ? diagnosticReasons : []).filter((item) => /reference_quality|reference_population|参考/.test(message(item)));
     return `<section class="training-reference-quality" data-job-detail="reference-quality"><h4>独立参考质量</h4><p>${esc(names[summary.status] || summary.status || '尚未完成')} · 完成头 ${esc(summary.heads ?? 0)} · 完整费用资格 ${fee}</p><p class="training-note">专属无账户参考买方人口；目标仍为完整费用后至少8%且2R。参考质量与核心自动选模分别核验；参考资格不足时，参考仓位目标保持待核验。</p>${reasons.length ? `<ul class="reference-quality-diagnostics">${reasons.map((item) => `<li>${esc(message(item))}</li>`).join('')}</ul>` : ''}<details><summary>参考头与费用证据</summary>${summary.population ? `<p>人口：独立参考买方机会</p>` : ''}${summary.population_hash ? `<p>人口凭据 <code>${esc(summary.population_hash)}</code></p>` : ''}${summary.qualification_path ? `<p>费用报告 <code>${esc(summary.qualification_path)}</code></p>` : ''}${summary.qualification_sha256 ? `<p>费用报告校验 <code>${esc(summary.qualification_sha256)}</code></p>` : ''}${summary.unavailable_heads?.length ? `<pre>${esc(JSON.stringify(summary.unavailable_heads,null,2))}</pre>` : '<p>没有已报告的参考头不足原因。</p>'}<p>此参考质量结果不授予正式生产资格。</p></details></section>`;
   }
+  function referenceValidationHtml(value = {}) {
+    const technical = value.technical_validation ?? value.validation?.technical ?? {}, predictive = value.predictive_validation || value.predictive_gate || value.validation?.predictive || {}, forward = value.forward_validation || value.certification || {};
+    const label = part => typeof part === 'boolean' ? (part ? '通过' : '未通过') : typeof part === 'string' ? statuses[part] || part : statuses[part.status] || part.status || (part.passed === true ? '通过' : part.passed === false ? '未通过' : '待核验');
+    const finiteMetric = metric => typeof metric === 'number' && Number.isFinite(metric);
+    const metricText = metric => finiteMetric(metric) ? metric.toFixed(6) : '未报告';
+    const predictiveLabel = predictive.passed === false && finiteMetric(predictive.log_loss) ? '未通过基线（不生成积极增仓目标）' : predictive.passed === true ? '已通过基线' : '待核验';
+    const metrics = finiteMetric(predictive.log_loss) || finiteMetric(predictive.brier) ? `<p class="training-predictive-metrics">LogLoss：模型 ${metricText(predictive.log_loss)} / 基线 ${metricText(predictive.baseline_log_loss)} · Brier：模型 ${metricText(predictive.brier)} / 基线 ${metricText(predictive.baseline_brier)}（越低越好）</p>` : '';
+    return `<section class="training-reference-quality" data-job-detail="reference-validation"><h4>参考模型验证</h4><p>技术验证：${esc(label(technical))} · 预测基线：${esc(predictiveLabel)} · 独立前瞻：${esc(label(forward))}</p>${metrics}<p class="training-note">10交易日价格方向概率与每股参考仓位；仓位变化相对上一参考目标。自然类别分布训练，时间段互相隔离。</p><details><summary>验证指标与资产凭据</summary><pre>${esc(JSON.stringify({technical,predictive,forward},null,2))}</pre></details></section>`;
+  }
   function renderModelRows(models) {
-    if (!models.length) return '<p class="subtle">当前目录尚无合格模型包；历史身份不参与当前选择。</p>';
-    return `<div class="table-wrap"><table><thead><tr><th>模型运行与实际人口</th><th>关键头与资格</th><th>替换结果</th></tr></thead><tbody>${models.map(model => `<tr><td>${esc(model.run_id)}${model.archived === true ? '<span class="badge">历史归档 · 只读</span>' : ''}${populationHtml(model)}</td><td>${model.archived === true ? '历史头仅作档案，不提供当前资格' : model.required_recent_heads_ready === true ? '近期关键头齐备' : '近期关键头不足或待核验'}${referenceQualityTrainingHtml(model.reference_quality)}${model.archive_reason ? `<p class="training-note">${esc(model.archive_reason)}</p>` : model.reason ? ` · ${esc(model.reason)}` : ''}<details><summary>头资格与不足原因</summary><pre>${esc(JSON.stringify({heads:model.required_heads || model.heads || {},unavailable:model.unavailable_heads || []},null,2))}</pre></details></td><td>${model.archived === true ? '需新完整来源重新训练；原诊断可查看' : esc(model.selection_status || (model.automatic_selection_eligible === true ? '样本资格通过，仍需账本比较' : '资格未达或证据待核验'))}</td></tr>`).join('')}</tbody></table></div>`;
+    if (!models.length) return '<p class="subtle">尚无完成的参考仓位模型；请先提交训练计划。</p>';
+    return `<div class="table-wrap"><table><thead><tr><th>模型运行与实际人口</th><th>验证</th><th>使用状态</th></tr></thead><tbody>${models.map(model => `<tr><td>${esc(model.run_id)}${model.archived === true ? '<span class="badge">历史归档 · 只读</span>' : ''}${populationHtml(model)}</td><td>${model.archived === true ? esc(model.archive_reason || '历史模型仅保留诊断') : referenceValidationHtml(model)}</td><td>${model.archived === true ? '新架构需重新训练' : esc(model.selection_status || model.status || '待核验')}</td></tr>`).join('')}</tbody></table></div>`;
   }
   function dateStatusHtml(result, plan) {
     const value = plan.date_status || result.date_status || {}, code = typeof value === 'object' ? value.code : value;
@@ -174,13 +183,13 @@
     state.plan = {...plan,valid};
     state.planState = valid ? 'ready' : 'blocked'; state.planMessage = valid ? '' : `预检未通过：${message(errors[0] || '未取得完整冻结计划凭据')}。训练保持阻断。`;
     const host = $('training-preflight-result'); host.hidden = false;
-    const universe = plan.liquidity_universe || {}, union = plan.liquidity_universe ? universe.selected_symbols?.length ?? plan.historical_union_count : null;
+    const universe = plan.liquidity_universe || {latest_count:plan.latest_eligible_count}, union = universe.selected_symbols?.length ?? plan.historical_union_count;
     $('training-population-status').innerHTML = populationHtml({historical_union_count:union,latest_eligible_count:universe.latest_count});
-    host.innerHTML = `<h3>${valid ? '预检通过，可以提交冻结计划' : '训练计划被阻断'}</h3>${dateStatusHtml(result,plan)}${errors.length ? `<ul class="training-blockers">${errors.map(item => `<li>${esc(message(item))}</li>`).join('')}</ul>` : ''}${warnings.length ? `<ul class="training-warnings">${warnings.map(item => `<li>${esc(message(item))}</li>`).join('')}</ul>` : ''}<dl><div><dt>历史合格并集</dt><dd>${count(union)} 股 · 全部参与</dd></div><div><dt>数据截止日合格</dt><dd>${count(universe.latest_count)} 股</dd></div><div><dt>比较现任</dt><dd>${esc(plan.incumbent_run_id || '无现任；初始化资格另行核验')}</dd></div><div><dt>日历</dt><dd>${esc(plan.calendar_run_id || '尚未核验')}</dd></div></dl><p>每日流动性资格使用当时已知的过去 ${count(plan.parameters?.liquidity_lookback_sessions)} 个核验交易日；成交额中位数下限 ${count((plan.parameters?.liquidity_min_median_amount ?? 30000000)/10000)} 万元。每批 ${count(plan.parameters?.stock_batch_size)} 股仅分配资源，不截断人口。</p>${plan.windows?.length ? `<details><summary>时间切分与成熟范围</summary><pre>${esc(JSON.stringify(plan.windows,null,2))}</pre></details>` : ''}${universe.policy_hash ? `<details><summary>逐日资格与冻结人口凭据</summary><pre>${esc(JSON.stringify({policy:universe.policy,policy_hash:universe.policy_hash,daily_counts:universe.daily_counts,exclusion_counts:universe.exclusion_counts},null,2))}</pre></details>` : ''}${plan.rebuild_scope ? `<p>重建范围：${esc(message(plan.rebuild_scope))}</p>` : ''}${plan.plan_id ? `<details><summary>冻结计划凭据</summary><code>${esc(plan.plan_id)}</code><p>配置SHA：${esc(plan.config_hash || '提交时核验')}</p></details>` : ''}`;
+    host.innerHTML = `<h3>${valid ? '预检通过，可以提交冻结计划' : '训练计划被阻断'}</h3>${dateStatusHtml(result,plan)}${errors.length ? `<ul class="training-blockers">${errors.map(item => `<li>${esc(message(item))}</li>`).join('')}</ul>` : ''}${warnings.length ? `<ul class="training-warnings">${warnings.map(item => `<li>${esc(message(item))}</li>`).join('')}</ul>` : ''}<dl><div><dt>历史合格并集</dt><dd>${count(union)} 股 · 全部参与</dd></div><div><dt>数据截止日合格</dt><dd>${count(universe.latest_count)} 股</dd></div><div><dt>比较现任</dt><dd>${esc(plan.incumbent_run_id || '无现任；初始化资格另行核验')}</dd></div><div><dt>日历</dt><dd>${esc(plan.calendar_run_id || '尚未核验')}</dd></div></dl><p>复用来源保留逐日流动性资格及完整历史人口；新标签与权重重新训练。GPU行批 ${count(plan.parameters?.batch_size)}，CPU准备线程 ${count(plan.parameters?.cpu_workers)}；计算分批不截断股票人口。</p>${plan.windows?.length ? `<details><summary>时间切分与成熟范围</summary><pre>${esc(JSON.stringify(plan.windows,null,2))}</pre></details>` : ''}${universe.policy_hash ? `<details><summary>逐日资格与冻结人口凭据</summary><pre>${esc(JSON.stringify({policy:universe.policy,policy_hash:universe.policy_hash,daily_counts:universe.daily_counts,exclusion_counts:universe.exclusion_counts},null,2))}</pre></details>` : ''}${plan.rebuild_scope ? `<p>重建范围：${esc(message(plan.rebuild_scope))}</p>` : ''}${plan.plan_id ? `<details><summary>冻结计划凭据</summary><code>${esc(plan.plan_id)}</code><p>配置SHA：${esc(plan.config_hash || '提交时核验')}</p></details>` : ''}`;
     renderStartState(); scheduleTaskLayout();
   }
   function stageName(value) {
-    const labels = {calendar:'核验交易日历',raw_source:'冻结原始行情',raw_source_freeze:'冻结原始行情',native_source:'准备原生特征',native_source_prepare:'结构数据准备',data:'核验行情与日历',trend:'训练三分类趋势',independent_three_class_trend:'训练三分类趋势',source_policy:'核验来源政策',independent_policy_selection:'核验来源政策',missing_trend_dependency:'趋势模型依赖不足',ma_exit:'训练固定持仓退出',train_independent_actual_holding_MA_exit:'训练固定持仓退出',sequential_L2_actual_flat_pre_gate_population_and_forced_E1_labels:'逐折构建评分前尝试与真实克隆目标',strict_prior_L2_population_by_fold:'逐折构建严格先验样本',entry:'训练高收益入场质量',reference_quality_population:'生成独立参考机会人口',train_reference_quality:'训练独立参考质量头',reference_quality_fee_qualification:'核验参考人口完整费用资格',diagnostics:'复算样本与费用',comparison:'比较真实账户账本',selection:'检查合格模型替换',training:'完整训练',validation:'重新核验已完成模型',queued:'等待训练资源',resource_wait:'等待上一任务释放计算资源',frozen_source_verification:'核验冻结来源',model_head:'模型头训练完成'};
+    const labels = {source_verification:'核验因果来源',reference_labels:'生成纯价格方向目标',dataset_load:'读取已核验训练样本',reference_model:'训练Torch方向概率',model_fit:'训练Torch模型',model_select:'训练内部选择模型',calibration:'独立概率校准',validation:'验证预测基线与资产',completed:'完整训练完成',reference_source_verification:'核验可复用行情与因果特征',reference_dataset:'生成新纯价格目标',reference_training:'Torch参考模型训练',reference_calibration:'GPU概率校准',reference_policy:'核验逐股仓位政策',reference_validation:'留出预测与资产验证',reference_selection:'记录参考模型选择',reference_fit:'训练方向概率',reference_evaluation:'比较留出预测基线',calendar:'核验交易日历',raw_source:'冻结原始行情',raw_source_freeze:'冻结原始行情',native_source:'准备原生特征',native_source_prepare:'结构数据准备',data:'核验行情与日历',trend:'训练三分类趋势',independent_three_class_trend:'训练三分类趋势',source_policy:'核验来源政策',independent_policy_selection:'核验来源政策',missing_trend_dependency:'趋势模型依赖不足',ma_exit:'训练固定持仓退出',train_independent_actual_holding_MA_exit:'训练固定持仓退出',sequential_L2_actual_flat_pre_gate_population_and_forced_E1_labels:'逐折构建评分前尝试与真实克隆目标',strict_prior_L2_population_by_fold:'逐折构建严格先验样本',entry:'训练高收益入场质量',reference_quality_population:'生成独立参考机会人口',train_reference_quality:'训练独立参考质量头',reference_quality_fee_qualification:'核验参考人口完整费用资格',diagnostics:'复算样本与费用',comparison:'比较真实账户账本',selection:'检查合格模型替换',training:'完整训练',validation:'重新核验已完成模型',queued:'等待训练资源',resource_wait:'等待上一任务释放计算资源',frozen_source_verification:'核验冻结来源',model_head:'模型头训练完成'};
     if (labels[value]) return labels[value];
     if (String(value).startsWith('E0')) return '构建初始真实参考账户';
     if (String(value).startsWith('E1')) return '构建固定退出头续持账户';
@@ -192,16 +201,12 @@
   const jobTitle = job => job.kind === 'model_validation' || job.result?.training_started === false ? '已完成模型复核' : '完整模型训练';
   function jobResourceHtml(job) {
     const detail = job.progress_detail || {}, stage = String(detail.stage || ''), parameters = job.spec?.parameters || {};
-    let rule = '本阶段执行方式尚未报告；设备可用或已选择MPS，都不证明本阶段已使用GPU。';
-    if (/raw_source|native_source|^calendar$|^data$|^frozen_source_verification$/.test(stage) || stage === 'training' && detail.children?.source_native_run_id && !detail.children?.model_run_id) rule = '结构、字典与原始数据准备：CPU进程；股票分组不等于GPU批量。';
-    else if (/^reference_quality_population$|^reference_quality_fee_qualification$/.test(stage)) rule = '独立参考人口与完整费用资格核验：CPU；使用冻结风险及真实费用规则。';
-    else if (stage === 'train_reference_quality') rule = '独立参考质量头拟合与评分：CPU。';
-    else if (/independent_three_class_trend|^trend/.test(stage)) rule = '三分类方向模型拟合与评分：CPU。';
-    else if (['source_policy','independent_policy_selection'].includes(stage)) rule = '当前政策评估：CPU，包含方向评分与真实Broker/state时序。';
-    else if (/^E0|^E1|L2_population|strict_prior_L2|sequential_L2/.test(stage)) rule = '账户状态、CZSC与克隆准备：CPU；支持的神经评分以实际设备报告为准。';
-    else if (stage === 'model_head' || /ma_exit|^entry$|^L2/i.test(stage)) rule = '线性/MLP训练按冻结请求设备执行，树头在CPU；缺类别或资格的头不训练。';
-    else if (['diagnostics','comparison','selection'].includes(stage)) rule = '样本费用复算、真实账本比较与资格事务：CPU。';
-    return `<details data-job-detail="resources" class="training-job-resources"><summary>阶段设备与资源</summary><p>${esc(rule)}</p><p>冻结请求设备：${esc(deviceName(parameters.device))} · 本阶段实际设备报告：${esc(deviceName(detail.actual_device ?? detail.device))}</p>${parameters.stock_batch_size != null || parameters.cpu_workers != null || parameters.training_batch_size != null ? `<p>股票准备分组 ${esc(parameters.stock_batch_size ?? '未报告')} 股 · CPU准备进程 ${esc(parameters.cpu_workers ?? '未报告')} · 神经训练行批 ${esc(parameters.training_batch_size ?? '未报告')} 行</p>` : ''}<p>实际设备只引用任务明确报告；完成模型以头manifest的实际设备记录核验。不推算GPU利用率或预计完成时间。</p></details>`;
+    let rule = '本阶段执行方式尚未报告；仅据实际设备字段判断计算位置。';
+    if (job.result?.strategy_version === 'reference_position_v1' || parameters.horizon_sessions != null || /^(reference_model|reference_labels|reference_validation|model_fit|model_select|calibration|dataset_load)$/.test(stage)) rule = /source|labels|dataset|data|calendar/.test(stage) ? '行情读写、已确认结构和精确价格比较在CPU；可复用因果特征会先核验哈希。' : '新参考模型的训练、批量推理与概率校准优先使用CUDA/MPS；阶段实际设备以下方报告为准。';
+    else if (stage === 'independent_policy_selection') rule = '历史政策评估：CPU；此记录属于旧成交研究任务。';
+    else if (/ma_exit|^entry$|^L2/i.test(stage)) rule = '历史线性/MLP训练按冻结请求设备执行，树头在CPU；此记录只读保留。';
+    else if (/raw_source|native_source|calendar|reference_quality/.test(stage)) rule = '历史来源与费用准备在CPU；设备报告保留原始记录。';
+    return `<details data-job-detail="resources" class="training-job-resources"><summary>阶段设备与资源</summary><p>${esc(rule)}</p><p>冻结请求设备：${esc(deviceName(parameters.device))} · 本阶段实际设备报告：${esc(deviceName(detail.actual_device ?? detail.device))}</p>${parameters.stock_batch_size != null || parameters.cpu_workers != null || parameters.training_batch_size != null || parameters.batch_size != null ? `<p>股票准备分组 ${esc(parameters.stock_batch_size ?? '未报告')} 股 · CPU准备进程 ${esc(parameters.cpu_workers ?? '未报告')} · 神经训练行批 ${esc(parameters.batch_size ?? parameters.training_batch_size ?? '未报告')} 行</p>` : ''}<p>实际设备只引用任务明确报告；完成模型以训练报告的实际设备记录核验。不推算GPU利用率或预计完成时间。</p></details>`;
   }
   function jobProgressText(job) {
     const detail = job.progress_detail || {}, children = detail.children || {};
@@ -221,7 +226,7 @@
   }
   function validationSpec(job) {
     const result = job.result || {}, model = result.training_run_id || result.model_run_id || job.progress_detail?.children?.model_run_id;
-    const plan = job.spec?.plan_id || result.original_plan_id || result.plan_id;
+    const plan = result.original_plan_id || result.plan_id || job.spec?.plan_id;
     const current = validationModel(job), completed = current?.status === 'completed';
     return model && plan && completed && current.validation_available === true && !validationBlock(job) && !active.has(job.status) ? {model_run_id:model,plan_id:plan} : null;
   }
@@ -230,7 +235,7 @@
     if (!model || active.has(job.status)) return '';
     const token = job.job_id || job.run_id || model, spec = validationSpec(job), blocked = validationBlock(job);
     state.validationReceipts.set(token,job);
-    return `<button type="button" data-training-validate="${esc(token)}" ${spec ? '' : `disabled title="${esc(blocked || '完整训练资产和原冻结计划尚未核验可用')}"`}>重新核验已完成模型</button>${blocked ? `<small>${validationModel(job)?.archived === true ? '历史归档' : '复核不可用'} · ${esc(blocked)} 原任务与原诊断保留，可继续查看。</small>` : spec ? '<small>仅复算诊断、审计与账本比较，不训练、不改权重。</small>' : '<small>完整模型资产或原计划尚不可核验，复核不可提交。</small>'}`;
+    return `<button type="button" data-training-validate="${esc(token)}" ${spec ? '' : `disabled title="${esc(blocked || '完整训练资产和原冻结计划尚未核验可用')}"`}>重新核验已完成模型</button>${blocked ? `<small>${validationModel(job)?.archived === true ? '历史归档' : '复核不可用'} · ${esc(blocked)} 原任务与原诊断保留，可继续查看。</small>` : spec ? '<small>核验资产、时间切分与预测基线；模型权重保持不变。</small>' : '<small>完整模型资产或原计划尚不可核验，复核不可提交。</small>'}`;
   }
   async function revalidate(job) {
     const spec = validationSpec(job);
@@ -254,15 +259,11 @@
     return pieces.length ? `<p class="training-note">${esc(pieces.join(' · '))}</p>` : '';
   }
   function nativeResumeSpec(job) {
-    const detail = job.progress_detail || {}, children = detail.children || {};
-    if (!['cancelled','failed'].includes(job.status) || detail.checkpoint_available !== true ||
-        !children.source_native_run_id || !children.raw_source_run_id || !job.spec?.parameters) return null;
-    return {parameters:job.spec.parameters,raw_source_run_id:children.raw_source_run_id,
-      resume_native_run_id:children.source_native_run_id};
+    return null; // Old recovery is archive-only; new runs require a fresh plan.
   }
   async function resumeNative(job) {
     const spec = nativeResumeSpec(job);
-    if (!spec) throw new Error('此任务没有可核验的结构检查点。');
+    if (!spec) throw new Error('旧训练恢复入口已退役，请新建参考仓位预检计划。');
     const checked = await api('/api/training/preflight',{method:'POST',body:JSON.stringify(spec)});
     if (checked.valid !== true || !checked.plan?.plan_id) throw new Error((checked.errors || ['检查点核验未通过']).join('；'));
     const task = await api('/api/training/jobs',{method:'POST',body:JSON.stringify({plan_id:checked.plan.plan_id,parameters:spec.parameters})});
@@ -273,7 +274,7 @@
   function renderJob(job) {
     const detail = job.progress_detail || {}, result = job.result || {}, progress = Math.max(0,Math.min(100,Number(job.progress) || 0));
     const comparison = result.comparison || result.selection || {}, reasons = comparison.reasons || result.blockers || [];
-    return `<article class="training-job" data-training-job="${esc(job.job_id || job.run_id)}"><div class="task-heading"><strong>${jobTitle(job)}</strong><span class="badge">${esc(statuses[job.status] || job.status || '读取中')}</span></div><small>${esc(job.run_id || job.job_id)}</small><div class="progress-track" aria-label="${job.status === 'succeeded' ? '任务完成' : '当前阶段进度'} ${progress}%"><i style="width:${progress}%"></i></div><p>${active.has(job.status) ? `当前阶段 ${progress}% · ` : ''}${esc(jobProgressText(job))}${detail.failed ? ` · 失败 ${esc(detail.failed)}` : ''}${detail.device ? ` · 实际设备 ${esc(detail.device)}` : ''}</p>${nativeProgressStatsHtml(job)}${jobResourceHtml(job)}${job.error ? `<p class="training-message error">${esc(message(job.error))}</p>` : ''}${job.status === 'succeeded' ? `<p>${job.kind === 'model_validation' || result.training_started === false ? '复核已完成' : '训练已完成'}；替换结果：${esc(statuses[result.selection?.status || result.comparison_status] || result.selection?.status || result.comparison_status || '以资格报告为准')}。</p>` : ''}${result.training_started === false && result.weights_unchanged === true ? '<p>本次没有启动训练，模型权重保持不变；原任务与历史诊断保留。</p>' : ''}${reasons.length ? `<ul class="training-blockers">${reasons.map(reason => `<li>${esc(message(reason))}</li>`).join('')}</ul>` : ''}${result.training_run_id ? `<p>模型运行：${esc(result.training_run_id)}</p>` : ''}${referenceQualityTrainingHtml(result.reference_quality,result.result_reasons)}${populationHtml({...detail,...result})}${childrenHtml(detail.children || result.children)}${diagnosticsHtml(result.diagnostics)}${result.required_heads ? `<details data-job-detail="heads"><summary>必需头资格</summary><pre>${esc(JSON.stringify(result.required_heads,null,2))}</pre></details>` : ''}<div class="button-group">${active.has(job.status) ? `<button type="button" data-training-cancel="${esc(job.job_id)}" ${job.status === 'cancelling' ? 'disabled' : ''}>${job.kind === 'model_validation' ? '取消复核' : '取消训练'}</button>` : ''}${job.status === 'succeeded' && job.run_id ? `<button type="button" data-training-result="${esc(job.job_id)}">查看结果与阻断原因</button>` : ''}${result.training_run_id ? `<button type="button" data-training-comparison="${esc(result.training_run_id)}">查看费用验收对比</button>` : ''}${validationButton(job)}${nativeResumeSpec(job) ? `<button type="button" data-training-resume="${esc(job.job_id)}">继续结构准备与训练</button>` : ''}</div>${job.logs?.length ? `<details data-job-detail="logs"><summary>阶段日志</summary><pre>${esc(job.logs.map(message).join('\n'))}</pre></details>` : ''}</article>`;
+    return `<article class="training-job" data-training-job="${esc(job.job_id || job.run_id)}"><div class="task-heading"><strong>${jobTitle(job)}</strong><span class="badge">${esc(statuses[job.status] || job.status || '读取中')}</span></div><small>${esc(job.run_id || job.job_id)}</small><div class="progress-track" aria-label="${job.status === 'succeeded' ? '任务完成' : '当前阶段进度'} ${progress}%"><i style="width:${progress}%"></i></div><p>${active.has(job.status) ? `当前阶段 ${progress}% · ` : ''}${esc(jobProgressText(job))}${detail.failed ? ` · 失败 ${esc(detail.failed)}` : ''}${detail.device ? ` · 实际设备 ${esc(detail.device)}` : ''}</p>${nativeProgressStatsHtml(job)}${jobResourceHtml(job)}${job.error ? `<p class="training-message error">${esc(message(job.error))}</p>` : ''}${job.status === 'succeeded' ? `<p>${job.kind === 'model_validation' || result.training_started === false ? '复核已完成' : '训练已完成'}；替换结果：${esc(statuses[result.selection?.status || result.comparison_status] || result.selection?.status || result.comparison_status || '以资格报告为准')}。</p>` : ''}${result.training_started === false && result.weights_unchanged === true ? '<p>本次没有启动训练，模型权重保持不变；原任务与历史诊断保留。</p>' : ''}${reasons.length ? `<ul class="training-blockers">${reasons.map(reason => `<li>${esc(message(reason))}</li>`).join('')}</ul>` : ''}${result.training_run_id ? `<p>模型运行：${esc(result.training_run_id)}</p>` : ''}${result.strategy_version === "reference_position_v1" ? referenceValidationHtml(result) : referenceQualityTrainingHtml(result.reference_quality,result.result_reasons)}${populationHtml({...detail,...result})}${childrenHtml(detail.children || result.children)}${diagnosticsHtml(result.diagnostics)}${result.required_heads ? `<details data-job-detail="heads"><summary>必需头资格</summary><pre>${esc(JSON.stringify(result.required_heads,null,2))}</pre></details>` : ''}<div class="button-group">${active.has(job.status) ? `<button type="button" data-training-cancel="${esc(job.job_id)}" ${job.status === 'cancelling' ? 'disabled' : ''}>${job.kind === 'model_validation' ? '取消复核' : '取消训练'}</button>` : ''}${job.status === 'succeeded' && job.run_id ? `<button type="button" data-training-result="${esc(job.job_id)}">查看结果与阻断原因</button>` : ''}${result.training_run_id ? `<button type="button" data-training-comparison="${esc(result.training_run_id)}">查看验证与基线</button>` : ''}${validationButton(job)}${nativeResumeSpec(job) ? `<button type="button" data-training-resume="${esc(job.job_id)}">继续结构准备与训练</button>` : ''}</div>${job.logs?.length ? `<details data-job-detail="logs"><summary>阶段日志</summary><pre>${esc(job.logs.map(message).join('\n'))}</pre></details>` : ''}</article>`;
   }
   function renderTaskSummary(jobs) {
     const running = jobs.filter(job => active.has(job.status)), failed = jobs.filter(job => job.status === 'failed'), cancelled = jobs.filter(job => job.status === 'cancelled');
@@ -311,7 +312,7 @@
   }
   async function events() {
     const response = await api('/api/training/selection-events'), items = Array.isArray(response) ? response : response.events || response.items || [];
-    $('training-selection-events').innerHTML = items.length ? items.map(item => { const payload = item.payload || item; return `<article><strong>${esc(({select:'更新当前研究模型',rollback:'回滚当前研究选择'})[item.kind] || item.action || item.event_type || '模型选择记录')}</strong><span>记录 ${esc(item.created_at || payload.recorded_at || '')}${payload.effective_from ? ` · 生效 ${esc(payload.effective_from)}` : ''}</span><p>${esc(payload.reason || payload.reason_code || '通过冻结证据检查后记录')}</p><small>模型 ${esc(payload.run_id || payload.model_run_id || '无模型状态')}${payload.previous_run_id ? ` · 前任 ${esc(payload.previous_run_id)}` : ''}</small></article>`; }).join('') : '<p class="subtle">尚无当前体系替换事件；训练完成不会自动伪造选择或发布记录。</p>';
+    $('training-selection-events').innerHTML = items.length ? items.map(item => { const payload = item.payload || item; return `<article><strong>${esc(({select:'更新当前研究模型',rollback:'回滚当前研究选择'})[item.kind] || item.action || item.event_type || '模型选择记录')}</strong><span>记录 ${esc(item.created_at || payload.recorded_at || payload.selected_at || '')}${payload.effective_from ? ` · 生效 ${esc(payload.effective_from)}` : ''}</span><p>${esc(payload.reason || payload.reason_code || '通过冻结证据检查后记录')}</p><small>模型 ${esc(payload.run_id || payload.model_run_id || '无模型状态')}${payload.previous_run_id ? ` · 前任 ${esc(payload.previous_run_id)}` : ''}</small></article>`; }).join('') : '<p class="subtle">尚无当前体系替换事件；训练完成不会自动伪造选择或发布记录。</p>';
   }
   async function pollJobs() {
     clearTimeout(state.timer);
@@ -328,7 +329,12 @@
     state.capabilities = capabilities; state.profiles = profiles; state.status = status;
     const fields = capabilities.schema?.fields || capabilities.parameter_schema?.fields || capabilities.fields;
     if (!Array.isArray(fields) || !fields.length) throw new Error('服务未提供可编辑参数契约，训练暂不可提交。');
-    state.fields = fields.filter(field => !['cohort_size','capacity_tiers'].includes(keyOf(field)));
+    state.fields = fields.filter(field => !['cohort_size','capacity_tiers'].includes(keyOf(field))).map(field => {
+      const key = keyOf(field), choices = field.choices || field.options, numericChoice = choices?.length && typeof choices[0] === 'number';
+      return {...field,choices,type:numericChoice ? 'integer' : ['end','feature_start'].includes(key) ? 'date' : field.type,
+        required:!['end','source_native_run_id'].includes(key),
+        unit:field.unit || (['max_stock_weight','risk_budget','position_step','hysteresis'].includes(key) ? '比例' : '')};
+    });
     if (!state.loaded || !state.dirty) {
       state.revision = profiles.default_profile?.revision ?? profiles.default_revision ?? 0;
       const saved = profiles.default_profile?.archived ? {} : profiles.default_profile?.parameters || {}, values = {...(capabilities.defaults || capabilities.builtin_profile?.parameters || {}),...saved};
@@ -424,6 +430,10 @@
   }
   async function showComparison(runId) {
     const comparison = await api(`/api/training/runs/${encodeURIComponent(runId)}/comparison`), reasons = comparison.reasons || [];
+    if (comparison.strategy_version === 'reference_position_v1' || comparison.family === 'reference_position_v1' || comparison.technical_validation || comparison.predictive_gate || comparison.predictive_validation || comparison.technical || comparison.predictive) {
+      $('training-selection').innerHTML = `<h3>参考模型验证与预测基线</h3>${referenceValidationHtml(comparison)}<pre>${esc(JSON.stringify(comparison,null,2))}</pre>`;
+      location.hash = 'training'; return;
+    }
     const arms = {candidate:'候选',incumbent:'现任',rules:'规则基线',candidate_stress:'候选 · 双倍费用滑点',incumbent_stress:'现任 · 双倍费用滑点',rules_stress:'基线 · 双倍费用滑点'};
     const pct = value => typeof value === 'number' && Number.isFinite(value) ? (value * 100).toFixed(2) + '%' : '—';
     $('training-selection').innerHTML = `<h3>费用后账本对比 · ${esc(statuses[comparison.status] || comparison.status)}</h3><p class="training-note">固定等额独立账户，失败股票保留现金。开发比较不代表独立认证。</p>${reasons.length ? `<ul class="training-blockers">${reasons.map(reason => `<li>${esc(message(reason))}</li>`).join('')}</ul>` : ''}${comparison.windows?.length ? `<div class="table-wrap"><table><thead><tr><th>窗口</th><th>策略</th><th>费用后收益</th><th>最大回撤</th><th>完整交易</th><th>交易期望</th></tr></thead><tbody>${comparison.windows.flatMap(window => Object.entries(window.arms || {}).map(([key,arm]) => { const metrics = arm.metrics || {}; return `<tr><td>${esc(window.window?.name || window.name || '')}</td><td>${esc(arms[key] || key)}</td><td>${pct(metrics.total_return)}</td><td>${pct(metrics.drawdown)}</td><td>${esc(metrics.completed_round_trips ?? '—')}</td><td>${pct(metrics.expectancy)}</td></tr>`; })).join('')}</tbody></table></div>` : '<p class="subtle">关键头、类别或证据未齐备，尚不能进行账本对比。</p>'}`;
@@ -432,7 +442,7 @@
   async function showResult(result, task = null) {
     const reasons = result.selection?.reasons || result.blockers || [];
     const receipt = task || {run_id:result.run_id,status:'succeeded',result};
-    $('training-jobs').innerHTML = `<article class="training-job"><h3>${jobTitle(receipt)}结果 · ${esc(statuses[result.selection?.status] || result.selection?.status || '资格待核验')}</h3><p>任务运行 ${esc(result.run_id || '未提供')}</p>${result.training_started === false && result.weights_unchanged === true ? '<p>本次没有启动训练，模型权重保持不变；原任务与历史诊断保留。</p>' : ''}${result.training_run_id ? `<p>模型运行 ${esc(result.training_run_id)}</p><button type="button" data-training-comparison="${esc(result.training_run_id)}">查看费用验收对比</button>` : ''}${populationHtml(result)}${referenceQualityTrainingHtml(result.reference_quality,result.result_reasons)}${validationButton(receipt)}${reasons.length ? `<ul class="training-blockers">${reasons.map(reason => `<li>${esc(message(reason))}</li>`).join('')}</ul>` : ''}${childrenHtml(result.children)}${diagnosticsHtml(result.diagnostics)}${result.required_heads ? `<details data-job-detail="heads"><summary>必需头资格</summary><pre>${esc(JSON.stringify(result.required_heads,null,2))}</pre></details>` : ''}<details><summary>完整任务证据</summary><pre>${esc(JSON.stringify(result,null,2))}</pre></details></article>`;
+    $('training-jobs').innerHTML = `<article class="training-job"><h3>${jobTitle(receipt)}结果 · ${esc(statuses[result.selection?.status] || result.selection?.status || '资格待核验')}</h3><p>任务运行 ${esc(result.run_id || '未提供')}</p>${result.training_started === false && result.weights_unchanged === true ? '<p>本次没有启动训练，模型权重保持不变；原任务与历史诊断保留。</p>' : ''}${result.training_run_id ? `<p>模型运行 ${esc(result.training_run_id)}</p><button type="button" data-training-comparison="${esc(result.training_run_id)}">查看验证与基线</button>` : ''}${populationHtml(result)}${result.strategy_version === "reference_position_v1" ? referenceValidationHtml(result) : referenceQualityTrainingHtml(result.reference_quality,result.result_reasons)}${validationButton(receipt)}${reasons.length ? `<ul class="training-blockers">${reasons.map(reason => `<li>${esc(message(reason))}</li>`).join('')}</ul>` : ''}${childrenHtml(result.children)}${diagnosticsHtml(result.diagnostics)}${result.required_heads ? `<details data-job-detail="heads"><summary>必需头资格</summary><pre>${esc(JSON.stringify(result.required_heads,null,2))}</pre></details>` : ''}<details><summary>完整任务证据</summary><pre>${esc(JSON.stringify(result,null,2))}</pre></details></article>`;
     location.hash = 'training';
   }
   function bind() {

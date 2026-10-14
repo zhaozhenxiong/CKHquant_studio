@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from my_strategy.services import model_training_center as center
+# Archive-specific contracts remain tested against the explicit legacy implementation.
 from my_strategy.web_dashboard.api import TrainingJobRequest
 
 
@@ -16,7 +17,7 @@ def routed_training(tmp_path, monkeypatch):
         'cohort': ['600000.SH'], 'plan_hash': 'frozen-plan-hash', 'config': {'seed': 42},
         'parameters': {'cpu_workers': 10, 'device': 'mps', 'stock_batch_size': 360},
         'source_reuse': {'source_native_run_id': 'completed-native', 'raw_source_run_id': 'completed-raw'}}
-    instance = object.__new__(center.TrainingCenter)
+    instance = object.__new__(center.LegacyTrainingCenter)
     instance.runs_root = tmp_path / 'runs'
     instance.load_plan = lambda *args, **kwargs: plan
     def subdir(name):
@@ -107,7 +108,7 @@ def test_resume_asset_progress_and_cached_e1_population_are_separate(tmp_path):
             'completed': 3, 'total': 3, 'scope': 'current_population_only'}),
     ]
     code = '\n'.join('print(' + repr(line) + ',flush=True)' for line in lines)
-    center.TrainingCenter._run_process([sys.executable, '-u', '-c', code],
+    center.LegacyTrainingCenter._run_process([sys.executable, '-u', '-c', code],
         tmp_path / 'resume.log', events.append, None, source_total=3)
     assert [(e['stage'], e['completed'], e['total']) for e in events] == [
         ('training_resume_verification', 9, 9), ('E1', 2, 3), ('E1', 3, 3)]

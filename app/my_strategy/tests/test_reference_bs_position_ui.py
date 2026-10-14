@@ -97,7 +97,7 @@ for(const prefix of ['analysis','scan']) {
  element(`${prefix}-mode`).value='research';element(`${prefix}-usage-mode`).value='historical';element(`${prefix}-model-policy`).value='auto';
  element(`${prefix}-model`).options=[{value:''}];element(`${prefix}-checkpoint`).options=[{value:''}];
  bindTest.state.research={models:[]};
- bindTest.applyResearchContext(prefix,{research:true,analysis_mode:'reference',model_family:'current',consensus_version:'trend_consensus',usage_mode:'historical',model_policy:'auto',current_position_fraction:.5});
+ bindTest.applyResearchContext(prefix,{research:true,analysis_mode:'reference',model_family:'current',consensus_version:'reference_position_v1',usage_mode:'historical',model_policy:'auto',current_position_fraction:.5});
 }
 assert.equal(element('analysis-position').value,'50');
 ''')

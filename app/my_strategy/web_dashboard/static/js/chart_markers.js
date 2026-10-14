@@ -50,13 +50,13 @@
       if (excluded) ignoredCount++;
       const version = consensusVersion || row.version || row.consensus_version;
       const sourceFrequency = row.source_frequency || row.signal_frequency || row.frequency || '日线';
-      const nativePeriodSignal = !execution && ['consensus','reference_consensus'].includes(row.source) && ['trend_consensus'].includes(version)
+      const nativePeriodSignal = !execution && ['consensus','reference_consensus'].includes(row.source) && ['trend_consensus','reference_position_v1'].includes(version)
         && sourceFrequency !== '日线' && sourceFrequency === frequency;
       const bucketDate = nativePeriodSignal ? day(row.source_period_date || row.period_end || row.time || row.date) : original;
       const key = periodKey(bucketDate,frequency), bar = periodBars.get(key);
       // Daily final decisions are already known facts. A forming weekly/monthly
       // display bucket must not defer them as if they were native period signals.
-      const dailyProjection = !execution && (row.reference_layer === 'source' || ['consensus','reference_consensus'].includes(row.source)) && ['trend_consensus'].includes(version)
+      const dailyProjection = !execution && (row.reference_layer === 'source' || ['consensus','reference_consensus'].includes(row.source)) && ['trend_consensus','reference_position_v1'].includes(version)
         && sourceFrequency === '日线' && frequency !== '日线';
       const time = dailyProjection && bar ? day(bar.time) : byPeriod.get(key);
       const closedAt = frequency === '日线' ? time : observedDaily.find((date) => periodKey(date,frequency) > key);
@@ -69,18 +69,18 @@
       }
       const kind = row.reference_layer === 'source' ? 'source_reference' : 'intention', side = buying ? 'BUY' : 'SELL';
       const periodId = `${frequency}:${key}`;
-      const id = groupId(rowSymbol,frequency,['trend_consensus'].includes(version) ? periodId : time,kind === 'source_reference' ? `${kind}:${row.source}` : kind,side);
+      const id = groupId(rowSymbol,frequency,['trend_consensus','reference_position_v1'].includes(version) ? periodId : time,kind === 'source_reference' ? `${kind}:${row.source}` : kind,side);
       const entryId = [id,row.event_id || '',firstAvailableAt || ''].map(encodeURIComponent).join(':');
       const source = row.source || (execution ? 'broker' : null);
       const mapping = {...row, row, group_id:id, kind, symbol:rowSymbol, action:side, side,
-        source, entry_id:entryId, event_id:row.event_id || null, event_type:row.event_type || row.signal || null,
+        source, consensus_version:version, entry_id:entryId, event_id:row.event_id || null, event_type:row.event_type || row.signal || null,
         period_id:periodId, first_available_at:firstAvailableAt || null, source_frequency:sourceFrequency,
         daily_confirmed:dailyProjection, period_status:periodClosed ? 'closed' : 'forming',
         original_date:original, event_date:day(row.date || row.time || row.signal_at || original),
         bar_date:time, closed_at:periodClosed ? closedAt : null, excluded, displayed, exclusion_reasons:exclusionReasons};
       mappings.push(mapping);
       if (!grouped.has(id)) grouped.set(id, {id, group_id:id, symbol:rowSymbol, frequency,
-        time, bar_date:time, period_id:periodId, period_status:periodClosed ? 'closed' : 'forming',
+        time, bar_date:time, period_id:periodId, consensus_version:version, period_status:periodClosed ? 'closed' : 'forming',
         closed_at:periodClosed ? closedAt : null, kind, source_label:row.source_label || row.source, action:side, side, entries:[], events:[]});
       const group = grouped.get(id);
       group.entries.push(mapping);
@@ -114,17 +114,17 @@
       markers.push({id:group.id, time:group.time, position:buying ? 'belowBar' : 'aboveBar',
         color:buying ? up : down,
         shape:buying ? 'arrowUp' : 'arrowDown',
-        text:source ? `${({structure:'结',wyckoff:'量',ma:'均'})[group.sources[0]] || '源'}${letter}` : `共${letter}`,
+        text:source ? `${({structure:'结',wyckoff:'量',ma:'均'})[group.sources[0]] || '源'}${letter}` : `${group.consensus_version === 'reference_position_v1' ? '参' : '共'}${letter}`,
         size:source ? .7 : 1});
     }
     return {markers,mappings,groups,intentCount,deferredCount,ignoredCount,formingProjectedCount,
       intentMarkerCount:groups.filter((group) => group.visible).length};
   }
   function describe(mappings, time, frequency) {
-    if (!time) return '点击来源或最终共识 B/S 及对应 K 线，查看多 Agent 判断；悬浮只切换指标与筹码。';
+    if (!time) return '点击来源或参考 B/S 及对应 K 线，查看模型与规则依据；悬浮只切换指标与筹码。';
     const items = mappings.filter((item) => item.bar_date === time && item.displayed !== false);
     if (!items.length) return `${time} · 该K线无买卖标记`;
-    return items.map((item) => `${item.action === 'BUY' ? '买入' : '卖出'}${item.reference_layer === 'source' ? `${item.row.source_label || item.source}来源参考` : '最终共识参考'} ${item.original_date}${frequency === '日线' ? '' : item.daily_confirmed && item.period_status === 'forming' ? ` · 日线已确认／${frequency}周期形成中` : ` · ${frequency}闭合 ${item.closed_at || '时间待核验'}`}`).join('；');
+    return items.map((item) => `${item.action === 'BUY' ? '买入' : '卖出'}${item.reference_layer === 'source' ? `${item.row.source_label || item.source}来源参考` : item.consensus_version === 'reference_position_v1' ? '参考目标变化' : '最终共识参考'} ${item.original_date}${frequency === '日线' ? '' : item.daily_confirmed && item.period_status === 'forming' ? ` · 日线已确认／${frequency}周期形成中` : ` · ${frequency}闭合 ${item.closed_at || '时间待核验'}`}`).join('；');
   }
   const api = {periodKey,build,describe};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

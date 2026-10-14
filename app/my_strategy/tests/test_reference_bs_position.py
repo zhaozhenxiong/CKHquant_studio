@@ -1,4 +1,4 @@
-"""Source references and risk ceilings cannot silently become trading targets."""
+"""Archived broker-derived reference contract and independent native source geometry."""
 from __future__ import annotations
 
 import copy
@@ -31,7 +31,7 @@ def test_source_sell_survives_without_final_sell_and_preserves_original_identity
         pack["events"] = [copy.deepcopy(event)]
         return pack
     monkeypatch.setattr(czsc_native_evidence, "build_native_evidence", native)
-    result = runtime.reference_overlay(reference_inputs, DATES)
+    result = runtime.legacy_reference_overlay(reference_inputs, DATES)
     source = result["source_reference_points"]
     assert len(source) == 1 and source[0]["side"] == "SELL"
     for key in ("event_id", "original_event_id", "pattern_id", "available_at", "first_available_at"):
@@ -309,7 +309,7 @@ def test_default_reference_overlay_keeps_the_selected_nonbaseline_policy(qualifi
             row.update(direction="WAIT", entry_eligible=False, buy_base_qualified=False,
                 entry_plan=None, active_candidates=[], original_opportunity_ids=[])
         rows.append(row)
-    monkeypatch.setattr(runtime, "load_reference_model_run", lambda *a, **k: (root, report))
+    monkeypatch.setattr(runtime, "_load_legacy_reference_model_run", lambda *a, **k: (root, report))
     monkeypatch.setattr(czsc_trend_model, "bind_trend_inputs", lambda data, *a, **k: data.copy())
     monkeypatch.setattr(czsc_native_evidence, "build_native_evidence", lambda data, *a, **k: {
         "frame": data.copy(), "events": [], "evaluations": [], "wyckoff_events": []})
@@ -317,7 +317,7 @@ def test_default_reference_overlay_keeps_the_selected_nonbaseline_policy(qualifi
         day: {"model_available": True, "input_eligible": True} for day in data.date})
     monkeypatch.setattr(czsc_trend_consensus, "prepare_trend_decisions", lambda *a, **k: {
         "rows": copy.deepcopy(rows), "events": [], "config_hash": stable_hash(cfg)})
-    output = runtime.reference_overlay(frame, days, consensus_config=None)
+    output = runtime.legacy_reference_overlay(frame, days, consensus_config=None)
     position = output["position_reference"]
     assert position["status"] == "increase_exposure"
     assert position["target_position_fraction"] == .2

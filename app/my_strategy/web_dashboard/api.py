@@ -37,7 +37,7 @@ class AnalysisRequest(BaseModel):
     calendar_run_id: str | None = None
     device: str | None = None
     consensus_config: dict[str, Any] | None = None
-    consensus_version: Literal['trend_consensus'] | None = None
+    consensus_version: Literal['reference_position_v1'] | None = None
     _symbol = field_validator('symbol')(clean_symbol)
 
     @field_validator('model_run_id', 'model_fold', 'calendar_run_id')
@@ -94,7 +94,7 @@ class TaskSpec(BaseModel):
     research: bool = Field(default=True, strict=True)
     model_family: Literal['current'] = 'current'
     consensus_config: dict[str, Any] | None = None
-    consensus_version: Literal['trend_consensus'] | None = None
+    consensus_version: Literal['reference_position_v1'] | None = None
     model_run_id: str | None = None
     model_fold: str | None = None
     calendar_run_id: str | None = None
@@ -120,7 +120,7 @@ class TaskSpec(BaseModel):
         inherit_selected_consensus = self.consensus_config is None and self.model_run_id is None
         self.consensus_config = validate_consensus_config(self.consensus_config,
             version=self.consensus_version, model_run_id=self.model_run_id, model_family=self.model_family)
-        self.consensus_version = 'trend_consensus'
+        self.consensus_version = 'reference_position_v1'
         if inherit_selected_consensus:
             self.consensus_config = None
         return self
@@ -162,6 +162,7 @@ class TrainingJobRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     plan_id: str = Field(pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,179}$')
     parameters: dict[str, Any] | None = None
+    resume_reference_run_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,179}$')
     resume_training_run_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,179}$')
     resume_from_job_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,179}$')
 
@@ -212,7 +213,7 @@ def remove_watchlist(symbol: str, request: Request):
 
 @router.get("/health")
 def health():
-    return {"status": "ok", "method": "CZSC", "strategy": "trend_consensus"}
+    return {"status": "ok", "method": "CZSC", "strategy": "reference_position_v1"}
 
 
 @router.get("/data/status")
@@ -271,7 +272,7 @@ async def training_job(spec: TrainingJobRequest, request: Request):
 
 @router.post('/training/validation-jobs', status_code=202)
 async def model_validation_job(spec: ModelValidationJobRequest, request: Request):
-    await asyncio.to_thread(request.app.state.training.validate_plan, spec.plan_id)
+    await asyncio.to_thread(request.app.state.training.validate_plan, spec.plan_id, check_code=False)
     return request.app.state.tasks.submit('model_validation', spec.model_dump())
 
 
@@ -348,7 +349,7 @@ async def analysis(spec: AnalysisRequest, request: Request):
         if consensus.get("config"):
             query["consensus_config"] = consensus["config"]
             query["consensus_version"] = consensus["version"]
-        if result.get("strategy_version") == "trend_consensus":
+        if result.get("strategy_version") == "reference_position_v1":
             research_context = result.get("research", {})
             selected_model = research_context.get("model_run_id")
             if selected_model:

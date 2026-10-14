@@ -97,13 +97,14 @@ assert(!simulated.includes('账户 B'));assert(!simulated.includes('高收益评
 def test_reference_model_picker_excludes_failed_or_archived_candidates():
     run_js(r'''
 const assert=require('node:assert/strict'),path=require('path'),fs=require('fs'),vm=require('vm');
+global.window={addEventListener(){}};
 const source=fs.readFileSync(path.join(process.argv[1],'workbench.js'),'utf8').replace('init().catch(showError);',
  'globalThis.referencePicker={state,researchModels};');
 vm.runInThisContext(source);
 referencePicker.state.research={active_model:{run_id:'qualified'},models:[
- {run_id:'qualified',model_family:'current',automatic_selection_eligible:true,archived:false},
- {run_id:'not-passed',model_family:'current',automatic_selection_eligible:false,archived:false},
- {run_id:'archived',model_family:'current',automatic_selection_eligible:true,archived:true}]};
+ {run_id:'qualified',status:'completed',model_family:'current',automatic_selection_eligible:true,archived:false},
+ {run_id:'not-passed',status:'completed',model_family:'current',automatic_selection_eligible:false,archived:false},
+ {run_id:'archived',status:'completed',model_family:'current',automatic_selection_eligible:true,archived:true}]};
 for(const prefix of ['analysis','scan']) assert.deepEqual(referencePicker.researchModels(prefix).map(item=>item.run_id),['qualified']);
 
 ''')

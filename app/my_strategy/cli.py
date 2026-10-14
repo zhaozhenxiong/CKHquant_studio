@@ -1,4 +1,4 @@
-"""Portable CLI for the current CZSC trend-consensus workbench."""
+"""Portable CLI for account-free reference signals and per-stock target positions."""
 from __future__ import annotations
 
 import argparse
@@ -30,7 +30,7 @@ DELEGATES = {
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="KHQuant 当前趋势共识策略")
+    parser = argparse.ArgumentParser(description="KHQuant 参考买卖点与每股仓位")
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("analyze", "scan"):
         item = commands.add_parser(name)
@@ -40,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
         item.add_argument("--end", help="截止日期；留空使用本地最新行情")
         item.add_argument("--as-of", help="分析回放截止日或 Asia/Shanghai 时间")
         item.add_argument("--current-position", type=float, help="仅分析的当前持仓百分比，0到100，不生成资金账户")
-        item.add_argument("--device", help="计算设备：cpu、mps、cuda 或 cuda:编号")
+        item.add_argument("--device", help="计算设备：auto（优先CUDA/MPS）、cpu、mps、cuda 或 cuda:编号")
         item.add_argument("--usage-mode", choices=("forward", "historical"), default="historical",
                           help="historical 历史研究；forward 按实际训练完成时点的当前研究")
         item.add_argument("--model-run-id", help="显式核验当前模型运行；留空使用生效选择或观察模式")
@@ -49,7 +49,14 @@ def build_parser() -> argparse.ArgumentParser:
         item.add_argument("--config", type=Path, help="当前共识参数 JSON 对象")
         item.add_argument("--cpu-workers", type=int, default=4)
         item.add_argument("--json", action="store_true")
-    train = commands.add_parser("train-trend", help="从冻结原始输入完整训练当前模型依赖")
+    reference = commands.add_parser("train-reference", help="训练参考买卖点与逐股目标仓位，不模拟成交")
+    reference.add_argument("--source-native-run-id", help="复用已核验的完整因果结构来源；省略时自动查找")
+    reference.add_argument("--end", help="冻结行情截止日；复用来源时须一致")
+    reference.add_argument("--device", default="auto", help="auto 优先 CUDA/MPS；明确设备不可用时拒绝")
+    reference.add_argument("--config", type=Path, help="新参考训练参数 JSON 对象")
+    reference.add_argument("--preflight-only", action="store_true")
+    reference.add_argument("--json", action="store_true")
+    train = commands.add_parser("train-trend", help="历史成交研究训练（退役，仅供档案脚本查证）")
     train.add_argument("--raw-source-run-id")
     train.add_argument("--source-native-run-id")
     train.add_argument("--resume-native-run-id")
@@ -99,7 +106,7 @@ def _train_arguments(args) -> list[str]:
     return values
 
 
-def _progress(stage, current, total, failed=0):
+def _progress(stage, current, total, failed=0, **details):
     print(f"{stage} {current}/{total} failures={failed}", file=sys.stderr)
 
 
@@ -111,8 +118,24 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(values)
     try:
         if args.command == "train-trend":
-            return _subprocess(_train_arguments(args))
-        if args.command == "model-diagnostics":
+            raise ValueError("旧训练入口已退役，请使用 train-reference 创建新参考仓位模型")
+        if args.command == "train-reference":
+            from my_strategy.services.model_training_center import TrainingCenter
+            center = TrainingCenter()
+            parameters = json.loads(args.config.read_text(encoding="utf-8")) if args.config else {}
+            if not isinstance(parameters, dict):
+                raise ValueError("训练配置应为 JSON 对象")
+            parameters["device"] = args.device
+            if args.end:
+                parameters["end"] = args.end
+            result = center.preflight(parameters, source_native_run_id=args.source_native_run_id, progress=_progress)
+            plan = result.get("plan", result)
+            if result.get("valid") is not True:
+                print(json.dumps(result, ensure_ascii=False), file=sys.stderr)
+                return 1
+            if not args.preflight_only:
+                result = center.run_training_job({"plan_id":plan["plan_id"], "parameters":parameters}, progress=_progress)
+        elif args.command == "model-diagnostics":
             if not 1 <= args.cpu_workers <= 4:
                 raise ValueError("CPU 只读诊断进程数应在 1 到 4 之间")
             from my_strategy.services.czsc_high_return_sample_diagnostics import run_diagnostics
@@ -135,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("当前共识参数应为 JSON 对象")
             spec = {"start": args.start, "end": args.end, "model_run_id": args.model_run_id,
                     "model_fold": args.model_fold, "usage_mode": args.usage_mode,
-                    "calendar_run_id": args.calendar_run_id, "device": args.device or "cpu",
+                    "calendar_run_id": args.calendar_run_id, "device": args.device or "auto",
                     "cpu_workers": args.cpu_workers, "consensus_config": consensus, "source": "cli"}
             if args.command == "analyze":
                 from my_strategy.core.run_context import create_run_context
