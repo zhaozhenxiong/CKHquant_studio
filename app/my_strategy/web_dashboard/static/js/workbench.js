@@ -9,8 +9,8 @@
   const display = (value) => typeof value === 'object' && value !== null ? JSON.stringify(value) : String(value ?? '—');
   const day = (value) => value && typeof value === 'object' && 'year' in value ? `${value.year}-${String(value.month).padStart(2,'0')}-${String(value.day).padStart(2,'0')}` : typeof value === 'number' ? new Intl.DateTimeFormat('sv-SE', {timeZone:'Asia/Shanghai'}).format(new Date(value < 1e12 ? value * 1000 : value)) : String(value ?? '').slice(0, 10);
   const activeStatuses = new Set(['queued', 'running', 'cancelling']);
-  const statusNames = {queued:'等待开始', running:'运行中', succeeded:'已完成', failed:'失败', cancelling:'正在取消', cancelled:'已取消'};
-  const kindNames = {analysis:'结构分析',scan:'全市场扫描',update:'行情更新',model_training:'完整模型训练',model_validation:'已完成模型复核',current_train:'完整模型训练'};
+  const statusNames = {queued:'等待开始', running:'运行中', succeeded:'已完成', failed:'失败', cancelling:'正在取消', cancelled:'已取消',partial:'部分完成'};
+  const kindNames = {analysis:'结构分析',scan:'全市场扫描',update:'行情与特征更新',board_features:'板块特征计算',board_sync:'板块与结构同步',board_knowledge:'当前板块成员更新',model_training:'完整模型训练',model_validation:'已完成模型复核',current_train:'完整模型训练'};
   const PAGE_SIZE = 100;
   const state = {analysis:null, query:null, frequency:'日线', dates:[], replayIndex:0, scan:null, scanPage:0, tasks:[], delivered:new Set(), tracked:{}, favorites:new Set(), symbolCatalog:new Map(), analysisSequence:0, taskSequence:0, pollTimer:null, watchlist:null, personalLoaded:false, watchlistBusy:false, watchlistSequence:0,research:null,pendingResearchContexts:{}};
   let chart, candles, volume;
@@ -78,6 +78,7 @@
     if (['training','parameters'].includes(selected)) globalThis.KHQuantTraining?.refresh().catch(showError);
     if (selected === 'data') { refreshTasks().catch(showError); refreshRuns().catch(showError); }
     if (['analysis','scan'].includes(selected)) refreshResearch().catch(showError);
+    if (selected === 'scan') globalThis.KHQuantBoardPanel?.onRoute();
     if (selected === 'watchlist') (state.personalLoaded ? refreshWatchlist() : ensurePersonal()).catch(showError);
   }
   function colors() { const style = getComputedStyle(document.documentElement); return Object.fromEntries(['panel','ink','muted','border','accent','up','down','ma5','ma10','ma20','ma60','boll','chips'].map((key) => [key, style.getPropertyValue(`--${key}`).trim()])); }
@@ -887,8 +888,9 @@
   }
   function taskActions(task) {
     const cancel = activeStatuses.has(task.status) ? `<button type="button" data-cancel="${esc(task.job_id)}" ${task.status === 'cancelling' ? 'disabled' : ''}>取消</button>` : '';
-    const result = task.status !== 'succeeded' ? '' : task.run_id ? `<button type="button" data-run-id="${esc(task.run_id)}" data-run-kind="${esc(task.kind || '')}">查看结果</button>` : task.result ? `<button type="button" data-task-result="${esc(task.job_id)}">查看结果</button>` : '';
-    return cancel + result;
+    const result = !task.result_saved && !['succeeded','partial'].includes(task.status) ? '' : task.run_id ? `<button type="button" data-run-id="${esc(task.run_id)}" data-run-kind="${esc(task.kind || '')}">查看结果</button>` : task.result ? `<button type="button" data-task-result="${esc(task.job_id)}">查看结果</button>` : '';
+    const retry = task.kind?.startsWith('board_') && ['partial','failed','cancelled'].includes(task.status) ? `<button type="button" data-board-retry="${esc(task.job_id)}">重试</button>` : '';
+    return cancel + result + retry;
   }
   function renderTasks() {
     $('task-list').innerHTML = state.tasks.length ? state.tasks.map(task => `<article class="task-row"><div class="task-heading"><div><strong>${esc(kindNames[task.kind] || '当前研究任务')}</strong><small>${esc(task.created_at || '')} · ${esc(task.run_id || task.job_id)}</small></div><div class="task-actions"><span class="badge">${esc(statusNames[task.status] || task.status)}</span>${taskActions(task)}</div></div><div class="progress-track"><i style="width:${Math.max(0,Math.min(100,Number(task.progress) || 0))}%"></i></div><p class="task-detail ${task.error ? 'task-error' : ''}">${esc(task.error ? display(task.error) : taskDetail(task))}</p></article>`).join('') : '<div class="empty-copy">尚无任务，可发起训练、更新行情、扫描。</div>';
@@ -896,6 +898,7 @@
     ['scan','update'].forEach(kind => { const button = $(kind === 'update' ? 'update-data' : `start-${kind}`); button.disabled = state.tasks.some(task => task.kind === kind && activeStatuses.has(task.status)); });
   }
   function showResult(kind,result,navigate = false) {
+    if (kind.startsWith('board_')) { globalThis.KHQuantBoardPanel?.showResult(result); if (navigate) location.hash = 'scan'; return; }
     if (kind === 'scan') { state.scan = result; state.scanPage = 0; renderScan(); }
     else if (kind !== 'update') { globalThis.KHQuantTraining?.showResult(result); if (navigate) location.hash = 'training'; return; }
     if (navigate) location.hash = kind === 'update' ? 'data' : kind;
@@ -987,7 +990,7 @@
     catch (error) { if (sequence !== openRunSequence) return; throw error; }
     if (sequence !== openRunSequence) return;
     const result = data.result || data;
-    const kind = data.kind || (result.model_manifest && result.evaluation ? 'model_training' : result.rows ? 'scan' : result.data_status ? 'update' : 'analysis');
+    const kind = data.kind || kindHint || (result.model_manifest && result.evaluation ? 'model_training' : result.rows ? 'scan' : result.data_status ? 'update' : 'analysis');
     if (kind !== 'analysis') { showResult(kind,result,true); return; }
     // A saved analysis replaces only the generation that existed when opened.
     // Other run types keep a pending analysis intact; a newer analysis wins.
@@ -1019,6 +1022,7 @@
     else if (dateModes.analysis === 'latest') await refreshLatestDates();
     await analyze({symbol,...dateSpec('analysis'),...context,...(end ? {as_of:end} : {})},false,end || null);
   }
+  window.addEventListener('khquant:board-stock', (event) => { analyzeSymbol(event.detail.symbol,event.detail.price_date).catch(showError); });
   function bind() {
     ['analysis','scan'].forEach((prefix) => $(`${prefix}-end`).addEventListener('change',() => setDateMode(prefix,$(`${prefix}-end`).value ? 'historical' : 'latest')));
     $('analysis-latest')?.addEventListener('click',async () => { setDateMode('analysis','latest'); updateChartSelection('clear'); try { await refreshLatestDates(); } catch (error) { showError(error); } });
@@ -1082,6 +1086,7 @@
       if (button.dataset.removeWatchlist) changeWatchlist(button.dataset.removeWatchlist,true).catch(showError);
       if (button.dataset.analyzeSymbol) analyzeSymbol(button.dataset.analyzeSymbol,button.dataset.analyzeEnd,button.dataset.analysisSource === 'scan' ? state.scan : null).catch(showError);
       if (button.dataset.locateEvent) locateTime(button.dataset.locateEvent);
+      if (button.dataset.boardRetry) globalThis.KHQuantBoardPanel?.retryTask(button.dataset.boardRetry).catch(showError);
       if (button.dataset.cancel) cancelTask(button.dataset.cancel).catch(showError);
       if (button.dataset.taskResult) { const task = state.tasks.find((item) => item.job_id === button.dataset.taskResult); if (task?.result) showResult(task.kind,task.result,true); }
       if (button.dataset.runId) openRun(button.dataset.runId,button.dataset.runKind || '').catch(showError);

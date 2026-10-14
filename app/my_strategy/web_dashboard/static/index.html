@@ -12,6 +12,8 @@
   <script src="/static/js/market_history.js" defer></script>
   <script src="/static/js/training.js" defer></script>
   <script src="/static/js/workbench.js" defer></script>
+  <script src="/static/js/board_panel.js" defer></script>
+  <link rel="stylesheet" href="/static/css/board_panel.css">
 </head>
 <body>
   <a class="skip-link" href="#main">跳到研究区</a>
@@ -53,6 +55,8 @@
     </section>
     <section id="view-scan" class="view" aria-labelledby="scan-title" hidden>
       <div class="page-heading"><div><h1 id="scan-title">全市场扫描</h1><p>比较各股票的趋势、结构与量价评分，筛选买方／卖方参考方向。</p></div><button id="start-scan" form="scan-form" type="submit" class="primary">开始扫描</button></div>
+      <div class="scan-tabs" role="tablist" aria-label="扫描范围"><button id="scan-stock-tab" type="button" role="tab" aria-selected="true" aria-controls="scan-stock-panel">个股</button><button id="scan-board-tab" type="button" role="tab" aria-selected="false" aria-controls="scan-board-panel">板块</button></div>
+      <div id="scan-stock-panel" role="tabpanel" aria-labelledby="scan-stock-tab">
       <form id="scan-form" class="work-form"><label class="wide">股票池<textarea id="scan-symbols" rows="2" placeholder="留空扫描有效股票池；或填写代码，以逗号或空格分隔"></textarea></label><label>开始<input id="scan-start" type="date" value="2026-01-01"></label><label>结束<input id="scan-end" type="date"><span id="scan-date-mode" class="subtle">自动最新</span></label><label>计算设备<select id="scan-device"><option value="auto">自动选择</option><option value="cpu">CPU</option></select></label><label>分析内容<select id="scan-mode"><option value="research">趋势＋结构＋量价参考</option><option value="structure">结构规则参考</option></select></label><label>模型方案<select id="scan-model-family"><option value="current" selected>趋势共识完整模型包</option></select></label><label>使用方式<select id="scan-usage-mode"><option value="historical">历史滚动研究</option><option value="forward">当前时点研究</option></select></label><label>模型选择<select id="scan-model-policy"><option value="auto">自动按日期</option><option value="pinned">固定检查点</option></select></label><label>研究模型<select id="scan-model" disabled><option value="">请选择固定模型</option></select></label><label>检查点<select id="scan-checkpoint" disabled><option value="">自动按日期匹配</option></select></label></form>
       <p id="scan-checkpoint-help" class="form-note" aria-live="polite"></p>
       <p id="scan-reference-help" class="form-note reference-help" aria-live="polite"></p>
@@ -66,6 +70,16 @@
       <div class="table-wrap"><table><thead><tr><th>关注</th><th>股票</th><th>事件</th><th>参考方向 / 评分</th><th>行情 / 可用时间</th><th>仓位参考 / 风险上限</th><th>依据 / 条件</th><th>查看</th></tr></thead><tbody id="scan-rows"><tr><td colspan="8" class="empty-cell">开始扫描后，结果显示在这里。</td></tr></tbody></table></div>
       <div class="pagination"><span id="scan-page-label">0 条</span><button id="scan-prev" type="button" disabled>上一页</button><button id="scan-next" type="button" disabled>下一页</button></div>
       <details id="scan-failures" hidden><summary>未成功分析的股票</summary><div class="diagnostics"></div></details>
+      </div>
+      <div id="scan-board-panel" role="tabpanel" aria-labelledby="scan-board-tab" hidden>
+        <div class="table-toolbar"><div><h2>板块活跃与资金特征</h2><p class="form-note">当前同花顺成员，结合本地行情、CZSC 与威科夫量价事件。</p></div><div class="button-group"><button id="board-refresh-view" type="button">刷新结果</button><button id="board-calculate" type="button" class="primary">计算当前板块</button><button id="board-sync" type="button">同步结构与特征</button></div></div>
+        <p id="board-status" class="form-note" aria-live="polite">打开板块后读取已保存结果。</p>
+        <div id="board-job" class="inline-progress" hidden aria-live="polite"></div>
+        <div class="board-controls"><label>板块类型<select id="board-kind"><option value="industry">行业</option><option value="concept">概念</option></select></label><label>排名<select id="board-ranking"><option value="activity">活跃 Top30</option><option value="capital">成交资金 Top30</option></select></label><button id="board-refresh-members" type="button">更新当前成员</button></div>
+        <p class="form-note">活跃分数综合 20 日相对成交额与当日涨跌幅绝对值；成交资金按成交额排序。不同概念可重叠，成交额不表示净流入。</p>
+        <div class="board-layout"><div><p id="board-count" class="subtle"></p><div class="table-wrap"><table><thead><tr><th>排名</th><th>板块</th><th>活跃</th><th>涨跌幅</th><th>成交额</th><th>市场占比</th><th>相对成交额</th><th>成员覆盖</th><th>详情</th></tr></thead><tbody id="board-rows"><tr><td colspan="9" class="empty-cell">尚无已发布板块结果，点击计算。</td></tr></tbody></table></div></div>
+        <aside id="board-detail" class="board-detail" aria-label="板块详情" hidden><div class="table-toolbar"><h3 id="board-detail-title">板块详情</h3><button id="board-detail-close" type="button" aria-label="关闭板块详情">关闭</button></div><div id="board-detail-content"></div></aside></div>
+      </div>
     </section>
     <section id="view-watchlist" class="view" aria-labelledby="watchlist-title" hidden>
       <div class="page-heading"><div><h1 id="watchlist-title">我的关注</h1><p>保存研究股票池，随时查看结构或运行同一规则。</p></div><div class="button-group"><button id="refresh-watchlist" type="button">刷新关注</button><button id="scan-watchlist" type="button">扫描关注</button></div></div>
@@ -100,7 +114,7 @@
     <section id="view-data" class="view" aria-labelledby="data-title" hidden>
       <div class="page-heading"><div><h1 id="data-title">数据与任务</h1><p>检查输入范围，跟踪正在进行的计算。</p></div><div class="button-group"><button id="refresh-data" type="button">刷新状态</button><button id="update-data" type="submit" form="update-form" class="primary">更新行情</button></div></div>
       <dl class="data-summary"><div><dt>行情截止</dt><dd id="data-latest">—</dd></div><div><dt>有行情股票</dt><dd id="data-stocks">—</dd></div><div><dt>行情记录</dt><dd id="data-rows">—</dd></div><div><dt>数据来源</dt><dd id="data-source">—</dd></div></dl><p id="data-detail" class="subtle">等待数据检查。</p>
-      <details class="update-options"><summary>限定更新范围（可选）</summary><form id="update-form" class="toolbar"><label class="update-symbol-field">股票池<input id="update-symbols" placeholder="如 600000.SH、000001.SZ；留空更新全市场"></label><label>截止日期<input id="update-end" type="date"></label><span class="subtle">留空使用更新流程的默认截止日。</span></form></details>
+      <details class="update-options"><summary>限定更新范围（可选）</summary><form id="update-form" class="toolbar"><label class="update-symbol-field">股票池<input id="update-symbols" placeholder="如 600000.SH、000001.SZ；留空更新全市场"></label><label>截止日期<input id="update-end" type="date"></label><span class="subtle">留空使用更新流程的默认截止日；行情完成后自动同步板块特征与原生结构。</span></form></details>
       <div class="section-heading"><h2>计算设备</h2><button id="refresh-compute" type="button" class="quiet">刷新设备状态</button></div><div class="compute-panel"><label>检查设备<select id="data-device"><option value="auto">自动选择</option><option value="cpu">CPU</option></select></label><div><p id="data-compute-status" aria-live="polite">正在检查 PyTorch 和计算设备…</p><p id="compute-devices" class="subtle"></p><p class="subtle">GPU 用于批量信号运算；结构识别、Position 与实际成交仍在 CPU。每次任务的实际计算位置以结果为准。</p></div></div>
       <div class="section-heading"><h2>任务</h2><button id="refresh-tasks" type="button" class="quiet">刷新任务</button></div><div id="task-list" class="task-list"><div class="empty-copy">尚无任务。</div></div>
       <div class="section-heading"><h2>新系统运行记录</h2><button id="refresh-runs" type="button" class="quiet">刷新记录</button></div><div id="run-list" class="run-list"><div class="empty-copy">尚无运行记录。</div></div>

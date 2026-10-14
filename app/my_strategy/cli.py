@@ -13,6 +13,9 @@ from my_strategy.runtime_env import configure_utf8_stdio
 
 
 DELEGATES = {
+    "build-board-fluent": ["-m", "my_strategy.scripts.build_board_fluent"],
+    "sync-daily-features": ["-m", "my_strategy.scripts.sync_daily_features"],
+    "refresh-native-cache": ["-m", "my_strategy.scripts.refresh_native_cache"],
     "refresh-board-knowledge": ["-m", "my_strategy.scripts.refresh_board_knowledge"],
     "build-board-features": ["-m", "my_strategy.scripts.build_board_features"],
     "board-workspace": ["-m", "my_strategy.web_dashboard.scripts.serve_board_knowledge"],

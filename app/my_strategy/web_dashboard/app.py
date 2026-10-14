@@ -8,7 +8,7 @@ import os
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from my_strategy.web_dashboard.api import router
@@ -63,12 +63,12 @@ def create_app(task_manager: TaskManager | None = None, personal_store: Personal
         return JSONResponse({"detail": str(exc)}, status_code=503)
 
     app.include_router(router)
-    configure_board_routes(app)
+    configure_board_routes(app, integrated=True)
     app.mount("/static", StaticFiles(directory=STATIC_ROOT), name="static")
 
     @app.get("/boards")
     def board_workspace():
-        return FileResponse(STATIC_ROOT / "board_knowledge.html", headers={"Cache-Control": "no-store"})
+        return RedirectResponse("/?board=1#scan", status_code=307)
 
     @app.get("/")
     @app.get("/analysis")

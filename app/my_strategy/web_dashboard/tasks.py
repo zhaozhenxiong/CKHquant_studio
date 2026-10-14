@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import signal
 import subprocess
 import sys
 import threading
@@ -77,7 +78,7 @@ class TaskManager:
         if not row:
             raise KeyError(job_id)
         job = json.loads(row[0])
-        job["result"] = self.results.get(job["run_id"]) if job["status"] == "succeeded" else None
+        job["result"] = self.results.get(job["run_id"]) if job.get("result_saved") or job["status"] in {"succeeded", "partial"} else None
         return job
 
     def list(self, limit: int = 50) -> list[dict[str, Any]]:
@@ -94,7 +95,7 @@ class TaskManager:
             return job
 
     def submit(self, kind: str, spec: dict[str, Any]) -> dict[str, Any]:
-        if kind not in {"scan", "update", "model_training", "model_validation"}:
+        if kind not in {"scan", "update", "model_training", "model_validation", "board_features", "board_sync", "board_knowledge"}:
             raise ValueError("任务类型不受支持")
         with self._lock:
             if self._closed:
@@ -134,7 +135,13 @@ class TaskManager:
             result = self._run(job_id, job["kind"], job["spec"])
             self._check(job_id)
             self.results.save(job["kind"], result)
-            updates = {"status": "succeeded", "progress": 100, "result": result, "run_id": result["run_id"]}
+            outcome = 'succeeded'
+            if job['kind'] in {'update', 'board_features', 'board_sync', 'board_knowledge'}:
+                reported = result.get('status')
+                if reported in {'partial', 'failed', 'cancelled'}: outcome = reported
+                elif reported == 'interrupted': outcome = 'partial' if result.get('market_published') or result.get('completed_boards', 0) else 'failed'
+            updates = {"status": outcome, "progress": 100 if outcome == 'succeeded' else self.get(job_id)['progress'],
+                       "result": result, "run_id": result["run_id"], "result_saved": True, 'error': result.get('error') if outcome != 'succeeded' else None}
             if "compute_info" in result:
                 updates["compute_info"] = result["compute_info"]
             self._patch(job_id, **updates)
@@ -166,6 +173,8 @@ class TaskManager:
         from my_strategy.services.czsc_analysis import strategy_config
         if kind == "update":
             return self._update(job_id, spec)
+        if kind.startswith('board_'):
+            return self._board(job_id, kind, spec)
         def report_progress(stage, current=0, total=0, failed=0, **details):
             self._check(job_id)
             previous = self.get(job_id).get("progress", 0)
@@ -191,6 +200,66 @@ class TaskManager:
         params.setdefault('start', '2026-01-01')
         return scan_trend_consensus(**params, structure_only=not spec.get('research', True), **callbacks)
 
+    def _board(self, job_id, kind, spec):
+        context = create_run_context(task=kind, config=spec, scope='daily_update' if kind == 'board_sync' else 'batch', source='web')
+        self._patch(job_id, run_id=context.run_id)
+        def progress(event):
+            self._check(job_id)
+            if not isinstance(event, dict): return
+            current = event.get('current', event.get('completed', 0)) or 0
+            total = event.get('total', 0) or 0
+            self._patch(job_id, progress=min(95, current / total * 95) if total else 0,
+                progress_detail={**{key: event[key] for key in ('stage', 'status', 'failed', 'cache_hits', 'sync_id', 'knowledge_run_id') if key in event},
+                    'stage': event.get('stage', kind), 'current': current, 'total': total, 'progress_scope': 'current_stage'})
+        if kind == 'board_knowledge':
+            from my_strategy.scripts.refresh_board_knowledge import refresh_knowledge
+            from my_strategy.web_dashboard.board_api import _refresh_summary
+            from my_strategy.services.board_fluent import source_witness
+            from my_strategy.storage.board_fluent import BoardFluentStore
+            store = BoardFluentStore()
+            identity = {'kind': kind, 'spec': spec, 'source_witness': source_witness()}
+            claim = store.acquire_sync(stable_hash(identity), identity, parent_update_id=job_id)
+            if not claim['owned']:
+                return {**(claim.get('result') or {}), 'status': 'partial', 'sync_id': claim['sync_id'],
+                    'error': '已有板块同步持有数据库，请等待该任务完成', 'run_id': context.run_id,
+                    'training_started': False}
+            outcome = 'failed'
+            result = None
+            def refresh_progress(event):
+                store.heartbeat_sync(claim['sync_id'], stage='board_knowledge',
+                    checkpoint={'knowledge_run_id': event['run_id']} if event.get('run_id') else None)
+                if event.get('run_id'): self._patch(job_id, knowledge_run_id=event['run_id'])
+                progress({**event, 'stage': 'board_knowledge', 'sync_id': claim['sync_id'],
+                    'knowledge_run_id': event.get('run_id')})
+            try:
+                result = _refresh_summary(refresh_knowledge(kinds=spec.get('kinds'), boards=spec.get('boards') or None,
+                    resume=spec.get('resume'), limit_budget=spec.get('limit_budget', 2000),
+                    min_interval=1.3, on_progress=refresh_progress))
+                result['knowledge_run_id'] = result.pop('run_id', None)
+                result['sync_id'] = claim['sync_id']
+                outcome = 'completed' if result.get('status') in {'completed', 'succeeded'} else 'failed' if result.get('status') == 'failed' else 'partial'
+            except Cancelled:
+                outcome = 'cancelled'
+                raise
+            finally:
+                store.finish_sync(claim['sync_id'], status=outcome, result=result)
+        elif kind == 'board_features':
+            from my_strategy.services.board_fluent import build_board_fluent
+            result = build_board_fluent(price_date=spec.get('price_date'), with_native=spec.get('with_native', True),
+                source_root=PROJECT_ROOT, progress=progress, check_cancel=lambda: self._check(job_id))
+        elif kind == 'board_sync':
+            from my_strategy.services.daily_feature_sync import sync_daily_features, SyncCancelled
+            try:
+                result = sync_daily_features(sync_id=spec.get('resume_sync_id'), source_root=PROJECT_ROOT,
+                    cpu_workers=spec.get('cpu_workers', 6), stock_batch_size=spec.get('stock_batch_size', 360),
+                    progress=progress, check_cancel=lambda: self._check(job_id))
+            except SyncCancelled as exc:
+                raise Cancelled(str(exc)) from exc
+        else: raise ValueError('任务类型不受支持')
+        if result.get('status') == 'busy' or result.get('reused_sync') and result.get('status') in {'running', 'queued'}:
+            result = {**result, 'status': 'partial', 'error': '已有同步任务持有数据库，请等待当前任务完成'}
+        return {**result, 'kind': kind, 'run_id': context.run_id, 'run_context': context.to_dict(), 'training_started': False}
+
     def _update(self, job_id: str, spec: dict[str, Any]) -> dict[str, Any]:
         from my_strategy.adapters.czsc_adapter import data_status
         context = create_run_context(task="czsc-data-update", config=spec, scope="daily_update", source="web", as_of_date=spec.get("end"))
@@ -209,8 +278,17 @@ class TaskManager:
                     if self.get(job_id)["status"] == "cancelling":
                         self._cancel[job_id].set()
                     if self._cancel[job_id].wait(.25):
-                        process.terminate()
-                        process.wait(timeout=15)
+                        # SIGINT lets derived workflow persist checkpoints and reap native children.
+                        process.send_signal(signal.SIGINT if os.name != 'nt' else signal.SIGTERM)
+                        try: process.wait(timeout=15)
+                        except subprocess.TimeoutExpired:
+                            try: children = psutil.Process(process.pid).children(recursive=True)
+                            except psutil.Error: children = []
+                            for child in children:
+                                try: child.kill()
+                                except psutil.Error: pass
+                            process.kill(); process.wait()
+                            psutil.wait_procs(children, timeout=5)
                         raise Cancelled("用户取消行情更新")
                     with log_path.open(encoding="utf-8", errors="replace") as progress_log:
                         progress_log.seek(offset)
@@ -223,7 +301,12 @@ class TaskManager:
                             event = json.loads(line)
                         except ValueError:
                             continue
-                        if event.get("event") == "progress":
+                        if event.get('event') == 'feature_sync':
+                            current, total = event.get('current', event.get('completed', 0)) or 0, event.get('total', 0) or 0
+                            self._patch(job_id, progress=min(95, current / total * 95) if total else 0,
+                                progress_detail={**{key: event[key] for key in ('stage', 'status', 'sync_id', 'failed') if key in event},
+                                    'stage': event.get('stage', '同步特征'), 'current': current, 'total': total, 'progress_scope': 'current_stage'})
+                        elif event.get("event") == "progress":
                             current, total = event.get("current", 0), event.get("total", 0)
                             failed += int(event.get("row", {}).get("status") in {"failed", "error"})
                             self._patch(job_id, progress=current / total * 95 if total else 0, progress_detail={"stage": "更新行情", "current": current, "total": total, "failed": failed})
@@ -237,7 +320,12 @@ class TaskManager:
         log = log_path.read_text(encoding="utf-8", errors="replace")
         marker = log.rfind('{\n  "summary":')
         update_result = json.loads(log[marker:]) if marker >= 0 else {}
-        return {"run_id": context.run_id, "run_context": context.to_dict(), "data_status": status, "update_summary": update_result.get("summary"), "log": log[-6000:]}
+        summary = update_result.get('summary') or {}
+        derived = summary.get('feature_sync') or update_result.get('feature_sync') or {}
+        return {"run_id": context.run_id, "run_context": context.to_dict(), "data_status": status,
+            "update_summary": summary, "feature_sync": derived,
+            "status": 'partial' if derived.get('status') in {'partial', 'failed', 'interrupted', 'cancelled'} else 'completed',
+            "error": derived.get('error'), "log": log[-6000:]}
 
     def close(self) -> None:
         with self._lock:

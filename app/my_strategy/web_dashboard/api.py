@@ -370,7 +370,7 @@ async def analysis(spec: AnalysisRequest, request: Request):
 
 @router.get("/tasks")
 def tasks(request: Request):
-    return {"tasks": [job for job in request.app.state.tasks.list() if job["kind"] in {"scan", "update", "model_training", "model_validation"}]}
+    return {"tasks": [job for job in request.app.state.tasks.list() if job["kind"] in {"scan", "update", "model_training", "model_validation", "board_features", "board_sync", "board_knowledge"}]}
 
 
 @router.post("/tasks", status_code=202)
@@ -383,7 +383,7 @@ def task(job_id: str, request: Request, view: Literal["scan"] | None = None):
     if view not in (None, "scan"):
         raise HTTPException(status_code=422, detail="任务视图无效")
     saved = request.app.state.tasks.get(job_id)
-    if saved.get("kind") not in {"scan", "update", "model_training", "model_validation"}:
+    if saved.get("kind") not in {"scan", "update", "model_training", "model_validation", "board_features", "board_sync", "board_knowledge"}:
         raise HTTPException(status_code=404, detail="任务不存在")
     if view == "scan" and saved.get("kind") == "scan" and saved.get("status") == "succeeded" and isinstance(saved.get("result"), dict):
         return {**saved, "result": compact_scan_view(saved["result"])}
@@ -397,7 +397,7 @@ def cancel(job_id: str, request: Request):
 
 @router.get("/runs")
 def runs(request: Request, kind: str | None = None, limit: int = Query(default=30, ge=1, le=200)):
-    allowed = {"analysis", "scan", "update", "model_training", "model_validation", "current_train", "current_validation"}
+    allowed = {"analysis", "scan", "update", "model_training", "model_validation", "current_train", "current_validation", "board_features", "board_sync", "board_knowledge"}
     if kind is not None and kind not in allowed:
         raise HTTPException(status_code=422, detail="运行类型不受支持")
     return {"runs": [run for run in request.app.state.tasks.results.list(kind, limit) if run.get("kind") in allowed]}
@@ -507,7 +507,7 @@ def run(run_id: str, request: Request, view: Literal["scan"] | None = None):
         indexed = conn.execute("SELECT kind FROM czsc_runs WHERE run_id=?", (run_id,)).fetchone()
     if indexed is None:
         raise HTTPException(status_code=404, detail="扫描运行不存在")
-    if indexed[0] not in {"analysis", "scan", "update", "model_training", "model_validation", "current_train", "current_validation"}:
+    if indexed[0] not in {"analysis", "scan", "update", "model_training", "model_validation", "current_train", "current_validation", "board_features", "board_sync", "board_knowledge"}:
         raise HTTPException(status_code=404, detail="运行不存在")
     if view is None:
         return store.get(run_id)

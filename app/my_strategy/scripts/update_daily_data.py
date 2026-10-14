@@ -335,6 +335,40 @@ def _run_quality_check(
         return {"skipped": False, "error": str(exc)}
 
 
+def _sync_after_update(args, summary, quality_summary):
+    """Derived failure does not erase a successfully committed raw update."""
+    if args.skip_feature_sync:
+        return {"status": "skipped", "reason": "explicit maintenance skip", "training_started": False}
+    if (quality_summary or {}).get("has_errors") or (quality_summary or {}).get("error"):
+        return {"status": "blocked", "reason": "raw quality check did not pass", "training_started": False}
+    _emit_stage("feature_sync", "行情与元数据更新完成，正在同步当前特征…")
+    import signal
+    import threading
+    from my_strategy.services.daily_feature_sync import sync_daily_features, SyncCancelled
+    cancelled = threading.Event()
+    def stop(_signal, _frame): cancelled.set()
+    handlers = {number: signal.signal(number, stop) for number in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        storage = get_data_access()
+        def emit(value):
+            sys.stderr.write(json.dumps({"event": "feature_sync", **value}, ensure_ascii=False) + "\n")
+            sys.stderr.flush()
+        return sync_daily_features(raw_db_path=storage.settings.raw_db,
+            kb_db_path=args.feature_kb_db, fluent_db_path=args.feature_fluent_db,
+            native_cache_db_path=args.feature_native_cache_db, calendar_run_id=args.feature_calendar_run_id,
+            sync_id=args.feature_sync_id, parent_update_id=summary["update_id"],
+            cpu_workers=args.feature_cpu_workers, stock_batch_size=args.feature_stock_batch_size,
+            kb_request_budget=args.feature_kb_budget, kb_min_interval=args.feature_kb_min_interval,
+            source_root=args.feature_source_root, artifacts_root=args.feature_artifacts_root,
+            progress=emit, check_cancel=cancelled.is_set)
+    except (SyncCancelled, KeyboardInterrupt) as exc:
+        return {"status": "cancelled", "error": str(exc) or "daily feature sync interrupted", "training_started": False}
+    except Exception as exc:
+        return {"status": "failed", "error": str(exc), "training_started": False}
+    finally:
+        for number, handler in handlers.items(): signal.signal(number, handler)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Update KHQuant DB-first local daily data cache.")
     parser.add_argument("--config", default="my_strategy/configs/data_config.yaml")
@@ -350,6 +384,15 @@ def main() -> None:
     parser.add_argument("--skip-metadata-refresh", action="store_true", help="Skip refreshing stock metadata after daily bars update.")
     parser.add_argument("--workers", type=int, default=8, help="Concurrent stock download workers (1 = serial).")
     parser.add_argument("--no-progress-bar", action="store_true", help="Disable the interactive progress bar.")
+    parser.add_argument("--skip-feature-sync", action="store_true", help="仅维护时显式跳过当前特征同步。")
+    parser.add_argument("--feature-sync-id", help="恢复相同输入的未完成特征同步。")
+    parser.add_argument("--feature-calendar-run-id")
+    parser.add_argument("--feature-cpu-workers", type=int, default=6)
+    parser.add_argument("--feature-stock-batch-size", type=int, default=360)
+    parser.add_argument("--feature-kb-budget", type=int, default=2000)
+    parser.add_argument("--feature-kb-min-interval", type=float, default=1.3)
+    for option in ("kb-db", "fluent-db", "native-cache-db", "source-root", "artifacts-root"):
+        parser.add_argument("--feature-" + option, type=Path)
     args = parser.parse_args()
 
     started_at = datetime.now().astimezone().isoformat(timespec="seconds")
@@ -445,7 +488,8 @@ def main() -> None:
         quality_summary=quality_summary,
     )
     summary["metadata_refresh"] = metadata_summary
-    exit_code = 2 if summary["failed"] or (quality_summary or {}).get("has_errors") else 0
+    summary["feature_sync"] = _sync_after_update(args, summary, quality_summary)
+    exit_code = 130 if summary["feature_sync"].get("status") == "cancelled" else 2 if summary["failed"] or (quality_summary or {}).get("has_errors") else 0
     if args.json:
         output = {"summary": summary, "rows": report.to_dict("records")}
         print(json.dumps(output, ensure_ascii=False, indent=2, default=str))
