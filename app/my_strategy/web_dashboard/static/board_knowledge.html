@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>同花顺板块知识库</title><link rel="stylesheet" href="/static/css/board_knowledge.css"></head>
+<body><main>
+<header><p class="eyebrow">KHQuant · 板块环境</p><h1>同花顺板块知识库</h1><p>查看当前行业、概念归属及最新可用行情的板块强弱。过去行情仅用于计算当前滚动指标，不补历史成员变化。</p></header>
+<section aria-label="数据状态"><h2>数据状态</h2><p id="status" role="status">正在读取本地知识库…</p><p id="source" class="muted"></p><button id="refresh-status">刷新状态</button><button id="refresh-data">更新同花顺资料</button><button id="build-features">计算当前板块特征</button><p id="job" role="status"></p></section>
+<section><h2>股票所属板块</h2><form id="lookup"><label>股票代码 <input id="symbol" value="000001.SZ" pattern="[0-9]{6}\.(SH|SZ|BJ)" required></label><button>查询当前成员</button></form><p id="membership-note" class="muted"></p><div id="memberships"></div><div id="stock-features"></div></section>
+<section><h2>板块目录</h2><label>类型 <select id="kind"><option value="industry">行业</option><option value="concept">概念</option></select></label><p id="catalog-count" class="muted"></p><div id="catalog"></div></section>
+<section><h2 id="detail-title">板块强弱</h2><p id="feature-note" class="muted">选择板块查看已计算的特征。数据访问不会触发全量重算。</p><div id="features"></div></section>
+<p id="error" role="alert"></p>
+</main><script src="/static/js/board_knowledge.js" defer></script></body></html>

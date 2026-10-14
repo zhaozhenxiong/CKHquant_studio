@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from my_strategy.web_dashboard.api import router
+from my_strategy.web_dashboard.board_api import configure_board_routes
 from my_strategy.web_dashboard.config import STATIC_ROOT
 from my_strategy.web_dashboard.tasks import TaskManager
 from my_strategy.storage.personal_portfolio import PersonalStore
@@ -62,7 +63,12 @@ def create_app(task_manager: TaskManager | None = None, personal_store: Personal
         return JSONResponse({"detail": str(exc)}, status_code=503)
 
     app.include_router(router)
+    configure_board_routes(app)
     app.mount("/static", StaticFiles(directory=STATIC_ROOT), name="static")
+
+    @app.get("/boards")
+    def board_workspace():
+        return FileResponse(STATIC_ROOT / "board_knowledge.html", headers={"Cache-Control": "no-store"})
 
     @app.get("/")
     @app.get("/analysis")

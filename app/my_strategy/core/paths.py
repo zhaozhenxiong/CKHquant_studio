@@ -22,6 +22,7 @@ ARTIFACT_ROOT = _root("KHQUANT_ARTIFACT_ROOT", MY_STRATEGY_ROOT / "artifacts")
 ARTIFACT_RUNS_ROOT = ARTIFACT_ROOT / "runs"
 LOG_ROOT = _root("KHQUANT_LOG_ROOT", DATA_ROOT / "logs")
 METADATA_ROOT = _root("KHQUANT_METADATA_ROOT", DATA_ROOT / "metadata")
+BASIC_KB_DB_PATH = _root("KHQUANT_BASIC_KB_DB", RAW_DATA_ROOT / "stock_basic" / "basic_kb.db")
 STOCK_METADATA_CSV_PATH = METADATA_ROOT / "stock_metadata.csv"
 ALL_A_STOCK_LIST_PATH = RAW_DATA_ROOT / "stock_basic" / "all_a_stock_list.parquet"
 CUSTOM_POOL_PATH = RAW_DATA_ROOT / "custom_pool" / "my_pool.csv"
