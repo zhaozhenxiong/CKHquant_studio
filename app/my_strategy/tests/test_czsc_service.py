@@ -1,4 +1,4 @@
-"""New task lifecycle, portfolio accounting and HTTP contract checks."""
+"""Current reference task lifecycle, coverage and HTTP contract checks."""
 from __future__ import annotations
 
 import threading
@@ -11,7 +11,7 @@ import pandas as pd
 
 from my_strategy.storage.czsc_results import ResultStore
 from my_strategy.web_dashboard.app import create_app
-from my_strategy.web_dashboard.tasks import TaskManager, aggregate_accounts, aggregate_compute
+from my_strategy.web_dashboard.tasks import TaskManager, aggregate_compute
 
 
 @pytest.fixture
@@ -54,21 +54,12 @@ def test_failure_is_visible_and_result_survives_restart(manager, monkeypatch):
     monkeypatch.setattr(manager, "_run", broken)
     job = manager.submit("scan", {})
     assert "bad source" in wait_terminal(manager, job["job_id"])["error"]
-    result = {"run_id": "czsc-test", "metrics": {"net_return": .1}, "daily": []}
-    manager.results.save("backtest", result)
+    result = {"run_id": "czsc-test", "rows": [], "analysis_mode": "reference"}
+    manager.results.save("scan", result)
     another = ResultStore(manager.results.db_path, manager.results.runs_root)
     assert another.get("czsc-test") == result
     with pytest.raises(ValueError):
-        another.save("backtest", {"run_id": "../escape"})
-
-
-def test_equal_accounts_keep_failed_budget_in_cash():
-    accounts = [{"daily": [{"date": "2026-09-01", "equity": 50}, {"date": "2026-09-02", "equity": 45}], "trades": [{"date": "2026-09-02", "symbol": "600519.SH", "fee": 1}], "rejections": []}]
-    result = aggregate_accounts(accounts, 100, 2)
-    assert result["daily"][-1]["equity"] == 95
-    assert result["metrics"]["net_return"] == pytest.approx(-.05)
-    assert result["metrics"]["max_drawdown"] == pytest.approx(.05)
-    assert result["metrics"]["fees"] == 1
+        another.save("scan", {"run_id": "../escape"})
 
 
 def test_new_http_contract_and_old_routes_reject(manager):
@@ -91,6 +82,14 @@ def test_optional_token_does_not_expose_secret(manager, monkeypatch):
         response = client.get("/api/tasks", headers={"Authorization": "Bearer test-secret"})
         assert response.status_code == 200
         assert "test-secret" not in response.text
+
+
+def test_reference_http_rejects_retired_account_and_execution_fields(manager):
+    with TestClient(create_app(manager)) as client:
+        for field,value in (("account_initial_cash",100000),("initial_cash",100000),("entry_policy","risk")):
+            assert client.post("/api/analysis",json={"symbol":"000001.SZ",field:value}).status_code==422
+        for field,value in (("initial_cash",100000),("entry_policy","risk")):
+            assert client.post("/api/tasks",json={"kind":"scan","spec":{field:value}}).status_code==422
 
 
 def test_structure_reference_scan_preserves_failures(manager, monkeypatch):
@@ -146,12 +145,12 @@ def test_interactive_analysis_saves_a_reproducible_run(manager, monkeypatch):
 def test_default_dates_device_and_batch_http_contract(manager, monkeypatch):
     monkeypatch.setattr(manager, "submit", lambda kind, spec: {"kind": kind, "spec": spec})
     with TestClient(create_app(manager)) as client:
-        for kind in ("scan", "backtest"):
-            response = client.post("/api/tasks", json={"kind": kind, "spec": {"device": "cuda:1", "cpu_workers": 4, "batch_size": 32}})
-            assert response.status_code == 202
-            assert response.json()["spec"]["start"] == "2026-01-01"
-            assert response.json()["spec"]["device"] == "cuda:1"
-        historical = client.post("/api/tasks", json={"kind": "backtest", "spec": {"start": "2024-01-01", "end": "2024-09-30", "device": "cpu"}})
+        response = client.post("/api/tasks", json={"kind": "scan", "spec": {"device": "cuda:1", "cpu_workers": 4, "batch_size": 32}})
+        assert response.status_code == 202
+        assert response.json()["spec"]["start"] == "2026-01-01"
+        assert response.json()["spec"]["device"] == "cuda:1"
+        assert client.post("/api/tasks", json={"kind":"backtest"}).status_code == 422
+        historical = client.post("/api/tasks", json={"kind": "scan", "spec": {"start": "2024-01-01", "end": "2024-09-30", "device": "cpu"}})
         assert historical.status_code == 202
         assert historical.json()["spec"]["start"] == "2024-01-01"
         assert "start" not in client.post("/api/tasks", json={"kind": "update"}).json()["spec"]

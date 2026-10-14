@@ -24,7 +24,7 @@ const assert=require('node:assert/strict'),path=require('path');
 const markers=require(path.join(process.argv[1],'chart_markers.js'));
 const symbol='002436.SZ',version='trend_consensus';
 const bar=(time,closed=true)=>({time,open:10,high:12,low:9,close:11,is_closed:closed});
-const event=(id,date,action='BUY')=>({symbol,source:'consensus',source_frequency:'日线',version,
+const event=(id,date,action='BUY')=>({symbol,source:'reference_consensus',reference_only:true,source_frequency:'日线',version,
   event_id:id,date,time:date,evidence_date:date,available_at:date+'T15:00:00+08:00',
   first_available_at:date+'T15:00:00+08:00',action,reference_price:11,reference_price_date:date});
 const events=[event('final-one','2026-07-01'),event('final-two','2026-07-02')];
@@ -69,7 +69,7 @@ for(const frequency of ['周线','月线']) {
   const end=frequency==='周线'?'2026-07-03':'2026-07-31';
   const closure=frequency==='周线'?'2026-07-06':'2026-08-03';
   const base={frequency,symbol,consensusVersion:version,up:'red',down:'green'};
-  const event={symbol,version,source:'consensus',source_frequency:frequency,event_id:'native',
+  const event={symbol,version,source:'reference_consensus',reference_only:true,source_frequency:frequency,event_id:'native',
     time:end,date:end,source_period_date:end,evidence_date:closure,first_available_at:closure+'T15:00:00+08:00',action:'SELL'};
   const early=markers.build({...base,events:[event],bars:[bar(end,false)],dailyBars:[bar(end)],asOf:end});
   assert.equal(early.intentCount,0);assert.equal(early.markers.length,0);
@@ -115,13 +115,13 @@ const code=fs.readFileSync(path.join(root,'workbench.js'),'utf8').replace('init(
 const {state,renderAnalysis,bind,resetChartSelection}=interactions;
 const dates=['2026-07-01','2026-07-02','2026-07-03'],symbol='002436.SZ',version='trend_consensus';
 const bars=dates.map(time=>({time,open:10,high:12,low:9,close:11,volume:100,is_closed:true}));
-const events=[dates[0],dates[2]].map((date,i)=>({date,time:date,evidence_date:date,first_available_at:date+'T15:00:00+08:00',source_frequency:'日线',source:'consensus',action:i?'SELL':'BUY',symbol,event_id:'final-'+i,reference_price:i?13:10.75,reference_price_date:date}));
-state.analysis={symbol,as_of:dates[2],data_end:dates[2],consensus_decisions:{version,config:{version},rows:events.map(e=>({...e,emitted:true})),events},
- chart_evidence:{rows:dates.map((date,i)=>({date,reference_close:10.75+i,reference_price_date:date,agents:{}}))},
+const events=[dates[0],dates[2]].map((date,i)=>({date,time:date,evidence_date:date,first_available_at:date+'T15:00:00+08:00',source_frequency:'日线',source:'reference_consensus',reference_only:true,action:i?'SELL':'BUY',symbol,event_id:'final-'+i,reference_price:i?13:10.75,reference_price_date:date}));
+state.analysis={symbol,analysis_mode:'reference',reference_points:events.map(e=>({...e,reference_only:true})),as_of:dates[2],data_end:dates[2],consensus_decisions:{version,config:{version},rows:events.map(e=>({...e,emitted:true})),events},
+ chart_evidence:{rows:dates.map((date,i)=>({date,symbol,analysis_mode:'reference',reference_close:10.75+i,reference_price_date:date,agents:{}}))},
  frequencies:{'日线':{bars},'周线':{bars:[{...bars[2],is_closed:false}]},'月线':{bars:[{...bars[2],is_closed:false}]}}};
 state.query={symbol,start:dates[0],end:dates[2]};state.dates=dates;element('layer-signals').checked=true;
 bind();renderAnalysis(false);
-assert(element('marker-summary').textContent.includes('最终 B/S 2 个 · 周期标记 2 个'));
+assert(element('marker-summary').textContent.includes('最终共识 B 1 / S 1 · 周期标记 2 个'));
 const hover=time=>crosshair({time,point:{x:420,y:430},seriesData:new Map([[firstSeries,{close:11}]])});
 const clicked=time=>click({time,point:{x:750,y:700}});
 hover(dates[0]);assert.equal(lines.size,0);assert.equal(points.size,0);assert(element('chart-evidence-popup').hidden);
@@ -134,8 +134,8 @@ documentListeners.click({target:{closest:()=>close}});assert.equal(lines.size,0)
 clicked(dates[0]);clicked(dates[1]);assert.equal(lines.size,0);assert.equal(points.size,0);
 clicked(dates[0]);windowListeners.keydown({key:'Escape'});assert.equal(lines.size,0);assert.equal(points.size,0);
 clicked(dates[0]);weeklyButton.listeners.click[0]();assert.equal(lines.size,0);assert.equal(points.size,0);
-assert.equal(firstSeries.markers.length,2);assert(element('marker-summary').textContent.includes('日线最终点投影于形成中周期'));
-const buy=firstSeries.markers.find(marker=>marker.text==='B');click({time:dates[2],hoveredObjectId:buy.id,point:{x:750,y:700}});
+assert.equal(firstSeries.markers.length,2);assert(element('marker-summary').textContent.includes('日线参考点投影于形成中周期'));
+const buy=firstSeries.markers.find(marker=>marker.text==='共B');click({time:dates[2],hoveredObjectId:buy.id,point:{x:750,y:700}});
 assert.equal([...lines][0].price,10.75);assert.deepEqual([...points][0].data,[{time:dates[2],value:10.75}]);
 assert(element('chart-evidence-popup').innerHTML.includes('日线已确认／周期形成中'));
 const dateButton=newElement('button');dateButton.dataset.evidenceDate=dates[2];

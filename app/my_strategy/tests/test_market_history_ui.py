@@ -48,19 +48,15 @@ def test_aggregate_missingness_proportions_unknown_industry_and_causal_semantics
 const original=JSON.stringify(summary),parsed=ui.normalize(summary);
 assert.equal(ui.metricValue(summary.daily[0],'direction_buy','rate'),null);
 assert.equal(ui.metricText(summary.daily[0],'direction_buy','count'),'—');
-assert.equal(ui.metricText(summary.daily[1],'account_buy','rate'),'0.0%');
 assert.equal(ui.metricText(summary.daily[1],'direction_buy','rate'),'40.0%');
 const missingButKnown={...summary.daily[0],coverage:{...summary.daily[0].coverage,account_available:1},counts:{...summary.daily[0].counts,account_sell:1,holding:1}};
-assert.equal(ui.metricText(missingButKnown,'account_sell','count'),'1');
-assert.equal(ui.metricText(missingButKnown,'holding','count'),'1');
-assert.equal(ui.metricText(missingButKnown,'direction_sell','count'),'—');
 assert.equal(ui.metricText({...missingButKnown,coverage:{...missingButKnown.coverage,account_available:0}},'account_sell','count'),'—');
 assert.equal(ui.metricText({...summary.daily[1],universe_size:0},'direction_buy','rate'),'—');
 assert.equal(ui.supportText(null),'未评估');assert.equal(ui.supportText(0),'0.0');
 const state={date:'2026-10-09',mode:'rate',metric:'direction_buy',allSectors:true,sector:'',event:'',filterState:'',page:1};
 const html=ui.viewHtml(parsed,state);
 assert(html.includes('未知板块'));assert(html.includes('50%')); // Industry denominator is 2, not the scan's 10.
-assert(html.includes('缺模型不是零分'));assert(html.includes('空仓卖方方向不代表卖出成交'));
+assert(html.includes('缺模型不是零分'));assert(html.includes('B/S 与量价评分用于分析参考。'));
 assert(html.includes('当前分类快照映射到历史'));assert(html.includes('需 未评估 · 供 未评估'));
 assert(html.includes('灰色纹理表示无当日行情覆盖'));assert(!html.includes('NaN'));
 assert.equal(JSON.stringify(summary),original);

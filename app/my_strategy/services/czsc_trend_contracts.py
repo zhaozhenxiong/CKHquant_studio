@@ -23,6 +23,9 @@ HELD_SPLIT_POLICY = "actual_held_episode_first_observed_group_each_row_real_labe
 HELD_ECONOMIC_WEIGHTING = "selected_segment_inverse_rows_per_actual_held_episode"
 ENTRY_HEADS = frozenset({"entry", "return", "loss"})
 HOLDING_HEADS = frozenset({"ma_exit", "exit", "exit_advantage"})
+L2_HOLDING_HEADS = frozenset({"exit", "exit_advantage"})
+HELD_TRAINING_POPULATION = "preregistered_E1_actual_held_Broker_pairs_no_L2_entry_feedback"
+HELD_CONDITION_DOMAIN = "actual_E1_held_prefix_same_frozen_entry_plan_and_MA_exit_binding"
 CONFIG_PATH = MY_STRATEGY_ROOT / "configs/czsc_trend_strategy.json"
 
 
@@ -35,6 +38,35 @@ def head_dependency_policy(head):
             "economic_group_identity": "symbol_actual_held_episode_id",
             "attempt_identity": "actual_held_episode_signal_close_prefix_state"}
     raise ValueError("unknown trend interval head")
+
+
+def validate_holding_population(population, *, contract=None):
+    """Only the separately frozen actual E1 account may supply L2 exits."""
+    if (not isinstance(population, dict)
+            or population.get("version") != HELD_TRAINING_POPULATION
+            or population.get("stage") != "E1" or population.get("reference_mode") != "E1"
+            or population.get("conditional_holding_domain") != HELD_CONDITION_DOMAIN
+            or population.get("pending_L2_entry_or_exit_used") is not False
+            or population.get("candidate_clones_are_holding_population") is not False
+            or population.get("holding_checkpoint_upgrade") is not False
+            or population.get("split_policy") != HELD_SPLIT_POLICY
+            or population.get("economic_weighting") != HELD_ECONOMIC_WEIGHTING):
+        raise ValueError("L2 holding population must be frozen actual E1 paired accounts without L2 feedback")
+    for field in ("manifest_sha256", "pooled_exits_sha256", "records_hash",
+                  "source_snapshot_hash", "continuation_policy_hash", "candidate_policy_hash"):
+        if not isinstance(population.get(field), str) or not population[field]:
+            raise ValueError("L2 holding population lacks frozen source identity: " + field)
+    for field, expected in (("manifest_path", "dataset/E1/manifest.json"),
+                            ("pooled_exits_path", "dataset/E1/exits.parquet")):
+        if population.get(field) != expected:
+            raise ValueError("L2 holding population cannot import a final-entry account or external asset")
+    if contract is not None:
+        if (contract.get("holding_population_hash") != stable_hash(population)
+                or contract.get("conditional_holding_domain") != HELD_CONDITION_DOMAIN
+                or any(contract.get(field) != population[field] for field in
+                    ("source_snapshot_hash", "continuation_policy_hash", "candidate_policy_hash"))):
+            raise ValueError("L2 holding population and target source/continuation binding mismatch")
+    return population
 
 
 def _merge(base, changes):

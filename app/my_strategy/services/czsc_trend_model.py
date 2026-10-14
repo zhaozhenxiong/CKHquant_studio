@@ -24,6 +24,11 @@ from my_strategy.services.czsc_trend_contracts import STRATEGY_ID, TREND_TARGET
 FAMILY = STRATEGY_ID
 HEAD = "trend_direction"
 CLASSES = ("UP", "DOWN", "NEUTRAL")
+CALIBRATION_METHOD = "separate_chronological_positive_temperature_zero_intercepts"
+# Fixed before seeing calibration/policy outcomes. These are model-fit choices,
+# never strategy or trading thresholds. The final fit always uses all train rows.
+TRAIN_CANDIDATES = ((1., "none"), (.1, "none"), (1., "information_balanced"), (.1, "information_balanced"))
+INNER_SAMPLE_CAP = 100_000
 TARGET = TREND_TARGET
 FEATURE_VERSION = "czsc_trend_independent_MA_direction"
 DEFAULT_TREND_CONFIG = {"horizon_sessions": 10, "neutral_floor": .01, "atr_multiple": 1.,
@@ -212,7 +217,7 @@ def trend_time_masks(frame, fold):
 
 
 def _softmax(logits):
-    values = np.asarray(logits, float); values -= values.max(axis=1, keepdims=True)
+    values = np.array(logits, dtype=float, copy=True); values -= values.max(axis=1, keepdims=True)
     ex = np.exp(np.clip(values, -60, 0)); return ex/ex.sum(axis=1, keepdims=True)
 
 
@@ -234,26 +239,146 @@ def _concurrency_weights(frame, mask):
 
 
 def trend_metrics(labels, probabilities):
-    from sklearn.metrics import log_loss, f1_score, confusion_matrix
+    from sklearn.metrics import log_loss, f1_score, confusion_matrix, precision_recall_fscore_support
     y = np.asarray(labels, int); p = np.asarray(probabilities, float)
+    predictions = p.argmax(axis=1)
+    precision, recall, f1, support = precision_recall_fscore_support(y, predictions, labels=[0,1,2], zero_division=0)
     return {"rows": len(y), "class_counts": {name:int((y==i).sum()) for i,name in enumerate(CLASSES)},
+        "predicted_class_counts": {name:int((predictions==i).sum()) for i,name in enumerate(CLASSES)},
+        "per_class": {name:{"precision":float(precision[i]), "recall":float(recall[i]),
+            "f1":float(f1[i]), "support":int(support[i])} for i,name in enumerate(CLASSES)},
         "log_loss": float(log_loss(y, p, labels=[0,1,2])),
         "brier_multiclass": float(np.mean(np.sum((p-np.eye(3)[y])**2, axis=1))),
         "macro_f1": float(f1_score(y, p.argmax(axis=1), labels=[0,1,2], average="macro", zero_division=0)),
         "confusion": confusion_matrix(y, p.argmax(axis=1), labels=[0,1,2]).tolist(),
-        "mean_probability": dict(zip(CLASSES, p.mean(axis=0).tolist()))}
+        "mean_probability": dict(zip(CLASSES, p.mean(axis=0).tolist())),
+        "probability_quantiles": {name:dict(zip(("p05","p50","p95"),np.quantile(p[:,i],[.05,.5,.95]).tolist()))
+            for i,name in enumerate(CLASSES)}}
+
+
+def _fit_temperature(logits, labels, weights):
+    """Fit one positive scale; no class intercept can rewrite UP/DOWN ranking."""
+    from scipy.optimize import minimize_scalar
+    z=np.asarray(logits,float); y=np.asarray(labels,int); w=np.asarray(weights,float)
+    if z.shape!=(len(y),3) or len(w)!=len(y) or not np.isfinite(z).all() or not np.isfinite(w).all() or (w<=0).any():
+        raise ValueError("invalid trend temperature calibration inputs")
+    def objective(log_temperature):
+        p=_softmax(z/math.exp(float(log_temperature)))
+        return float(np.dot(w,-np.log(np.maximum(p[np.arange(len(y)),y],1e-12)))/w.sum()+.001*log_temperature**2)
+    fit=minimize_scalar(objective,bounds=(-2.,2.),method="bounded",options={"xatol":1e-10})
+    if not fit.success or not math.isfinite(float(fit.x)):
+        raise ValueError("three-class temperature calibration failed")
+    temperature=math.exp(float(fit.x)); calibrated=_softmax(z/temperature)
+    changed=int(np.count_nonzero(z.argmax(axis=1)!=calibrated.argmax(axis=1)))
+    if changed: raise ValueError("temperature calibration changed trend class ordering")
+    return {"method":CALIBRATION_METHOD,"temperature":temperature,"bias":[0.,0.,0.],
+        "fit_scope":"mature_calibration_only","argmax_changed":changed,"optimizer_success":True,
+        "objective_uncalibrated":objective(0.),"objective_calibrated":objective(float(fit.x)),
+        "log_temperature_bounds":[-2.,2.]}
+
+
+def _validate_calibration(calibration):
+    if (calibration.get("method")!=CALIBRATION_METHOD or calibration.get("bias")!=[0.,0.,0.]
+            or not isinstance(calibration.get("temperature"),(int,float))
+            or not math.isfinite(calibration["temperature"]) or calibration["temperature"]<=0):
+        raise ValueError("trend requires positive-temperature zero-intercept calibration")
+
+
+def _class_factors(labels, information_weights, method):
+    if method=="none":return np.ones(3)
+    if method!="information_balanced":raise ValueError("unknown preregistered class weighting")
+    totals=np.bincount(np.asarray(labels,int),weights=information_weights,minlength=3)
+    if (totals<=0).any():raise ValueError("inner training requires all trend classes")
+    return totals.sum()/(3*totals)
+
+
+def _fit_logistic(x,y,weights,choice,seed):
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.exceptions import ConvergenceWarning
+    from threadpoolctl import threadpool_limits
+    import warnings
+    model=LogisticRegression(C=choice[0],max_iter=500,solver="lbfgs",random_state=seed)
+    with warnings.catch_warnings(record=True) as caught,threadpool_limits(limits=2):
+        warnings.simplefilter("always",ConvergenceWarning)
+        model.fit(x,np.asarray(y,int),sample_weight=weights)
+    convergence={"iterations":model.n_iter_.tolist(),"max_iter":500,
+        "converged":not any(issubclass(w.category,ConvergenceWarning) for w in caught),
+        "warnings":[str(w.message) for w in caught if issubclass(w.category,ConvergenceWarning)]}
+    return model,convergence
+
+
+def _training_choice(data, train, x, labels, seed):
+    """Select only within chronological training, with label-end purge.
+
+    Date/symbol ordered evenly spaced fit/evaluation samples cap candidate CPU
+    work. Information weights are computed on the complete inner populations
+    before sampling; final fitting is never sampled.
+    """
+    train_days=sorted(set(data.loc[train,"date"].tolist()))
+    cut=train_days[max(0,min(len(train_days)-1,int(len(train_days)*.8)-1))]
+    dates=data.date.to_numpy(); ends=data.label_end.fillna("").to_numpy()
+    inner_train=train&(dates<=cut)&(ends<=cut)
+    inner_validation=train&(dates>cut)
+    audit={"method":"preregistered_train_only_chronological_macro_f1_then_nll",
+        "candidates":[{"C":c,"class_weighting":w} for c,w in TRAIN_CANDIDATES],
+        "inner_train_end":cut,"inner_validation_end":max(train_days),
+        "selection_scope":"training_only_no_calibration_or_policy","candidate_sample_cap":INNER_SAMPLE_CAP,
+        "full_population_rows":{"train":int(inner_train.sum()),"validation":int(inner_validation.sum())},
+        "class_counts":{name:{c:int(np.count_nonzero(labels[mask]==i)) for i,c in enumerate(CLASSES)}
+            for name,mask in (("train",inner_train),("validation",inner_validation))},"results":[]}
+    if min(v for counts in audit["class_counts"].values() for v in counts.values())<2:
+        audit.update(selected={"C":1.,"class_weighting":"none"},reason="insufficient_inner_classes_fixed_preregistered_baseline")
+        return TRAIN_CANDIDATES[0],audit
+    def selected(mask):
+        positions=np.flatnonzero(mask)
+        ordering=data.iloc[positions][["date","symbol","observation_id"]].sort_values(["date","symbol","observation_id"]).index
+        # Position, rather than externally supplied dataframe index, is authoritative.
+        lookup=pd.Series(np.arange(len(data)),index=data.index)
+        positions=lookup.loc[ordering].to_numpy(int)
+        keep=np.linspace(0,len(positions)-1,min(len(positions),INNER_SAMPLE_CAP),dtype=int)
+        return positions[keep]
+    ti,vi=selected(inner_train),selected(inner_validation)
+    if len(np.unique(labels[ti]))!=3 or len(np.unique(labels[vi]))!=3:
+        audit.update(selected={"C":1.,"class_weighting":"none"},reason="bounded_inner_sample_missing_class_fixed_preregistered_baseline")
+        return TRAIN_CANDIDATES[0],audit
+    pre=_fit_preprocess(x[inner_train]); tx=_transform(x[ti],pre); vx=_transform(x[vi],pre)
+    full_weights=_concurrency_weights(data,inner_train)
+    by_position=np.zeros(len(data));by_position[inner_train]=full_weights
+    audit["sampled_rows"]={"train":len(ti),"validation":len(vi)}
+    audit["inner_train_label_end"]=str(data.loc[inner_train,"label_end"].max())
+    scores=[]
+    for choice in TRAIN_CANDIDATES:
+        factors=_class_factors(labels[inner_train],full_weights,choice[1])
+        model,convergence=_fit_logistic(tx,labels[ti],by_position[ti]*factors[labels[ti].astype(int)],choice,seed)
+        metrics=trend_metrics(labels[vi],_softmax(model.decision_function(vx)))
+        result={"C":choice[0],"class_weighting":choice[1],"class_factors":dict(zip(CLASSES,factors.tolist())),
+            "convergence":convergence,"validation_metrics":metrics}
+        audit["results"].append(result);scores.append((metrics["macro_f1"],-metrics["log_loss"]))
+    winner=max(range(len(scores)),key=lambda i:scores[i]);choice=TRAIN_CANDIDATES[winner]
+    audit.update(selected={"C":choice[0],"class_weighting":choice[1]},reason="best_inner_chronological_macro_f1_then_nll")
+    return choice,audit
+
+
+def _input_diagnostics(x, xx, train, calibration, policy, pre):
+    reference_mean=np.asarray(pre["mean"]); reference_scale=np.asarray(pre["scale"])
+    return {"ordered_columns":list(MA_TREND_COLUMNS),"preprocess_scope":"mature_training_only",
+        "segments":{name:{"rows":int(mask.sum()),
+            "nonfinite_by_column":dict(zip(MA_TREND_COLUMNS,(~np.isfinite(x[mask])).sum(axis=0).tolist())),
+            "constant_columns":[c for c,s in zip(MA_TREND_COLUMNS,np.nanstd(x[mask],axis=0)) if s<1e-8],
+            "mean_shift_training_scales":dict(zip(MA_TREND_COLUMNS,((np.nanmean(x[mask],axis=0)-reference_mean)/reference_scale).tolist())),
+            "clipped_fraction_by_column":dict(zip(MA_TREND_COLUMNS,(np.abs(xx[mask])>=8).mean(axis=0).tolist()))}
+            for name,mask in (("train",train),("calibration",calibration),("policy",policy))}}
 
 
 def train_trend_head(dataset, output_dir, fold, config, *, contract):
-    """Train-only logistic preprocessing; independent vector calibration segment."""
-    from sklearn.linear_model import LogisticRegression
-    from scipy.optimize import minimize
+    """Train-only candidate selection; separate rank-preserving calibration."""
     import joblib
-    from threadpoolctl import threadpool_limits
     if contract != dataset.attrs.get("label_contract") or contract.get("contract_hash") != stable_hash({k:v for k,v in contract.items() if k!="contract_hash"}):
         raise ValueError("trend dataset/target identity mismatch")
     _validate_trend_contract(contract)
-    data = dataset if dataset.observation_id.is_unique else dataset.drop_duplicates("observation_id").reset_index(drop=True)
+    data = (dataset if dataset.observation_id.is_unique else dataset.drop_duplicates("observation_id")).reset_index(drop=True)
+    data["date"]=pd.to_datetime(data.date).dt.strftime("%Y-%m-%d")
+    data["label_end"]=pd.to_datetime(data.label_end,errors="coerce").dt.strftime("%Y-%m-%d")
     train, calibration, policy = trend_time_masks(data, fold); cfg = trend_config(config)
     labels = pd.to_numeric(data.label).to_numpy(float)
     counts = {name: {c:int((labels[m] == i).sum()) for i,c in enumerate(CLASSES)}
@@ -262,19 +387,20 @@ def train_trend_head(dataset, output_dir, fold, config, *, contract):
         if min(counts[name].values()) < limit:
             raise ValueError("insufficient mature trend classes "+name+" "+str(counts[name]))
     started = local_now().isoformat(); x = data[list(MA_TREND_COLUMNS)].to_numpy(float)
+    choice,selection=_training_choice(data,train,x,labels,int(config.get("seed",42)))
     pre = _fit_preprocess(x[train]); xx = _transform(x, pre)
-    model = LogisticRegression(C=1., max_iter=500, solver="lbfgs", random_state=int(config.get("seed",42)))
-    with threadpool_limits(limits=2): model.fit(xx[train], labels[train].astype(int), sample_weight=_concurrency_weights(data,train))
+    information_weights=_concurrency_weights(data,train)
+    factors=_class_factors(labels[train],information_weights,choice[1])
+    model,convergence=_fit_logistic(xx[train],labels[train],information_weights*factors[labels[train].astype(int)],choice,int(config.get("seed",42)))
     if list(model.classes_) != [0,1,2]: raise ValueError("trend model classes changed")
     logits = model.decision_function(xx[calibration]); cy = labels[calibration].astype(int); cw = _concurrency_weights(data,calibration)
-    def objective(parameters):
-        t = math.exp(float(parameters[0])); bias = np.r_[parameters[1:], 0.]
-        p = _softmax(logits/t+bias)
-        return float(np.sum(cw*-np.log(np.maximum(p[np.arange(len(cy)),cy],1e-12)))/cw.sum()+.001*np.sum(parameters**2))
-    fit = minimize(objective, np.zeros(3), method="L-BFGS-B", bounds=[(-2,2),(-5,5),(-5,5)])
-    if not fit.success or not np.isfinite(fit.x).all(): raise ValueError("three-class calibration failed")
-    cal = {"method":"separate_chronological_temperature_and_class_intercepts", "temperature":math.exp(float(fit.x[0])), "bias":np.r_[fit.x[1:],0.].tolist()}
-    def probabilities(mask):return _softmax(model.decision_function(xx[mask])/cal["temperature"]+np.asarray(cal["bias"]))
+    cal=_fit_temperature(logits,cy,cw)
+    metrics={};argmax_changed={}
+    for name,mask in (("train",train),("calibration",calibration),("policy",policy)):
+        z=model.decision_function(xx[mask]);raw=_softmax(z);calibrated=_softmax(z/cal["temperature"])
+        metrics[name]={"raw":trend_metrics(labels[mask],raw),"calibrated":trend_metrics(labels[mask],calibrated)}
+        argmax_changed[name]=int(np.count_nonzero(raw.argmax(axis=1)!=calibrated.argmax(axis=1)))
+    if any(argmax_changed.values()):raise ValueError("trend calibration changed class ordering")
     directory = Path(output_dir)
     if directory.exists() and any(directory.iterdir()):raise FileExistsError("trend head requires a new empty directory")
     directory.mkdir(parents=True,exist_ok=True);path=directory/"model.joblib";joblib.dump(model,path)
@@ -283,7 +409,12 @@ def train_trend_head(dataset, output_dir, fold, config, *, contract):
         "pipeline_contract_hash":contract["pipeline_contract_hash"],"fold":fold,"preprocess":pre,"calibration":cal,
         "train_label_end":str(data.loc[train,"label_end"].max()),"calibration_label_end":str(data.loc[calibration,"label_end"].max()),
         "policy_label_end":str(data.loc[policy,"label_end"].max()),"sample_counts":counts,
-        "calibration_metrics":trend_metrics(cy,probabilities(calibration)),"policy_metrics":trend_metrics(labels[policy],probabilities(policy)),
+        "calibration_metrics":metrics["calibration"]["calibrated"],"policy_metrics":metrics["policy"]["calibrated"],
+        "raw_calibrated_metrics":metrics,"calibration_argmax_changed":argmax_changed,
+        "training_selection":selection,"training_convergence":convergence,
+        "class_weighting":{"method":choice[1],"factors":dict(zip(CLASSES,factors.tolist())),"fit_scope":"mature_training_only"},
+        "input_diagnostics":_input_diagnostics(x,xx,train,calibration,policy,pre),
+        "coefficient_l2_by_class":dict(zip(CLASSES,np.linalg.norm(model.coef_,axis=1).tolist())),
         "simulated_available_at":fold["policy_end"],"available_at":fold["policy_end"],
         "training_started_at":started,"actual_training_completed_at":local_now().isoformat(),
         "checkpoint":"model.joblib","checkpoint_sha256":_file_hash(path),"publication_allowed":False,
@@ -301,6 +432,7 @@ def load_trend_head(path):
         raise ValueError("trend checkpoint/schema integrity mismatch")
     if stable_hash(m["target_contract"])!=m["target_contract_hash"]:raise ValueError("trend contract drift")
     _validate_trend_contract(m["target_contract"])
+    _validate_calibration(m["calibration"])
     return m
 
 
@@ -320,7 +452,7 @@ class TrendSession:
             if policy or (pd.to_datetime(days+"T15:00:00+08:00",utc=True)<pd.Timestamp(m["actual_training_completed_at"])).any():raise ValueError("trend head not actually trained at forecast")
         elif mode!="historical":raise ValueError("unknown trend inference mode")
         xx=_transform(frame[list(MA_TREND_COLUMNS)].to_numpy(float),m["preprocess"])
-        p=_softmax(model.decision_function(xx)/m["calibration"]["temperature"]+np.asarray(m["calibration"]["bias"]))
+        p=_softmax(model.decision_function(xx)/m["calibration"]["temperature"])
         eligible=frame.get("trend_input_eligible",frame.get("model_input_eligible",frame.get("input_eligible",pd.Series(False,index=frame.index)))).fillna(False).to_numpy(bool)
         p[~eligible]=np.nan;self.diagnostics["rows"]+=len(frame);self.diagnostics["batches"]+=1
         return p,m

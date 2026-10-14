@@ -20,7 +20,7 @@ from my_strategy.services.czsc_trend_features import (ENTRY_FEATURE_COLUMNS, EXI
 from my_strategy.services.czsc_trend_labels import episode_outcome, exit_outcome, target_contract
 from my_strategy.services.czsc_trend_interval_model import schema_hash
 from my_strategy.services.czsc_trend_model import bind_trend_inputs
-from my_strategy.services.czsc_trend_contracts import ENTRY_HEADS
+from my_strategy.services.czsc_trend_contracts import ENTRY_HEADS, L2_HOLDING_HEADS, validate_holding_population
 from my_strategy.services.czsc_account_artifacts import write_account_artifacts
 
 
@@ -45,10 +45,18 @@ def training_frame(dataset, head, config, calendar, stage):
         frame['label']=returns.where(complete) if head=='return' else returns.le(0).astype(float).where(complete)
     contract=make_contract(head,config,calendar,stage)
     population=dataset.get('reference_population')
-    if population:
+    if population and head in ENTRY_HEADS:
         contract['reference_population']=copy.deepcopy(population)
         contract['reference_population_hash']=stable_hash(population)
         contract['contract_hash']=stable_hash({k:v for k,v in contract.items() if k!='contract_hash'})
+    if head in L2_HOLDING_HEADS:
+        held=validate_holding_population(dataset.get('holding_population'))
+        if stage!='E1' or population or dataset.get('reference_mode')!='E1':
+            raise ValueError('L2 exits cannot train from final-entry gated accounts or candidate clones')
+        contract['holding_population']=copy.deepcopy(held)
+        contract['holding_population_hash']=stable_hash(held)
+        contract['contract_hash']=stable_hash({k:v for k,v in contract.items() if k!='contract_hash'})
+        validate_holding_population(held,contract=contract)
     frame.attrs['label_contract']=contract
     return frame
 
@@ -217,7 +225,8 @@ def build_account_dataset(frame, calendar, native_pack, trend_probabilities, con
         group=stable_hash({'symbol':snapshot['symbol'],'plan':snapshot['plan_id'],'entry':snapshot['entry_date'],'stage':stage})
         pair={'symbol':snapshot['symbol'],'date':day,'economic_group_id':group,'episode_id':group,'stage':stage,
             'plan_id':snapshot['plan_id'],'original_signal_date':snapshot['entry_signal_date'],
-            'holding_snapshot_hash':stable_hash(snapshot),'forced_ledger_hash':stable_hash(forced['ledger']),
+            'holding_snapshot_hash':stable_hash(snapshot),'holding_reference_mode':reference_mode,
+            'forced_ledger_hash':stable_hash(forced['ledger']),
             'continued_ledger_hash':stable_hash(following),'continuation_policy_hash':config[stage+'_policy_hash'],
             'shares':snapshot['shares'],'forced':forced_value,'continued':continued,'outcome':outcome}
         pairs.append({**pair,'forced_ledger':forced['ledger'],'forced_rejections':forced['rejections']})
@@ -226,7 +235,7 @@ def build_account_dataset(frame, calendar, native_pack, trend_probabilities, con
     # Both paired targets must mature. The remainder may be unclosed; it is not
     # a loss and is never used to fit or calibrate a head.
     result={'entries':pd.DataFrame(entries),'exits':pd.DataFrame(exits),'episodes':pd.DataFrame(episodes),
-        'reference_population':copy.deepcopy(reference_population or {})}
+        'reference_population':copy.deepcopy(reference_population or {}),'reference_mode':reference_mode}
     for key,columns in (('entries',ENTRY_FEATURE_COLUMNS),('exits',EXIT_FEATURE_COLUMNS)):
         required={column:'float64' for column in (*columns,'label','exit_advantage')}
         required.update(symbol='string',date='string',label_end='string',label_available='bool',input_eligible='bool',
@@ -235,7 +244,7 @@ def build_account_dataset(frame, calendar, native_pack, trend_probabilities, con
             required.update(attempt_id='string',original_opportunity_ids='object',original_event_ids='object',
                 original_event_first_pre_gate_dates='string',flat_state_hash='string',reference_state_hash='string',
                 entry_plan_hash='string',net_return='float64')
-        else:required.update(episode_id='string')
+        else:required.update(episode_id='string',holding_reference_mode='string',stage='string')
         missing={column:pd.Series(False,index=result[key].index,dtype=dtype) if dtype=='bool'
             else pd.Series(index=result[key].index,dtype=dtype)
             for column,dtype in required.items() if column not in result[key]}

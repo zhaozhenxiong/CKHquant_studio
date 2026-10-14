@@ -15,7 +15,7 @@ from my_strategy.services.czsc_trend_math import _device, _fit_preprocess, _tran
 from my_strategy.services.czsc_trend_support import _file_hash, _save
 from my_strategy.services.czsc_trend_contracts import (STRATEGY_ID, TRAINING_POPULATION,
     CANDIDATE_POLICY, ATTEMPT_IDENTITY, ECONOMIC_GROUP_IDENTITY, SPLIT_POLICY, ECONOMIC_WEIGHTING,
-    ENTRY_HEADS, HOLDING_HEADS, head_dependency_policy)
+    ENTRY_HEADS, HOLDING_HEADS, L2_HOLDING_HEADS, head_dependency_policy, validate_holding_population)
 
 VERSION = STRATEGY_ID
 FEATURE_VERSION = "causal_trend_interval_daily_attempt_inputs"
@@ -83,6 +83,10 @@ def _validate_contract(contract, head, columns):
             or contract.get("admission") != "actual_held_Broker_state_only"
             or contract.get("stage") != ("E0" if head == "ma_exit" else "E1")):
         raise ValueError("holding head requires actual-held remaining-value target and continuation stage")
+    if head in L2_HOLDING_HEADS:
+        validate_holding_population(contract.get("holding_population"), contract=contract)
+        if contract.get("reference_population") or contract.get("reference_account") != "preregistered_E1_actual_Broker_account_no_L2_feedback":
+            raise ValueError("L2 exits must bind the independent E1 actual-held population")
     if head == "entry" and target != "actual_complete_fee_net_roundtrip_high_return_and_initial_risk":
         raise ValueError("entry head requires actual episode trend-interval target")
     if head in ENTRY_HEADS:
@@ -283,6 +287,10 @@ def train_head(dataset, columns, output_dir, fold, config, *, head, architecture
     if regression != (head in {"return", "exit_advantage"}):
         raise ValueError("head classification/continuous output contract mismatch")
     frame = bind_inputs(dataset, columns, head)
+    if head in L2_HOLDING_HEADS:
+        if (not {"stage", "holding_reference_mode"}.issubset(frame)
+                or not frame.stage.eq("E1").all() or not frame.holding_reference_mode.eq("E1").all()):
+            raise ValueError("L2 holding rows must originate from actual E1 account snapshots")
     if head in ENTRY_HEADS:
         required = {"attempt_id", "economic_group_id", "original_opportunity_ids",
             "original_event_ids", "original_event_first_pre_gate_dates"}

@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
@@ -100,6 +100,42 @@ def trend_model_probe(device: str) -> dict:
                        "inference_diagnostics": dict(first_session.diagnostics),
                        "reload_inference_diagnostics": dict(reloaded_session.diagnostics),
                        "training_resources": saved.get("training_resources", {})}
+    from my_strategy.services import czsc_reference_quality as quality
+    quality_rows = []
+    for index, day in enumerate(days):
+        atom, label = f"synthetic-reference-{index}", index % 2
+        quality_rows.append({**{key: 0. for key in quality.COLUMNS},
+            quality.COLUMNS[0]: 4. if label else -4., "symbol": "INSTALLATION.TEST", "date": day,
+            "label_end": (dates[index] + pd.offsets.BDay(1)).strftime("%Y-%m-%d"),
+            "label": label, "label_available": True, "input_eligible": True, "risk_available": True,
+            "attempt_id": atom, "economic_group_id": atom, "opportunity_id": atom,
+            "original_event_ids": json.dumps([atom]),
+            "original_event_first_pre_gate_dates": json.dumps({atom: day})})
+    quality_data = quality._frame(quality_rows)
+    quality_contract = quality._target_contract(cfg, {
+        "population_hash": "synthetic-installation-reference-population",
+        "protocol_hash": "synthetic-installation-reference-protocol",
+        "trend_catalog_hash": "synthetic-installation-reference-trend-catalog",
+        "ma_exit_catalog_hash": "synthetic-installation-reference-exit-catalog"})
+    quality_directory = directory / quality.HEAD
+    quality_manifest = quality.train_reference_head(quality_data, quality_directory, fold, cfg, quality_contract)
+    quality_bundles = [{"name": fold["name"], "available_at": quality_manifest["available_at"],
+        "heads": {quality.HEAD: {"path": quality.HEAD, "manifest_sha256": quality_manifest["manifest_sha256"]}}}]
+
+    def quality_predictions():
+        cache = {}
+        return np.array([quality._predict_prior(row, row["date"], quality_bundles, directory,
+            quality_contract, cache)[0] for row in quality_data.iloc[151:155].to_dict("records")], dtype=float)
+
+    first, reloaded = quality_predictions(), quality_predictions()
+    if (first.shape != (4,) or not np.isfinite(first).all() or not ((first >= 0) & (first <= 1)).all()
+            or not np.array_equal(first, reloaded)):
+        raise RuntimeError("Installed independent reference quality serialization/inference failed")
+    heads[quality.HEAD] = {"target": quality.TARGET, "population": quality.POPULATION,
+        "input_columns": len(quality.COLUMNS), "account_input_columns": [],
+        "prediction_rows": len(first), "save_reload_identical": True,
+        "actual_device": quality_manifest["actual_device"], "training_device": "cpu", "inference_device": "cpu",
+        "fee_qualified": False, "publication_allowed": False}
     return {"heads": heads, "fixture": "synthetic_installation_labels_only",
             "market_effectiveness_certified": False, "publication_allowed": False}
 
@@ -109,6 +145,16 @@ def request(base: str, path: str, method: str = "GET", body: dict | None = None)
     with urlopen(Request(base + path, data=data, method=method, headers={"Content-Type": "application/json"}), timeout=30) as response:
         payload = response.read()
         return json.loads(payload) if response.headers.get_content_type() == "application/json" else payload.decode()
+
+
+def expect_removed_route(base: str, path: str, method: str = "GET", body: dict | None = None) -> None:
+    try:
+        request(base, path, method, body)
+    except HTTPError as error:
+        if error.code == 404:
+            return
+        raise RuntimeError(f"Retired route did not return 404: {method} {path} ({error.code})") from error
+    raise RuntimeError(f"Retired route remains available: {method} {path}")
 
 
 def fixture_database(path: Path) -> list[str]:
@@ -160,8 +206,35 @@ def verify_no_model_trend(base: str, calendar_id: str, end: str) -> dict:
             raise RuntimeError("Untrained installation fabricated MA probabilities")
         if row["agents"]["high_return"].get("probability") is not None:
             raise RuntimeError("Untrained installation fabricated high-return probability")
+        if row["agents"].get("reference_quality", {}).get("probability") is not None:
+            raise RuntimeError("Untrained installation fabricated reference quality probability")
+    if (result.get("analysis_mode") != "reference" or result.get("account_scope") != "none"
+            or result.get("account_actions") is not None or result.get("research", {}).get("account_simulated") is not False
+            or result.get("chart_evidence", {}).get("statistics", {}).get("visible_window", {}).get("broker_fills") != 0):
+        raise RuntimeError("Installed ordinary analysis unexpectedly simulated an account")
+    source_points, final_points = result.get("source_reference_points"), result.get("reference_points")
+    if not isinstance(source_points, list) or not isinstance(final_points, list):
+        raise RuntimeError("Installed analysis omitted independent source/final B/S collections")
+    for point in source_points + final_points:
+        if (point.get("side") not in {"BUY", "SELL"} or point.get("reference_price_source") != "signal_day_close"
+                or point.get("reference_price_date") != point.get("date")):
+            raise RuntimeError("Installed B/S reference changed its direction or price clock")
+    for row in rows:
+        position = row.get("position_reference") or {}
+        risk = row.get("reference_risk_plan") or {}
+        if (position.get("account_scope") != "none" or position.get("reference_only") is not True
+                or position.get("entry_probability") is not None or position.get("exit_probability") is not None
+                or position.get("reference_quality_probability") is not None
+                or position.get("reference_quality_threshold") != .1 or position.get("reference_buy_total_threshold") != .5
+                or risk.get("risk_budget_fraction") != .01
+                or position.get("target_position_fraction") != (0. if row.get("direction") == "SELL" else None)):
+            raise RuntimeError("Untrained installation fabricated an allocation or weakened a reference gate")
     return {"status": "passed", "strategy": result["strategy_version"], "model_run_id": None,
         "ma_model_available": False, "probabilities": None, "analysis_rows": len(rows),
+        "analysis_mode": "reference", "account_scope": "none", "account_simulated": False,
+        "source_reference_points": len(source_points), "final_reference_points": len(final_points),
+        "source_reference_sides": sorted({point["side"] for point in source_points}),
+        "reference_quality_probability": None, "unqualified_allocation_blocked": True,
         "run_id": result["run_id"], "publication_allowed": result.get("publication_allowed"),
         "fixture": "synthetic_unverified_prices_and_synthetic_schedule_only"}
 
@@ -219,6 +292,12 @@ def verify(device: str, output: Path | None, *, expected_version: str | None = N
             raise RuntimeError(completed.stdout + completed.stderr)
         return json.loads(completed.stdout) if json_output else completed.stdout
 
+    def reject_retired_command(name: str):
+        completed = subprocess.run([sys.executable, "-I", "-X", "utf8", "-m", "my_strategy.cli", name, "--help"],
+            cwd=state, env=environment, text=True, encoding="utf-8", capture_output=True, check=False, timeout=30)
+        if completed.returncode != 2 or "invalid choice" not in completed.stderr:
+            raise RuntimeError(f"Retired CLI command was not rejected: {name}")
+
     identity_script = """import importlib.metadata,json,sys
 from pathlib import Path
 import my_strategy
@@ -239,13 +318,18 @@ print(json.dumps({'version':distribution.version,'package_path':str(path),'prefi
     command("-m", "my_strategy.cli", "update-data", "--help", json_output=False)
     analysis = command("-m", "my_strategy.cli", "analyze", "--symbol", "000001.SZ", "--start", "2024-01-01", "--calendar-run-id", calendar_id, "--device", device, "--json")
     scan = command("-m", "my_strategy.cli", "scan", "--stocks", "000001.SZ", "--start", "2024-01-01", "--calendar-run-id", calendar_id, "--device", device, "--cpu-workers", "1", "--json")
-    backtest = command("-m", "my_strategy.cli", "backtest", "--symbol", "000001.SZ", "--start", "2024-01-01", "--calendar-run-id", calendar_id, "--device", device, "--cpu-workers", "1", "--json")
+    retired_commands = ("backtest", "backtest-batch")
+    for name in retired_commands:
+        reject_retired_command(name)
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
     base = f"http://127.0.0.1:{port}"
     process = None
-    pages = ("analysis", "scan", "backtest", "watchlist", "holdings", "data", "training", "parameters")
+    pages = ("analysis", "scan", "watchlist", "data", "training", "parameters")
+    retired_routes = (("/backtest", "GET", None), ("/holdings", "GET", None),
+        ("/api/backtest", "POST", {"symbol": "000001.SZ"}), ("/api/holdings", "GET", None),
+        ("/api/holdings/000001.SZ", "PUT", {"shares": 100, "average_cost": 12}))
     with (state / "server.log").open("w", encoding="utf-8") as log:
         for restart in range(2):
             process = subprocess.Popen([sys.executable, "-I", "-X", "utf8", "-m", "my_strategy.web_dashboard.scripts.serve_dashboard", "--port", str(port)],
@@ -264,14 +348,15 @@ print(json.dumps({'version':distribution.version,'package_path':str(path),'prefi
                 for page in pages:
                     if "<html" not in request(base, "/" + page).lower():
                         raise RuntimeError(f"Missing installed dashboard page: {page}")
+                for path, method, body in retired_routes:
+                    expect_removed_route(base, path, method, body)
                 if restart == 0:
                     trend_without_model = verify_no_model_trend(base, calendar_id, dates[-1])
                     training_center = verify_training_center(base)
                     request(base, "/api/watchlist", "POST", {"symbols": ["000001.SZ"]})
-                    request(base, "/api/holdings/000001.SZ", "PUT", {"shares": 100, "average_cost": 12})
                 else:
-                    if "000001.SZ" not in json.dumps(request(base, "/api/watchlist")) or "000001.SZ" not in json.dumps(request(base, "/api/holdings")):
-                        raise RuntimeError("Personal data did not survive dashboard restart")
+                    if "000001.SZ" not in json.dumps(request(base, "/api/watchlist")):
+                        raise RuntimeError("Watchlist did not survive dashboard restart")
             finally:
                 process.terminate()
                 try:
@@ -281,8 +366,10 @@ print(json.dumps({'version':distribution.version,'package_path':str(path),'prefi
                     process.wait(timeout=5)
     report = {"status": "passed", "python": sys.executable, "state": str(state), "device": device,
               "application_identity": identity, "doctor": doctor, "model": model,
-              "training_center": training_center, "dashboard_pages": list(pages), "personal_restart": True,
-              "analysis_run": analysis.get("run_id"), "scan_run": scan.get("run_id"), "backtest_run": backtest.get("run_id"),
+              "training_center": training_center, "dashboard_pages": list(pages), "watchlist_restart": True,
+              "retired_routes_rejected": [f"{method} {path}" for path, method, _ in retired_routes],
+              "retired_commands_rejected": list(retired_commands),
+              "analysis_run": analysis.get("run_id"), "scan_run": scan.get("run_id"),
               "update_entrypoint": True,
               "default_trend_without_model": trend_without_model,
               "input": "synthetic_installation_fixture; does not certify market data or returns"}

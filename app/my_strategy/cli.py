@@ -23,14 +23,14 @@ DELEGATES = {
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="KHQuant 当前趋势共识策略")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("analyze", "scan", "backtest", "backtest-batch"):
+    for name in ("analyze", "scan"):
         item = commands.add_parser(name)
         item.add_argument("--symbol", help="单股代码，例如 600519.SH")
         item.add_argument("--stocks", default="", help="逗号分隔代码；扫描/批量留空表示本地全部股票")
         item.add_argument("--start", default="2026-01-01")
         item.add_argument("--end", help="截止日期；留空使用本地最新行情")
         item.add_argument("--as-of", help="分析回放截止日或 Asia/Shanghai 时间")
-        item.add_argument("--initial-cash", type=float, help="每股独立账户初始资金；留空采用当前配置")
+        item.add_argument("--current-position", type=float, help="仅分析的当前持仓百分比，0到100，不生成资金账户")
         item.add_argument("--device", help="计算设备：cpu、mps、cuda 或 cuda:编号")
         item.add_argument("--usage-mode", choices=("forward", "historical"), default="historical",
                           help="historical 历史研究；forward 按实际训练完成时点的当前研究")
@@ -113,12 +113,12 @@ def main(argv: list[str] | None = None) -> int:
         else:
             if not 1 <= args.cpu_workers <= 16:
                 raise ValueError("CPU 只读准备进程数应在 1 到 16 之间")
-            if args.initial_cash is not None and args.initial_cash <= 0:
-                raise ValueError("每股账户初始资金必须大于零")
+            if args.current_position is not None and (args.command != 'analyze' or not 0 <= args.current_position <= 100):
+                raise ValueError("当前持仓百分比仅分析可用，且必须在0到100之间")
             if args.command == "analyze" and not args.symbol:
                 raise ValueError("analyze 须指定 --symbol")
             if args.as_of and args.command != "analyze":
-                raise ValueError("--as-of 仅用于 analyze；扫描和回测使用 --end")
+                raise ValueError("--as-of 仅用于 analyze；扫描使用 --end")
             from my_strategy.web_dashboard import trend_strategy
             consensus = json.loads(args.config.read_text(encoding="utf-8")) if args.config else None
             if consensus is not None and not isinstance(consensus, dict):
@@ -131,8 +131,8 @@ def main(argv: list[str] | None = None) -> int:
                 from my_strategy.core.run_context import create_run_context
                 from my_strategy.storage.czsc_results import ResultStore
                 spec.update(symbol=args.symbol, as_of=args.as_of)
-                if args.initial_cash is not None:
-                    spec["account_initial_cash"] = args.initial_cash
+                if args.current_position is not None:
+                    spec["current_position_fraction"] = args.current_position / 100
                 result = trend_strategy.analyze_trend_consensus(**spec)
                 context = create_run_context(task="trend-consensus-analysis", as_of_date=result["data_end"],
                     config=spec, data_version=str(result.get("data_version", result["data_end"])),
@@ -142,12 +142,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 stocks = ([args.symbol] if args.symbol else []) + [s.strip() for s in args.stocks.split(",") if s.strip()]
                 spec.update(symbols=list(dict.fromkeys(stocks)) or None, progress=_progress)
-                if args.command == "scan":
-                    result = trend_strategy.scan_trend_consensus(**spec)
-                else:
-                    if args.initial_cash is not None:
-                        spec["initial_cash"] = args.initial_cash
-                    result = trend_strategy.backtest_trend_consensus(**spec)
+                result = trend_strategy.scan_trend_consensus(**spec)
         from my_strategy.services.czsc_trend_support import _json
         output = result if getattr(args, "json", False) or args.command == "model-diagnostics" else {
             k: result[k] for k in ("status", "run_id", "symbol", "data_end", "coverage", "metrics") if k in result}

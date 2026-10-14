@@ -23,7 +23,7 @@ from my_strategy.services import czsc_trend_runtime as runtime
 from my_strategy.services.czsc_trend_contracts import (
     STRATEGY_ID, TRAINING_POPULATION, SPLIT_POLICY, ECONOMIC_WEIGHTING,
     HELD_SPLIT_POLICY, HELD_ECONOMIC_WEIGHTING, head_dependency_policy,
-    strategy_config,
+    strategy_config, HELD_TRAINING_POPULATION, HELD_CONDITION_DOMAIN,
 )
 from my_strategy.services.czsc_trend_features import (
     ENTRY_FEATURE_COLUMNS, EXIT_FEATURE_COLUMNS, L1_MA_ENTRY_COLUMNS,
@@ -304,6 +304,18 @@ def entry_fixture():
     return frame, dates, fold, cfg, contract
 
 
+def holding_protocol_fixture():
+    return {'version':HELD_TRAINING_POPULATION,'stage':'E1','reference_mode':'E1',
+        'conditional_holding_domain':HELD_CONDITION_DOMAIN,
+        'pending_L2_entry_or_exit_used':False,'candidate_clones_are_holding_population':False,
+        'holding_checkpoint_upgrade':False,'split_policy':HELD_SPLIT_POLICY,
+        'economic_weighting':HELD_ECONOMIC_WEIGHTING,
+        'source_snapshot_hash':'frozen-source','continuation_policy_hash':'frozen-E1',
+        'candidate_policy_hash':'frozen-candidate','manifest_path':'dataset/E1/manifest.json',
+        'manifest_sha256':'fixture-manifest','pooled_exits_path':'dataset/E1/exits.parquet',
+        'pooled_exits_sha256':'fixture-exits','records_hash':'fixture-records'}
+
+
 
 @pytest.mark.parametrize('change', [
     {'version': 'czsc_trend_consensus'},
@@ -513,6 +525,9 @@ def test_real_head_manifest_binds_actual_dependency_policy(head, tmp_path):
         if column not in frame: frame[column] = .1
     if held:
         frame['episode_id'] = [f'actual-episode:{i}' for i in range(len(frame))]
+        if head!='ma_exit':
+            cfg['holding_population']=holding_protocol_fixture()
+            frame['stage']='E1';frame['holding_reference_mode']='E1'
         # Holding heads do not claim atomic preprocessing, even if an audit
         # table also happens to include original entry provenance columns.
         frame['original_event_ids'] = [['same-original']] * len(frame)
@@ -1025,6 +1040,7 @@ def test_pipeline_builds_each_actual_population_before_its_own_entry_head(tmp_pa
     monkeypatch.setattr(pipeline,'verify_source_generators',lambda value:None)
     monkeypatch.setattr(pipeline,'create_run_context',lambda **kwargs:context)
     real_frame,real_calendar,prepared,cfg=inputs(monkeypatch)
+    real_frame['symbol']=record['symbol']
     for row in prepared['rows']:
         row.update(action='WAIT',entry_eligible=False,entry_plan=None,fresh_candidate_ids=[])
     monkeypatch.setattr('my_strategy.services.czsc_trend_dataset.prepare_trend_decisions',
@@ -1047,6 +1063,19 @@ def test_pipeline_builds_each_actual_population_before_its_own_entry_head(tmp_pa
     if not missing_trend:monkeypatch.setattr(pipeline,'select_source_policy',lambda *args:{})
     monkeypatch.setattr(pipeline,'select_holding_exit_policy',lambda *args:{})
     order=[]
+    # This test owns orchestration, while the reference population's real
+    # Broker/labels/assets are verified by test_reference_quality. Keep this
+    # adapter explicitly unqualified so it cannot supply core head readiness.
+    reference_fixture={'head':'reference_quality','status':'unqualified','bundles':[],
+        'qualification':{'status':'pending','passed':False},'required_for_core_selection':False}
+    def reference_stage(records,calendar,config,ctx,trends,ma_heads,workers,folds):
+        assert records==[record] and ctx is context and workers==1
+        assert config['E1_policy_hash'] and folds==[earlier]
+        assert ('bootstrap','E1',[]) in order
+        assert not any(item[0]=='population' for item in order)
+        order.append(('reference_quality',None,[]))
+        return copy.deepcopy(reference_fixture)
+    monkeypatch.setattr('my_strategy.services.czsc_reference_quality.run_reference_quality',reference_stage)
     def stage(records,calendar,cfg,context,stage,*args,**options):
         population=options.get('reference_population') or {}
         name=population.get('fold',{}).get('name')
@@ -1060,10 +1089,19 @@ def test_pipeline_builds_each_actual_population_before_its_own_entry_head(tmp_pa
                 reference_population=population,reference_entry_evaluator=(lambda *args:{'status':'model_unavailable'}) if population else None)
         else:
             data={'entries':pd.DataFrame({'label_available':[True,True],'label':[0,1],'label_end':['2025-02-01','2025-04-01']}),
-                'exits':pd.DataFrame({'label_available':[True],'label':[0],'exit_advantage':[0.],'label_end':['2025-04-01']}),
-                'reference_population':population}
-            summary={'symbol':record['symbol']}
-        (directory/'manifest.json').write_text(json.dumps({'reference_population':population}))
+                'exits':pd.DataFrame({'label_available':[True],'label':[0],'exit_advantage':[0.],
+                    'label_end':['2025-04-01'],'date':['2025-03-31'],'episode_id':['held'],
+                    'stage':[stage],'holding_reference_mode':['final' if population else stage]}),
+                'episodes':pd.DataFrame(),'reference_population':population,
+                'reference_mode':'final' if population else stage}
+            summary={'symbol':record['symbol'],'reference_mode':data['reference_mode'],'reference_population':population}
+        pooled={}
+        for key in ('entries','exits','episodes'):
+            path=directory/(key+'.parquet');data[key].to_parquet(path,index=False)
+            pooled[key]={'path':str(path),'sha256':pipeline._file_hash(path)}
+        (directory/'manifest.json').write_text(json.dumps({'reference_population':population,
+            'stage':stage,'source_snapshot_hash':cfg['source_snapshot_hash'],'records':[summary],
+            'failures':[],'pooled_files':pooled}))
         return data,[summary]
     monkeypatch.setattr(pipeline,'build_stage',stage)
     def fit(data,head,fold,calendar,context,cfg,architecture='linear',device='cpu'):
@@ -1106,6 +1144,10 @@ def test_pipeline_builds_each_actual_population_before_its_own_entry_head(tmp_pa
         assert first_population['entries_positive_by_population_end']==0
     assert len(report['dataset_manifests'])==4
     assert report['pipeline']['self_head_controls_its_training_population'] is False
+    assert report['reference_quality']==reference_fixture
+    assert report['protocol_freeze']['reference_quality_hash']==stable_hash(reference_fixture)
+    assert order.index(('bootstrap','E1',[]))<order.index(('reference_quality',None,[]))<order.index(('population','first',[]))
+    assert report['pipeline']['reference_quality_required_for_core_selection'] is False
 
 
 
@@ -1198,15 +1240,30 @@ def test_model_freeze_resolves_installed_code_and_binds_served_catalog(tmp_path,
             'selected_symbols':[],'daily_membership_hash':'daily','population_hash':'population'}}
     native_source['snapshot_hash']=stable_hash(native_source)
     config={**strategy_config(),'source_snapshot_hash':native_source['snapshot_hash']}
+    reference_fixture={'head':'reference_quality','status':'unqualified',
+        'required_for_core_selection':False,'test_fixture':'source_identity_boundary_only'}
     freeze={'config_hash':stable_hash(config),'code_hashes':codes,
         'models_catalog_hash':stable_hash({'trend':[],'ma_exit':[],'architecture':[]}),
-        'population_folds_hash':stable_hash([]),'dataset_manifests_hash':stable_hash([])}
+        'population_folds_hash':stable_hash([]),'dataset_manifests_hash':stable_hash([]),
+        'holding_population_hash':stable_hash(None),'holding_population_diagnostics_hash':stable_hash(None),
+        'reference_quality_hash':stable_hash(reference_fixture)}
     freeze['freeze_hash']=stable_hash(freeze)
     report={'strategy_version':STRATEGY_ID,'config':config,'source_snapshot':native_source,
         'dataset_records':[],'validation_records':[],'population_folds':[],'dataset_manifests':[],
         'trend_bundles':[],'ma_exit_bundles':[],'architecture_bundles':[],'model_bundles':[],
-        'protocol_freeze':freeze}
+        'protocol_freeze':freeze,'reference_quality':copy.deepcopy(reference_fixture)}
+    monkeypatch.setattr(pipeline,'audit_holding_population',lambda *args:None)
+    audits=[]
+    def reference_audit(root,reference,cfg,symbols,*,expected_records):
+        assert root==tmp_path and reference==reference_fixture and cfg==config
+        assert symbols==expected_records==[]
+        audits.append(reference)
+    monkeypatch.setattr('my_strategy.services.czsc_reference_quality.audit_reference_quality',reference_audit)
     pipeline._verify_run(report,tmp_path)
+    assert len(audits)==1
+    changed=copy.deepcopy(report);changed['reference_quality']['status']='qualified'
+    with pytest.raises(ValueError,match='reference quality population/catalogue drift'):
+        pipeline._verify_run(changed,tmp_path)
     changed=copy.deepcopy(report);changed['model_bundles']=[bundle()]
     with pytest.raises(ValueError,match='served L2'):
         pipeline._verify_run(changed,tmp_path)

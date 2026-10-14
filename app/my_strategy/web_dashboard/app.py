@@ -67,10 +67,8 @@ def create_app(task_manager: TaskManager | None = None, personal_store: Personal
     @app.get("/")
     @app.get("/analysis")
     @app.get("/scan")
-    @app.get("/backtest")
     @app.get("/data")
     @app.get("/watchlist")
-    @app.get("/holdings")
     @app.get("/training")
     @app.get("/parameters")
     def shell():

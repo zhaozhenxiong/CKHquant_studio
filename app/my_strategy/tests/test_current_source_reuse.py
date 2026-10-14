@@ -107,7 +107,7 @@ def source(tmp_path,monkeypatch):
         population_mode='full_liquidity_union',raw_only_rebuild=True,reused_model_or_label=False,calendar_dates=dates)
     _save(native_root/'reports/native_source.json',native_report)
     for root in [raw_root,native_root]:_save(root/'data_snapshots/calendar.json',dict(verified=True,source_run_id='calendar-input',dates=dates))
-    store=ResultStore(tmp_path/'results.db',runs); service=center.TrainingCenter(store=store,metadata_root=tmp_path/'metadata',personal_db=tmp_path/'personal.db')
+    store=ResultStore(tmp_path/'results.db',runs); service=center.TrainingCenter(store=store,metadata_root=tmp_path/'metadata')
     return dict(service=service,values=values,config=config,native=native_report,raw=raw_report,population=population,
         native_root=native_root,raw_root=raw_root,code=code,runs=runs,dates=dates)
 
@@ -205,7 +205,8 @@ def test_process_events_use_frozen_total_real_devices_and_new_model_id(source,tm
     plan=preflight(source);events=[];proof=plan['source_reuse']
     lines=['TRAIN_RUN_ID new-model', 'POLICY_STOCK_DONE '+json.dumps(dict(current=1,total=3,device='cpu',symbol='000001.SZ',fold='policy',failed=0)),
         'HEAD '+json.dumps(dict(fold='production',head='entry',architecture='mlp',device='mps',training_resources={'actual_device':'mps'})),
-        'DATASET E0 000001.SZ entries=1 exits=0']
+        'DATASET E0 000001.SZ entries=1 exits=0',
+        'PROGRESS '+json.dumps(dict(stage='dataset',population='E0',fold=None,completed=1,total=3,scope='current_population_only'))]
     command=[sys.executable,'-u','-c','\n'.join('print('+repr(line)+',flush=True)' for line in lines)]
     ids=center.TrainingCenter._run_process(command,tmp_path/'training.log',events.append,None,
         initial_ids={'raw_source_run_id':'raw-input','source_native_run_id':'native-input'},source_total=3,source_reuse=proof)
@@ -255,7 +256,9 @@ def trained_contract_fixture(source,plan):
     actual['pipeline_contract_hash']=stable_hash(dict(family='trend_consensus',source=snapshot,
         calendar_hash=proof['calendar_hash'],registered_config=registered,
         order=['independent_trend','policy_only_sources','E0_no_HR','MA_exit_E0','pinned_E1',
-            'strict_prior_L2_actual_flat_population_by_fold','L2_entry_forced_E1_clone','L2_exit_shadow'],
+            'preregistered_actual_E1_holding_pairs','account_free_reference_quality_probes',
+            'independent_reference_quality_heads_and_fee_qualification','strict_prior_L2_actual_flat_population_by_fold',
+            'L2_entry_forced_E1_clone','L2_exit_preregistered_actual_E1_pairs'],
         reference_population_protocol=POPULATION_VERSION,self_training_population_feedback=False,
         reassessment=registered['reassessment'],no_E2_entry_reuse=True))
     actual['candidate_policy_hash']=stable_hash(dict(candidate=actual['candidate_policy'],risk_policy=actual['risk_policy'],
@@ -267,12 +270,25 @@ def trained_contract_fixture(source,plan):
         reassessment=actual['reassessment'],entry_HR=False))
     actual['E1_policy_hash']=stable_hash(dict(stage='E1',E0=actual['E0_policy_hash'],signal_time_pinned_MA_exit=stable_hash([]),
         holding_threshold=actual['account']['holding_exit_threshold'],no_head='entire_position_E0',checkpoint_upgrade=False,L2_exit_apply=False))
+    from my_strategy.services.czsc_trend_contracts import (
+        HELD_TRAINING_POPULATION,HELD_CONDITION_DOMAIN,HELD_SPLIT_POLICY,HELD_ECONOMIC_WEIGHTING)
+    held=dict(version=HELD_TRAINING_POPULATION,stage='E1',reference_mode='E1',
+        conditional_holding_domain=HELD_CONDITION_DOMAIN,pending_L2_entry_or_exit_used=False,
+        candidate_clones_are_holding_population=False,holding_checkpoint_upgrade=False,
+        split_policy=HELD_SPLIT_POLICY,economic_weighting=HELD_ECONOMIC_WEIGHTING,
+        source_snapshot_hash=actual['source_snapshot_hash'],candidate_policy_hash=actual['candidate_policy_hash'],
+        continuation_policy_hash=actual['E1_policy_hash'],manifest_path='dataset/E1/manifest.json',
+        manifest_sha256='test-held-manifest',pooled_exits_path='dataset/E1/exits.parquet',
+        pooled_exits_sha256='test-held-exits',records_hash='test-held-records')
     return dict(strategy_version='trend_consensus',status='completed',data_end=plan['data_end'],config=actual,
         dataset_records=source['native']['dataset_records'],source_snapshot=snapshot,trend_bundles=[],ma_exit_bundles=[],
-        protocol_freeze=plan['training_code_freeze'],training_resources=dict(actual_device='mps'))
+        holding_population=held,
+        protocol_freeze={**plan['training_code_freeze'],'holding_population_hash':stable_hash(held)},
+        training_resources=dict(actual_device='mps'))
 
 
-@pytest.mark.parametrize('change',['native_id','report_sha','records_hash','raw_id','population_hash','generator_code','coverage'])
+@pytest.mark.parametrize('change',['native_id','report_sha','records_hash','raw_id','population_hash',
+    'generator_code','reference_generator_code','coverage'])
 def test_post_training_source_binding_cannot_use_another_source_or_old_identity(source,change):
     plan=preflight(source);report=trained_contract_fixture(source,plan)
     center.TrainingCenter._validate_trained_plan(report,plan)
@@ -283,8 +299,25 @@ def test_post_training_source_binding_cannot_use_another_source_or_old_identity(
     elif change=='raw_id':report['source_snapshot']['source_snapshot']['raw_source_run_id']='wrong-raw'
     elif change=='population_hash':report['source_snapshot']['liquidity']['population_hash']='0'*64
     elif change=='generator_code':report['protocol_freeze']['code_hashes']['services/czsc_trend_account.py']='0'*64
+    elif change=='reference_generator_code':report['protocol_freeze']['code_hashes']['services/czsc_reference_quality.py']='0'*64
     else:report['dataset_records']=report['dataset_records'][:-1]
     with pytest.raises(ValueError):center.TrainingCenter._validate_trained_plan(report,plan)
+
+
+@pytest.mark.parametrize('change',['missing','hash','gated-account','source','continuation'])
+def test_completed_training_binds_actual_E1_holding_population_without_new_head_gate(source,change):
+    plan=preflight(source);report=trained_contract_fixture(source,plan)
+    # Existing head readiness gates still belong to _model. A frozen report
+    # can be validated here without claiming an optional exit head passed.
+    assert not report.get('model_bundles')
+    center.TrainingCenter._validate_trained_plan(report,plan)
+    if change=='missing':report.pop('holding_population')
+    elif change=='hash':report['protocol_freeze']['holding_population_hash']='wrong'
+    elif change=='gated-account':report['holding_population']['reference_mode']='final'
+    elif change=='source':report['holding_population']['source_snapshot_hash']='foreign'
+    else:report['holding_population']['continuation_policy_hash']='another-E1'
+    with pytest.raises(ValueError,match='holding|E1|持仓'):
+        center.TrainingCenter._validate_trained_plan(report,plan)
 
 
 @pytest.mark.parametrize('change',['native_none','native_list','snapshot_none','records_none','record_none','config_none',

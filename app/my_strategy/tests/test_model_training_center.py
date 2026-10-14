@@ -24,7 +24,7 @@ from my_strategy.services.czsc_account_artifacts import read_account_artifact, w
 @pytest.fixture
 def service(tmp_path):
     store = ResultStore(tmp_path / "results.db", tmp_path / "runs")
-    return center.TrainingCenter(store=store, metadata_root=tmp_path / "metadata", personal_db=tmp_path / "personal.db")
+    return center.TrainingCenter(store=store, metadata_root=tmp_path / "metadata")
 
 
 def account(symbol, dates, profit=.05, multiplier=1., model_id="candidate", source_hash="raw-sha"):
@@ -58,7 +58,7 @@ def test_defaults_revision_cas_persist_and_dont_mutate_frozen_config(service):
     result = service.save_default({"epochs":3}, expected_revision=0)
     assert result["default_profile"]["parameters"]["epochs"] == 3
     with pytest.raises(center.RevisionConflict): service.save_default({"epochs":4}, expected_revision=0)
-    fresh = center.TrainingCenter(store=service.store, db_path=service.db_path, personal_db=service.holdings_path)
+    fresh = center.TrainingCenter(store=service.store, db_path=service.db_path)
     assert fresh.profiles()["default_revision"] == 1
     cfg = center._configuration(result["default_profile"]["parameters"], "2027-04-01")
     assert cfg["epochs"] == 3 and cfg["batch_size"] == 2048
@@ -172,18 +172,31 @@ def add_current_derivations(report,plan):
         training_capacity_tiers=[len(plan["cohort"])],
         capacity_expansion_criterion="all_frozen_historical_liquidity_qualified_symbols_no_readiness_early_stop")
     cfg["pipeline_contract_hash"]=stable_hash(dict(family="trend_consensus",source=source,calendar_hash="calendar-fixture",registered_config=copy.deepcopy(cfg),
-        order=["independent_trend","policy_only_sources","E0_no_HR","MA_exit_E0","pinned_E1","strict_prior_L2_actual_flat_population_by_fold","L2_entry_forced_E1_clone","L2_exit_shadow"],
+        order=["independent_trend","policy_only_sources","E0_no_HR","MA_exit_E0","pinned_E1",
+            "preregistered_actual_E1_holding_pairs","account_free_reference_quality_probes",
+            "independent_reference_quality_heads_and_fee_qualification","strict_prior_L2_actual_flat_population_by_fold",
+            "L2_entry_forced_E1_clone","L2_exit_preregistered_actual_E1_pairs"],
         reference_population_protocol="strict_prior_l2_actual_flat_prefix_pre_gate_attempts",self_training_population_feedback=False,reassessment=cfg["reassessment"],no_E2_entry_reuse=True))
     cfg["candidate_policy_hash"]=stable_hash(dict(candidate=cfg["candidate_policy"],risk_policy=cfg["risk_policy"],trend_candidate={k:cfg["trend"][k] for k in ("candidate_cross_threshold","candidate_margin")},
         consensus=cfg["consensus"],signal_points=cfg["signal_points"],native_records="records-fixture",reassessment=cfg["reassessment"],training_population="strict_prior_l2_actual_flat_prefix_pre_gate_attempts"))
     cfg["E0_policy_hash"]=stable_hash(dict(stage="E0",candidate_policy_hash=cfg["candidate_policy_hash"],account=cfg["account"],trend_catalog_hash=stable_hash([]),ordinary_sell="continuous_sell_pass_for_actual_holding",reassessment=cfg["reassessment"],entry_HR=False))
     cfg["E1_policy_hash"]=stable_hash(dict(stage="E1",E0=cfg["E0_policy_hash"],signal_time_pinned_MA_exit=stable_hash([]),holding_threshold=cfg["account"]["holding_exit_threshold"],no_head="entire_position_E0",checkpoint_upgrade=False,L2_exit_apply=False))
+    from my_strategy.services.czsc_trend_contracts import (
+        HELD_TRAINING_POPULATION,HELD_CONDITION_DOMAIN,HELD_SPLIT_POLICY,HELD_ECONOMIC_WEIGHTING)
+    held=dict(version=HELD_TRAINING_POPULATION,stage="E1",reference_mode="E1",
+        conditional_holding_domain=HELD_CONDITION_DOMAIN,pending_L2_entry_or_exit_used=False,
+        candidate_clones_are_holding_population=False,holding_checkpoint_upgrade=False,
+        split_policy=HELD_SPLIT_POLICY,economic_weighting=HELD_ECONOMIC_WEIGHTING,
+        source_snapshot_hash=cfg["source_snapshot_hash"],candidate_policy_hash=cfg["candidate_policy_hash"],
+        continuation_policy_hash=cfg["E1_policy_hash"],manifest_path="dataset/E1/manifest.json",
+        manifest_sha256="test-held-manifest",pooled_exits_path="dataset/E1/exits.parquet",
+        pooled_exits_sha256="test-held-exits",records_hash="test-held-records")
+    report["holding_population"]=held
+    report.setdefault("protocol_freeze",{})["holding_population_hash"]=stable_hash(held)
 
 
-def test_actual_manual_holding_blocks_switch_and_rollback(service, monkeypatch):
-    with sqlite3.connect(service.holdings_path) as conn:
-        conn.execute("CREATE TABLE holdings(symbol TEXT,shares INTEGER)")
-        conn.execute("INSERT INTO holdings VALUES ('600000.SH',100)")
+def test_active_reference_work_blocks_switch_and_rollback(service, monkeypatch):
+    service.selection_guard=lambda:["active reference scan"]
     monkeypatch.setattr(service,"_verify_comparison",lambda run:(dict(incumbent_run_id=None),{},{}))
     assert service.select_candidate("candidate")["status"] == "blocked"
     assert service.rollback(None)["status"] == "blocked"
@@ -307,10 +320,10 @@ def test_unavailable_explicit_device_is_preflight_error(service,monkeypatch):
 def test_subprocess_cancel_terminates_own_child_tree(tmp_path):
     import psutil
     cancelled=threading.Event(); child_pids=[]
-    code="import subprocess,sys,time; p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); print('CHILD '+str(p.pid),flush=True); time.sleep(30)"
+    code="import subprocess,sys,time; p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); print('STAGE owned_child CHILD '+str(p.pid),flush=True); time.sleep(30)"
     def progress(payload):
-        if payload["message"].startswith("CHILD "):
-            child_pids.append(int(payload["message"].split()[1])); cancelled.set()
+        if payload.get("stage")=="owned_child":
+            child_pids.append(int(payload["message"].split()[-1])); cancelled.set()
     def check():
         if cancelled.is_set(): raise RuntimeError("cancel requested")
     with pytest.raises(RuntimeError,match="cancel requested"):
@@ -460,7 +473,7 @@ def test_archived_fixed_size_defaults_migrate_once_without_rewriting_history(ser
     with sqlite3.connect(service.db_path) as conn:
         conn.execute("INSERT INTO training_profiles VALUES ('personal',4,'old',?,?,?)",(serialized,stable_hash(archived),"before"))
         conn.execute("UPDATE training_default SET profile_id='personal',revision=4 WHERE id=1")
-    migrated=center.TrainingCenter(store=service.store,db_path=service.db_path,personal_db=service.holdings_path)
+    migrated=center.TrainingCenter(store=service.store,db_path=service.db_path)
     saved=migrated.profiles()["default_profile"]
     assert saved["revision"]==5 and saved["parameters"]["end"] is None
     assert saved["parameters"]["liquidity_min_median_amount"]==30000000
@@ -594,10 +607,10 @@ def test_cancel_kills_own_group_when_child_ignores_sigterm(tmp_path):
     import psutil
     cancelled=threading.Event(); pids=[]
     child="import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('READY',flush=True); time.sleep(60)"
-    code="import subprocess,sys,time; p=subprocess.Popen([sys.executable,'-c',"+repr(child)+"],stdout=subprocess.PIPE,text=True); p.stdout.readline(); print('CHILD '+str(p.pid),flush=True); time.sleep(60)"
+    code="import subprocess,sys,time; p=subprocess.Popen([sys.executable,'-c',"+repr(child)+"],stdout=subprocess.PIPE,text=True); p.stdout.readline(); print('STAGE owned_child CHILD '+str(p.pid),flush=True); time.sleep(60)"
     def progress(payload):
-        if payload.get("message", "").startswith("CHILD "):
-            pids.append(int(payload["message"].split()[1])); cancelled.set()
+        if payload.get("stage")=="owned_child":
+            pids.append(int(payload["message"].split()[-1])); cancelled.set()
     def check():
         if cancelled.is_set(): raise RuntimeError("cancel own isolated group")
     try:
@@ -649,15 +662,94 @@ def test_alias_cannot_change_run_or_effective_date(verified_comparison):
     assert service.active_model_run_id() is None and service.integrity_errors
 
 
-def test_transaction_rechecks_live_holdings(verified_comparison):
+def test_transaction_rechecks_active_reference_work(verified_comparison):
     service,_,_=verified_comparison
     checks=[]
     def guard():
         checks.append(True)
-        return [] if len(checks)==1 else ["active account changed"]
-    service.holding_guard=guard
+        return [] if len(checks)==1 else ["active reference task appeared"]
+    service.selection_guard=guard
     assert service.select_candidate("candidate")["status"]=="blocked"
     assert service.current_selection() is None
+
+
+def test_training_center_has_no_retired_account_constructor_fields(service):
+    import inspect
+    parameters=inspect.signature(center.TrainingCenter).parameters
+    assert "holdings_path" not in parameters and "personal_db" not in parameters
+    assert not hasattr(service,"holding_guard") and not hasattr(service,"holdings_path")
+    assert service._selection_reasons()==[]
+
+
+def test_process_population_progress_resets_each_fold_and_ignores_stock_details(tmp_path):
+    def event(population,fold,completed):
+        return "PROGRESS "+json.dumps(dict(stage="dataset",population=population,fold=fold,
+            completed=completed,total=3,scope="current_population_only"))
+    lines=["TRAIN_RUN_ID fresh-model",event("E1",None,0),event("E1",None,3),
+        *["DATASET E1 000001.SZ entries=1 exits=0"]*12,
+        event("final_population/first","first",0),event("final_population/first","first",3),
+        event("final_population/production","production",0),event("final_population/production","production",2)]
+    command=[sys.executable,"-u","-c","\n".join("print("+repr(line)+",flush=True)" for line in lines)]
+    events=[]
+    center.TrainingCenter._run_process(command,tmp_path/"progress.log",events.append,None,source_total=3)
+    counts=[(item["population"],item["completed"],item["total"]) for item in events if "population" in item]
+    assert counts==[("E1",0,3),("E1",3,3),("final_population/first",0,3),
+        ("final_population/first",3,3),("final_population/production",0,3),("final_population/production",2,3)]
+    assert all(item["completed"]<=item["total"] for item in events if "completed" in item)
+
+
+@pytest.mark.parametrize("change",[{"completed":4},{"completed":-1},{"completed":True},
+    {"total":4},{"population":"final_population/foreign"},{"scope":"all_folds_summed"}])
+def test_process_rejects_wrong_population_progress_even_without_callback(tmp_path,change):
+    event=dict(stage="dataset",population="final_population/production",fold="production",
+        completed=1,total=3,scope="current_population_only")
+    event.update(change)
+    line="PROGRESS "+json.dumps(event)
+    command=[sys.executable,"-u","-c","print("+repr(line)+",flush=True)"]
+    with pytest.raises(ValueError,match="人口进度"):
+        center.TrainingCenter._run_process(command,tmp_path/"invalid-progress.log",None,None,source_total=3)
+
+
+def test_process_detail_logs_and_identity_updates_preserve_dataset_progress(tmp_path):
+    lines=["STAGE E0_actual_rule_bootstrap_no_HR",
+        "PROGRESS "+json.dumps(dict(stage="dataset",population="E0",fold=None,
+            completed=2,total=3,scope="current_population_only")),
+        "DATASET E0 000001.SZ entries=1 exits=0","TREND_HEAD detail","warning: detail","",
+        "TRAIN_RUN_ID fresh-model"]
+    command=[sys.executable,"-u","-c","\n".join("print("+repr(line)+",flush=True)" for line in lines)]
+    events=[]
+    ids=center.TrainingCenter._run_process(command,tmp_path/"detail.log",events.append,None,source_total=3)
+    assert ids["model_run_id"]=="fresh-model"
+    assert len(events)==3
+    assert [(item["stage"],item["completed"],item["total"]) for item in events]==[
+        ("E0_actual_rule_bootstrap_no_HR",0,0),("E0",2,3),("E0",2,3)]
+    assert events[-1]["population"]=="E0" and events[-1]["children"]["model_run_id"]=="fresh-model"
+    assert "warning: detail" in (tmp_path/"detail.log").read_text()
+
+
+def test_process_diagnostic_progress_counts_only_frozen_fold_stocks(tmp_path):
+    def event(fold,completed):
+        return "DIAGNOSTIC_PROGRESS "+json.dumps(dict(stage="diagnostics",fold=fold,message=fold,
+            scope="current_diagnostic_fold_stocks",completed=completed,total=3))
+    lines=["STAGE diagnostics",event("first",3),"diagnostic detail",event("production",1),
+        "DIAGNOSTIC_RUN_ID diagnostic-result"]
+    command=[sys.executable,"-u","-c","\n".join("print("+repr(line)+",flush=True)" for line in lines)]
+    events=[]
+    center.TrainingCenter._run_process(command,tmp_path/"diagnostic-progress.log",events.append,None,source_total=3)
+    assert [(item.get("fold"),item["completed"],item["total"]) for item in events]==[
+        (None,0,0),("first",3,3),("production",1,3),("production",1,3)]
+    assert events[-1]["children"]["diagnostic_run_id"]=="diagnostic-result"
+
+
+@pytest.mark.parametrize("change",[{"total":4},{"completed":4},{"completed":True},
+    {"scope":"diagnostic_rows"},{"scope":None},{"fold":None}])
+def test_process_rejects_diagnostic_rows_or_wrong_frozen_population(tmp_path,change):
+    event=dict(stage="diagnostics",fold="production",scope="current_diagnostic_fold_stocks",
+        completed=1,total=3);event.update(change)
+    line="DIAGNOSTIC_PROGRESS "+json.dumps(event)
+    command=[sys.executable,"-u","-c","print("+repr(line)+",flush=True)"]
+    with pytest.raises(ValueError,match="诊断进度"):
+        center.TrainingCenter._run_process(command,tmp_path/"bad-diagnostic-progress.log",None,None,source_total=3)
 
 
 def test_status_reports_effective_incumbent_date_while_replacement_waits(service,monkeypatch):
@@ -696,3 +788,44 @@ def test_comparison_cannot_substitute_plain_archive_account(verified_comparison)
     with pytest.raises(ValueError,match="schema|archive"):
         service.select_candidate("candidate")
     assert service.current_selection() is None
+
+
+def test_reference_quality_progress_keeps_separate_complete_stock_populations(tmp_path):
+    def event(stage,completed):
+        return 'REFERENCE_QUALITY_PROGRESS '+json.dumps(dict(stage=stage,fold=None,
+            scope='current_reference_population_stocks',completed=completed,total=3))
+    lines=['STAGE reference_quality_population',event('reference_quality_population',3),
+        'DATASET reference_quality 000001.SZ entries=12 exits=0',
+        'STAGE reference_quality_fee_qualification',event('reference_quality_fee_qualification',1),
+        'TRAIN_RUN_ID model-result']
+    command=[sys.executable,'-u','-c','\n'.join('print('+repr(line)+',flush=True)' for line in lines)]
+    events=[]
+    center.TrainingCenter._run_process(command,tmp_path/'reference-progress.log',events.append,None,source_total=3)
+    records=[e for e in events if e.get('scope')=='current_reference_population_stocks']
+    assert [(e['stage'],e['completed'],e['total']) for e in records]==[
+        ('reference_quality_population',3,3),('reference_quality_fee_qualification',1,3),
+        ('reference_quality_fee_qualification',1,3)]
+    assert all(e['device']=='cpu' for e in records)
+    assert records[-1]['children']['model_run_id']=='model-result'
+
+
+@pytest.mark.parametrize('change',[{'stage':'entry'},{'total':4},{'completed':4},
+    {'completed':True},{'completed':-1},{'scope':'reference_rows'},{'fold':'production'}])
+def test_reference_progress_rejects_wrong_stock_population_without_callback(tmp_path,change):
+    value=dict(stage='reference_quality_population',fold=None,scope='current_reference_population_stocks',
+        completed=1,total=3);value.update(change)
+    line='REFERENCE_QUALITY_PROGRESS '+json.dumps(value)
+    command=[sys.executable,'-u','-c','print('+repr(line)+',flush=True)']
+    with pytest.raises(ValueError,match='参考质量进度'):
+        center.TrainingCenter._run_process(command,tmp_path/'bad-reference-progress.log',None,None,source_total=3)
+
+
+def test_reference_summary_reports_independent_fee_qualification_as_optional():
+    report={'reference_quality':{'status':'unqualified','bundles':[{'name':'fold'}],
+        'unavailable_heads':[{'fold':'production','reason':'both classes missing'}],
+        'population':{'population':'account_free_daily_original_BUY_risk_probes','population_hash':'population'},
+        'qualification':{'status':'rejected','passed':False,'path':'validation/reference_quality/qualification.json','sha256':'actual'}}}
+    summary=center._reference_quality_summary(report)
+    assert summary['heads']==1 and summary['status']=='unqualified' and not summary['fee_qualified']
+    assert summary['fee_status']=='rejected' and summary['required_for_core_selection'] is False
+    assert summary['population_hash']=='population' and summary['qualification_sha256']=='actual'

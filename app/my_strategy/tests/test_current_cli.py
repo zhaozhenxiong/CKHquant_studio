@@ -7,20 +7,22 @@ import pytest
 from my_strategy import cli
 
 
-@pytest.mark.parametrize("command", ["research-train", "research-dual-train", "research-wyckoff-train", "research-high-return-train", "research-promote", "research-high-return-diagnostics"])
+@pytest.mark.parametrize("command", ["research-train", "research-dual-train", "research-wyckoff-train", "research-high-return-train", "research-promote", "research-high-return-diagnostics", "backtest", "backtest-batch"])
 def test_retired_commands_are_not_aliases_for_current_identity(command):
     with pytest.raises(SystemExit) as error:
         cli.build_parser().parse_args([command])
     assert error.value.code == 2
 
 
-@pytest.mark.parametrize("name", ["analyze", "scan", "backtest", "backtest-batch"])
+@pytest.mark.parametrize("name", ["analyze", "scan"])
 def test_current_entry_rejects_old_model_family_option(name):
     with pytest.raises(SystemExit) as error:
         cli.build_parser().parse_args([name, "--model-family", "high_return"])
     assert error.value.code == 2
     args = cli.build_parser().parse_args([name])
-    assert args.model_run_id is None and args.initial_cash is None
+    assert args.model_run_id is None and not hasattr(args,"initial_cash")
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args([name,"--initial-cash","100000"])
 
 
 def test_train_cli_delegates_frozen_input_and_effective_parameters_without_training(monkeypatch):
@@ -55,13 +57,15 @@ def test_scan_uses_current_shared_entry_without_changing_model_selection(monkeyp
     assert seen[0]["model_run_id"] is None and "model_family" not in seen[0]
 
 
-def test_backtest_passes_explicit_current_head_and_keeps_config_cash_default(monkeypatch):
+def test_analysis_passes_current_head_and_optional_position_without_cash_account(monkeypatch,capsys):
     from my_strategy.web_dashboard import trend_strategy
     seen = []
-    monkeypatch.setattr(trend_strategy, "backtest_trend_consensus", lambda **kwargs: seen.append(kwargs) or {"run_id": "backtest"})
-    assert cli.main(["backtest", "--symbol", "600519.SH", "--model-run-id", "new-current-run"]) == 0
-    assert seen[0]["model_run_id"] == "new-current-run" and seen[0]["symbols"] == ["600519.SH"]
+    monkeypatch.setattr(trend_strategy, "analyze_trend_consensus", lambda **kwargs: seen.append(kwargs) or {"symbol":"600519.SH","data_end":"2026-10-12"})
+    assert cli.main(["analyze", "--symbol", "600519.SH", "--model-run-id", "new-current-run", "--model-fold","trend_2026Q3","--current-position","25","--json"]) == 0
+    assert seen[0]["model_run_id"] == "new-current-run" and seen[0]["symbol"] == "600519.SH"
+    assert seen[0]["model_fold"]=="trend_2026Q3" and seen[0]["current_position_fraction"]==.25
     assert "initial_cash" not in seen[0]
+    assert json.loads(capsys.readouterr().out)["symbol"]=="600519.SH"
 
 
 def test_diagnostic_cli_is_read_only_and_bounds_worker_count(monkeypatch, capsys):
@@ -75,7 +79,7 @@ def test_diagnostic_cli_is_read_only_and_bounds_worker_count(monkeypatch, capsys
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("name", ["analyze", "scan", "backtest", "backtest-batch"])
+@pytest.mark.parametrize("name", ["analyze", "scan"])
 def test_current_cli_rejects_retired_public_production_label(name):
     with pytest.raises(SystemExit) as error:
         cli.build_parser().parse_args([name, "--usage-mode", "production"])

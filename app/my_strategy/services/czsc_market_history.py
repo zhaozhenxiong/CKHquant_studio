@@ -5,6 +5,7 @@ from collections import Counter, defaultdict
 from contextlib import closing
 from datetime import datetime
 import json
+import copy
 import math
 from pathlib import Path
 import sqlite3
@@ -255,6 +256,9 @@ def stock_facts(symbol, dates, *, overlay=None, failure=None, sector=None, name=
             "new_events": new, "active_events": list(active.values()),
             "invalidated_events": len(w_eval.get("invalidations_at_day", [])) if available else 0,
             "model_resolution": resolution,
+            "source_reference_points": copy.deepcopy((row or {}).get("source_reference_points", [])) if reference else [],
+            "reference_risk_plan": copy.deepcopy((row or {}).get("reference_risk_plan")) if reference else None,
+            "position_reference": copy.deepcopy((row or {}).get("position_reference")) if reference else None,
             "account_id": None if reference else (account.get("context") or account.get("series_context") or {}).get("account_id")})
     return facts
 

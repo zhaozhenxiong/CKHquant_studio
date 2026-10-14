@@ -8,7 +8,8 @@ from my_strategy.core.run_context import stable_hash
 from my_strategy.execution.cost_model import CostModel
 from my_strategy.services.czsc_backtest import _tick
 from my_strategy.services.czsc_trend_contracts import (STRATEGY_ID, TRAINING_POPULATION,
-    CANDIDATE_POLICY, ENTRY_HEADS, HOLDING_HEADS, head_dependency_policy)
+    CANDIDATE_POLICY, ENTRY_HEADS, HOLDING_HEADS, L2_HOLDING_HEADS,
+    HELD_CONDITION_DOMAIN, head_dependency_policy)
 
 ENTRY_LABEL_VERSION = "czsc_trend_daily_attempt_forced_episode_high_return"
 EXIT_LABEL_VERSION = "czsc_trend_continuous_sell_remaining_value_exit_advantage"
@@ -145,6 +146,12 @@ def target_contract(*, head, config, market_dates, source_snapshot_hash,
     if entry_head and config.get("reference_population") is not None:
         value["reference_population"] = config["reference_population"]
         value["reference_population_hash"] = stable_hash(config["reference_population"])
+    if head in L2_HOLDING_HEADS:
+        value["conditional_holding_domain"] = HELD_CONDITION_DOMAIN
+        value["reference_account"] = "preregistered_E1_actual_Broker_account_no_L2_feedback"
+        if config.get("holding_population") is not None:
+            value["holding_population"] = config["holding_population"]
+            value["holding_population_hash"] = stable_hash(config["holding_population"])
     return {**value, "contract_hash": stable_hash(value)}
 
 

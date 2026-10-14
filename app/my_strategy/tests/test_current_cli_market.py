@@ -38,7 +38,7 @@ def market_state(tmp_path):
     return cwd, env, rows[-1][1]
 
 
-@pytest.mark.parametrize("command", ["analyze", "scan", "backtest"])
+@pytest.mark.parametrize("command", ["analyze", "scan"])
 def test_current_cli_rebuilds_observation_and_persists_without_workstation_model(market_state, command):
     cwd, env, end = market_state
     completed = subprocess.run([sys.executable, "-m", "my_strategy.cli", command, "--symbol", "000001.SZ", "--start", "2026-01-01", "--end", end,

@@ -35,8 +35,7 @@ class TaskManager:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.results = results or ResultStore()
         from my_strategy.services.model_training_center import TrainingCenter
-        self.training = TrainingCenter(store=self.results, metadata_root=self.db_path.parent,
-            personal_db=self.db_path.parent / "personal_portfolio.db")
+        self.training = TrainingCenter(store=self.results, metadata_root=self.db_path.parent)
         self._lock = threading.RLock()
         self._cancel: dict[str, threading.Event] = {}
         self._closed = False
@@ -47,7 +46,7 @@ class TaskManager:
             conn.commit()
         with closing(sqlite3.connect(self.db_path)) as conn:
             active = conn.execute("SELECT payload FROM czsc_tasks WHERE status IN ('queued','running','cancelling')").fetchall()
-        self.training.holding_guard = self._active_account_reasons
+        self.training.selection_guard = self._active_selection_reasons
         for payload, in active:
             job = json.loads(payload)
             try:
@@ -58,13 +57,13 @@ class TaskManager:
             if not live:
                 self._patch(job["job_id"], status="failed", error="服务重启中断了任务，请重新提交。")
 
-    def _active_account_reasons(self):
-        """A running account must finish under its frozen model selection."""
+    def _active_selection_reasons(self):
+        """A running reference scan must finish under its frozen model selection."""
         with closing(sqlite3.connect(self.db_path, timeout=30)) as conn:
             rows = conn.execute("SELECT payload FROM czsc_tasks WHERE status IN ('queued','running','cancelling')").fetchall()
         jobs = [json.loads(row[0]) for row in rows]
-        active = [job for job in jobs if job.get('kind') in {'scan', 'backtest'}]
-        return [f"账户任务 {job['job_id']} 正在运行，完成或取消后才能切换模型" for job in active]
+        active = [job for job in jobs if job.get('kind') == 'scan']
+        return [f"参考扫描任务 {job['job_id']} 正在运行，完成或取消后才能切换模型" for job in active]
 
     def _write(self, job: dict[str, Any]) -> None:
         with closing(sqlite3.connect(self.db_path, timeout=30)) as conn:
@@ -95,7 +94,7 @@ class TaskManager:
             return job
 
     def submit(self, kind: str, spec: dict[str, Any]) -> dict[str, Any]:
-        if kind not in {"scan", "backtest", "update", "model_training", "model_validation"}:
+        if kind not in {"scan", "update", "model_training", "model_validation"}:
             raise ValueError("任务类型不受支持")
         with self._lock:
             if self._closed:
@@ -170,90 +169,27 @@ class TaskManager:
         def report_progress(stage, current=0, total=0, failed=0, **details):
             self._check(job_id)
             previous = self.get(job_id).get("progress", 0)
-            overall = 0 if kind in {"model_training", "model_validation"} else max(previous, min(95, current / total * 95) if total else previous)
+            if current < 0 or total < 0 or (total and current > total):
+                raise ValueError("阶段进度超出实际总数")
+            overall = (min(95, current / total * 95) if total else 0) if kind in {"model_training", "model_validation"} else max(previous, min(95, current / total * 95) if total else previous)
+            scope = "current_stage" if kind in {"model_training", "model_validation"} else "task"
             self._patch(job_id, progress=overall,
                 progress_detail={"stage": stage, "current": current, "total": total,
-                                 "failed": failed, **details})
+                                 "failed": failed, "progress_scope": scope, **details})
         callbacks = {"progress": report_progress, "check_cancel": lambda: self._check(job_id),
                      "run_callback": lambda run_id: self._patch(job_id, run_id=run_id)}
         if kind == "model_training":
             return self.training.run_training_job(spec, **callbacks)
         if kind == "model_validation":
             return self.training.run_validation_job(spec, **callbacks)
-        if kind == "scan" or spec.get("research", True):
-            from my_strategy.web_dashboard.trend_strategy import scan_trend_consensus, backtest_trend_consensus
-            params = {key: spec.get(key) for key in ("symbols", "start", "end", "model_run_id", "model_fold",
-                "usage_mode", "calendar_run_id", "device", "cpu_workers", "consensus_config") if spec.get(key) is not None}
-            params['symbols'] = spec.get('symbols') or None
-            params.setdefault('start', '2026-01-01')
-            if kind == 'scan':
-                return scan_trend_consensus(**params, structure_only=not spec.get('research', True), **callbacks)
-            return backtest_trend_consensus(**params, initial_cash=spec.get('initial_cash', 100000), **callbacks)
-        symbols = spec.get("symbols") or [row["symbol"] for row in list_symbols()]
-        if not symbols:
-            raise ValueError("本地行情没有有效股票")
-        latest = latest_market_date(spec.get("end"))
-        end = spec.get("end") or latest
-        scan_date = latest if kind == "scan" else end
-        if not scan_date:
-            raise ValueError("请求截止日之前没有市场行情")
-        settings = strategy_config()
-        context = create_run_context(task=f"czsc-{kind}", as_of_date=end, config={"request": spec, "strategy": settings}, data_version=str(latest), scope="full" if len(symbols) > 1 else "single", source=spec.get("source", "web"), stocks=symbols, start_date=spec.get("start"), end_date=end)
-        self._patch(job_id, run_id=context.run_id)
-        from my_strategy.services.czsc_batch import iter_replay_batches
-        failures, rows, accounts, compute_batches = [], [], [], []
-        last_progress, last_notice = 0.0, 0.0
-        def preparation_progress(completed, total, failed):
-            nonlocal last_progress, last_notice
-            self._check(job_id)
-            if time.monotonic() - last_notice < .25 and completed != total:
-                return
-            last_notice = time.monotonic()
-            last_progress = max(last_progress, completed / total * 70 if total else 0)
-            self._patch(job_id, progress=last_progress, progress_detail={"stage": "CPU并行结构预处理", "current": completed, "total": total, "failed": failed})
-        for batch in iter_replay_batches(symbols, end=scan_date, config=settings, device=spec.get("device"),
-                                        require_latest=kind == "scan", check_cancel=lambda: self._check(job_id),
-                                        progress=preparation_progress, cpu_workers=spec.get("cpu_workers"), batch_size=spec.get("batch_size")):
-            self._check(job_id)
-            failures.extend(batch["failures"])
-            compute_batches.append(batch["compute_info"])
-            for prepared, session in zip(batch["prepared"], batch["sessions"], strict=True):
-                self._check(job_id)
-                symbol, frame = prepared.symbol, prepared.frame
-                try:
-                    if kind == "scan":
-                        data_end = pd.Timestamp(frame.iloc[-1]["date"]).date().isoformat()
-                        if data_end != scan_date:
-                            raise ValueError(f"行情缺少扫描日 {scan_date}，标的最后日期为 {data_end}")
-                        if spec.get("start") and spec["start"] > data_end:
-                            raise ValueError("起始日期晚于可用行情截止日")
-                        current = [event for event in session.events if str(event.get("available_at", event.get("time", "")))[:10] == data_end]
-                        event = current[-1] if current else {}
-                        warnings = ["周/月线在下一周期首次观测后才确认闭合，末桶不用于规则。", "事件为研究意图，真实成交以回测账本为准。"]
-                        if frame.attrs.get("legacy_fuyao_bars"):
-                            warnings.append("包含旧fuyao来源，复权口径未核验，相关成交拒单。")
-                        rows.append({"symbol": symbol, "name": "", "signal": event.get("signal", "无已确认事件"), "action": event.get("action", "watch"), "available_at": event.get("available_at", data_end), "reason": event.get("reason", "当前交易日未触发规则"), "data_end": data_end, "data_version": frame.attrs["data_version"], "warnings": warnings})
-                    else:
-                        from my_strategy.services.czsc_backtest import backtest_stock
-                        account = backtest_stock(symbol, start=spec["start"], end=end, initial_cash=float(spec.get("initial_cash", 100000)) / len(symbols), config=settings, run_context=context,
-                                                 prepared=prepared, session=session, compute_info=batch["compute_info"])
-                        accounts.append(account)
-                except (ValueError, FileNotFoundError) as exc:
-                    failures.append({"symbol": symbol, "error": str(exc)})
-            completed = len(rows if kind == "scan" else accounts) + len(failures)
-            last_progress = max(last_progress, completed / len(symbols) * 95)
-            self._patch(job_id, progress=last_progress, compute_info=aggregate_compute(compute_batches), progress_detail={"stage": "批量信号与规则事件" if kind == "scan" else "实际成交回测", "current": completed, "total": len(symbols), "failed": len(failures)})
-        self._check(job_id)
-        self._patch(job_id, progress_detail={"stage": "保存结果", "current": len(symbols), "total": len(symbols), "failed": len(failures)})
-        if len(failures) == len(symbols):
-            raise ValueError(f"全部 {len(symbols)} 个标的失败：{failures[:3]}")
-        input_versions = {item["symbol"]: item["data_version"] for item in (rows if kind == "scan" else accounts)}
-        compute_info = aggregate_compute(compute_batches)
-        context.write_metadata({"config": {"request": spec, "strategy": settings}, "input_versions": input_versions, "failures": failures, "compute_info": compute_info})
-        common = {"run_id": context.run_id, "run_context": context.to_dict(), "data_version": stable_hash(input_versions), "input_versions": input_versions, "strategy_version": settings["strategy_version"], "source_sha256": settings["source_sha256"], "failures": failures, "coverage": {"requested": len(symbols), "success": len(symbols) - len(failures), "failed": len(failures)}, "data_range": {"start": spec.get("start"), "end": end}, "symbols": symbols, "compute_info": compute_info}
-        if kind == "scan":
-            return {**common, "rows": rows}
-        return {**common, **aggregate_accounts(accounts, float(spec.get("initial_cash", 100000)), len(symbols)), "symbol": symbols[0] if len(symbols) == 1 else "", "allocation": "固定等额分仓；无跨股票资金再分配", "accounts": [{"symbol": account.get("symbol"), "run_id": account.get("run_id"), "metrics": account.get("metrics"), "data_range": account.get("data_range"), "data_version": account.get("data_version"), "config_hash": account.get("config_hash"), "artifacts": account.get("artifacts")} for account in accounts]}
+        if kind != "scan":
+            raise ValueError("任务类型不受支持")
+        from my_strategy.web_dashboard.trend_strategy import scan_trend_consensus
+        params = {key: spec.get(key) for key in ("symbols", "start", "end", "model_run_id", "model_fold",
+            "usage_mode", "calendar_run_id", "device", "cpu_workers", "consensus_config") if spec.get(key) is not None}
+        params['symbols'] = spec.get('symbols') or None
+        params.setdefault('start', '2026-01-01')
+        return scan_trend_consensus(**params, structure_only=not spec.get('research', True), **callbacks)
 
     def _update(self, job_id: str, spec: dict[str, Any]) -> dict[str, Any]:
         from my_strategy.adapters.czsc_adapter import data_status
@@ -335,25 +271,3 @@ def aggregate_compute(batches: list[dict[str, Any]]) -> dict[str, Any]:
     info["stages"] = [{**stage, "device": info["actual_device"] if stage.get("stage") == "batched_signals" else stage.get("device")} for stage in info.get("stages", [])]
     info["batch_records"] = [{key: batch.get(key) for key in ("selected_device", "actual_device", "backend", "cuda_work", "mps_work", "gpu_work", "batch_size", "bars", "cuda_elapsed_ms", "fallback_reason")} for batch in batches]
     return info
-
-
-def aggregate_accounts(accounts: list[dict[str, Any]], initial_cash: float, requested: int) -> dict[str, Any]:
-    """Mark equal-budget accounts on a common date index; failed accounts stay cash."""
-    series = []
-    trades, rejections, limitations = [], [], []
-    for account in accounts:
-        frame = pd.DataFrame(account["daily"])
-        if frame.empty:
-            raise ValueError("回测未产生每日账本")
-        date_key = "date" if "date" in frame else "dt"
-        series.append(pd.Series(frame["equity"].to_numpy(), index=pd.to_datetime(frame[date_key])).sort_index())
-        trades.extend(account.get("trades", []))
-        rejections.extend(account.get("rejections", []))
-        limitations.extend(account.get("limitations", []))
-    daily = pd.concat(series, axis=1).sort_index().ffill().fillna(initial_cash / requested)
-    equity = daily.sum(axis=1) + (requested - len(accounts)) * initial_cash / requested
-    peak = equity.cummax().clip(lower=initial_cash)
-    drawdown = equity / peak - 1
-    net_return = float(equity.iloc[-1] / initial_cash - 1)
-    values = [{"date": date.strftime("%Y-%m-%d"), "equity": float(value), "drawdown": float(drawdown.loc[date])} for date, value in equity.items()]
-    return {"initial_cash": initial_cash, "daily": values, "trades": sorted(trades, key=lambda row: (row["date"], row["symbol"])), "rejections": rejections, "limitations": list(dict.fromkeys(limitations)), "metrics": {"net_return": net_return, "total_return": net_return, "max_drawdown": float(-drawdown.min()), "trades": len(trades), "trade_count": len(trades), "final_equity": float(equity.iloc[-1]), "fees": sum(float(row.get("fee", 0)) for row in trades)}}

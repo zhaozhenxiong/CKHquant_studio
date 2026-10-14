@@ -116,16 +116,13 @@ def test_package_preserves_saved_personal_records_from_external_metadata(tmp_pat
     unavailable_raw = tmp_path / "no-market.db"
     personal = PersonalStore(metadata / "personal_portfolio.db", unavailable_raw)
     personal.add_watchlist(["000001.SZ", "600036.SH"])
-    personal.save_holding("000001.SZ", 137, 10.25)
     target = tmp_path / "personal-package"
     build_package(source=repo, target=target, include_personal=True)
     assert verify_package(target) == []
     saved = target / "app/my_strategy/data/metadata/personal_portfolio.db"
     reopened = PersonalStore(saved, unavailable_raw)
     assert [row["symbol"] for row in reopened.watchlist()["items"]] == ["000001.SZ", "600036.SH"]
-    holding = reopened.holdings()["items"][0]
-    assert (holding["symbol"], holding["shares"], holding["average_cost"]) == ("000001.SZ", 137, 10.25)
-    assert holding["market_value"] is None
+    assert reopened.watchlist()["coverage"]=={"total":2,"priced":0,"missing":2}
     assert not (target / "app" / CANONICAL_DATABASE_PATHS[0]).exists()
 
 

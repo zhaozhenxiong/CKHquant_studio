@@ -452,16 +452,28 @@ def _connect(path):
     return conn
 
 
+def _reference_quality_summary(report):
+    reference=report.get("reference_quality") or {}
+    qualification=reference.get("qualification") or {}
+    return dict(status=reference.get("status", "unavailable"),
+        heads=len(reference.get("bundles") or []), unavailable_heads=reference.get("unavailable_heads") or [],
+        population=(reference.get("population") or {}).get("population"),
+        population_hash=(reference.get("population") or {}).get("population_hash"),
+        fee_status=qualification.get("status", "unavailable"),
+        fee_qualified=qualification.get("passed") is True,
+        qualification_path=qualification.get("path"), qualification_sha256=qualification.get("sha256"),
+        required_for_core_selection=False, publication_allowed=False)
+
+
 class TrainingCenter:
     _proof_cache = {}
     _proof_lock = threading.RLock()
-    def __init__(self, root=None, store=None, *, db_path=None, runs_root=None, holdings_path=None, metadata_root=None, personal_db=None):
+    def __init__(self, root=None, store=None, *, db_path=None, runs_root=None, metadata_root=None):
         self.store = store or ResultStore()
         self.runs_root = Path(runs_root or getattr(self.store, "runs_root", None) or ARTIFACT_RUNS_ROOT)
         self.db_path = Path(db_path or Path(metadata_root or METADATA_ROOT) / "model_training.db")
         self.registry_path = Path(self.store.db_path)
-        self.holdings_path = Path(holdings_path or personal_db or Path(metadata_root or METADATA_ROOT) / "personal_portfolio.db")
-        self.holding_guard = None
+        self.selection_guard = None
         self.integrity_errors = []
         self._source_reuse_cache = {}
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -518,6 +530,7 @@ class TrainingCenter:
                 ("data", "行情与核验日历", False, "available"), ("trend", "三分类趋势", True, "available"),
                 ("structure", "确认结构证据", False, "available"), ("volume_price", "因果量价证据", False, "available"),
                 ("ma_exit", "信号固定持仓退出", True, "available"), ("entry", "高收益入场质量", True, "available"),
+                ("reference_quality", "无账户参考质量", True, "available"),
                 ("exit", "退出观察", True, "observation_only"), ("return_loss", "辅助收益与亏损", False, "not_connected"))],
             qualification={"min_stocks": 60, "round_trips_per_window": 50, "round_trips_total": 200,
                            "min_net_return": .08, "min_r_multiple": 2., "formal_windows": 3, "formal_sessions_per_window": 480})
@@ -681,7 +694,7 @@ class TrainingCenter:
     def _resolve_pending_session(self, selected):
         events = self.selection_events(200)["items"]
         event = next((item for item in events if item["event_id"] == selected["event_id"]), None)
-        if not event or not event["payload"].get("calendar_run_id") or self._holding_reasons(): return
+        if not event or not event["payload"].get("calendar_run_id") or self._selection_reasons(): return
         from my_strategy.services.czsc_trend_support import _calendar
         try:
             calendar, _ = _calendar()
@@ -696,7 +709,7 @@ class TrainingCenter:
             conn.execute("BEGIN IMMEDIATE")
             current = conn.execute("SELECT event_id,effective_from FROM current_model_selection WHERE id=1").fetchone()
             if not current or current["event_id"] != selected["event_id"] or current["effective_from"]: return
-            if self._holding_reasons(): return
+            if self._selection_reasons(): return
             identity = conn.execute("INSERT INTO current_model_events(kind,payload,created_at) VALUES ('activation',?,?)",(json.dumps(payload,ensure_ascii=False),payload["recorded_at"])).lastrowid
             conn.execute("UPDATE current_model_selection SET event_id=?,effective_from=? WHERE id=1",(identity,effective)); conn.commit()
 
@@ -728,6 +741,7 @@ class TrainingCenter:
                 models.append(dict(run_id=report["run_id"], status=report.get("status"), data_end=report.get("data_end"),
                     model_family="current", strategy_version=STRATEGY_ID, initial_cash=report.get("config",{}).get("initial_cash"),
                     checkpoints=[dict(name=b["name"],checkpoint=b["name"],available_at=b["available_at"],heads=sorted(b.get("heads",{}))) for b in report.get("model_bundles",[])],
+                    reference_quality=_reference_quality_summary(report),
                     completed_at=report.get("completed_at"), required_heads=report.get("required_head_status", {}),
                     required_recent_heads_ready=report.get("required_recent_heads_ready", False), unavailable_heads=report.get("unavailable_heads", []),
                     trained_stock_count=len(report.get("dataset_records", [])),
@@ -1151,7 +1165,8 @@ class TrainingCenter:
             result_ids = self._run_process(args,context.subdir("logs")/"training.log",progress,check_cancel,
                 initial_ids=initial_ids,source_total=len(plan["cohort"]),source_reuse=reuse)
         else:
-            result_ids = self._run_process(args, context.subdir("logs") / "training.log", progress, check_cancel)
+            result_ids = self._run_process(args, context.subdir("logs") / "training.log", progress, check_cancel,
+                source_total=len(plan["cohort"]))
         model_id = result_ids.get("model_run_id")
         result = dict(run_id=context.run_id, training_run_id=model_id, model_run_id=model_id,
                       children=result_ids, plan_id=plan["plan_id"], publication_allowed=False,
@@ -1165,6 +1180,7 @@ class TrainingCenter:
             path = self.runs_root / _identifier(model_id) / "reports" / "trend_consensus.json"
             report = json.loads(path.read_text())
             result["training_status"] = report.get("status")
+            result["reference_quality"] = _reference_quality_summary(report)
             result["trained_stock_count"] = len(report.get("dataset_records", []))
             if check_cancel: check_cancel()
             if report.get("status") == "completed":
@@ -1221,7 +1237,7 @@ class TrainingCenter:
             _save(context.subdir("config")/"validation_plan.json",plan)
             result = dict(run_id=context.run_id,model_run_id=model_id,training_run_id=model_id,
                 plan_id=plan["plan_id"],original_plan_id=original["plan_id"],weights_unchanged=True,
-                training_started=False,publication_allowed=False)
+                training_started=False,publication_allowed=False,reference_quality=_reference_quality_summary(report))
             def emit(payload):
                 if check_cancel: check_cancel()
                 if progress:
@@ -1253,7 +1269,8 @@ class TrainingCenter:
 
     def _run_diagnostics(self,model_id,plan,log_path,progress,check_cancel):
         identities=self._run_process([sys.executable,"-u","-m","my_strategy.scripts.model_diagnostics",
-            "--model-run-id",model_id,"--cpu-workers",str(min(4,plan["parameters"]["cpu_workers"]))],log_path,progress,check_cancel)
+            "--model-run-id",model_id,"--cpu-workers",str(min(4,plan["parameters"]["cpu_workers"]))],
+            log_path,progress,check_cancel,source_total=len(plan["cohort"]))
         identity=identities.get("diagnostic_run_id")
         if not identity: raise ValueError("诊断子进程未返回实际运行身份")
         path=self.runs_root/_identifier(identity)/"reports/high_return_sample_diagnostics.json"
@@ -1323,7 +1340,10 @@ class TrainingCenter:
             registered["training_capacity_tiers"] = actual["training_capacity_tiers"]
         from my_strategy.services.czsc_trend_pipeline import POPULATION_VERSION
         pipeline=stable_hash(dict(family=STRATEGY_ID,source=source,calendar_hash=source["source_snapshot"]["calendar_hash"],registered_config=registered,
-            order=["independent_trend","policy_only_sources","E0_no_HR","MA_exit_E0","pinned_E1","strict_prior_L2_actual_flat_population_by_fold","L2_entry_forced_E1_clone","L2_exit_shadow"],
+            order=["independent_trend","policy_only_sources","E0_no_HR","MA_exit_E0","pinned_E1",
+                "preregistered_actual_E1_holding_pairs","account_free_reference_quality_probes",
+                "independent_reference_quality_heads_and_fee_qualification","strict_prior_L2_actual_flat_population_by_fold",
+                "L2_entry_forced_E1_clone","L2_exit_preregistered_actual_E1_pairs"],
             reference_population_protocol=POPULATION_VERSION,self_training_population_feedback=False,reassessment=registered["reassessment"],no_E2_entry_reuse=True))
         candidate=stable_hash(dict(candidate=actual["candidate_policy"],risk_policy=actual["risk_policy"],
             trend_candidate={k:actual["trend"][k] for k in ("candidate_cross_threshold","candidate_margin")},
@@ -1335,6 +1355,12 @@ class TrainingCenter:
             holding_threshold=actual["account"]["holding_exit_threshold"],no_head="entire_position_E0",checkpoint_upgrade=False,L2_exit_apply=False))
         if any(actual.get(key)!=value for key,value in (("pipeline_contract_hash",pipeline),("candidate_policy_hash",candidate),("E0_policy_hash",bootstrap),("E1_policy_hash",continuation))):
             raise ValueError("派生训练政策哈希与真实当前来源、配置和模型目录不同")
+        from my_strategy.services.czsc_trend_contracts import validate_holding_population
+        held=validate_holding_population(report.get("holding_population"))
+        if (held["source_snapshot_hash"]!=source["snapshot_hash"]
+                or held["candidate_policy_hash"]!=candidate or held["continuation_policy_hash"]!=continuation
+                or report.get("protocol_freeze",{}).get("holding_population_hash")!=stable_hash(held)):
+            raise ValueError("独立E1实际持仓退出人口未绑定当前完整训练来源和冻结续持")
 
     @staticmethod
     def _run_process(args, log_path, progress, check_cancel, *, initial_ids=None, source_total=0, source_reuse=None):
@@ -1354,7 +1380,11 @@ class TrainingCenter:
                 for line in process.stdout: messages.put(line)
                 messages.put(None)
             reader = threading.Thread(target=collect, daemon=True); reader.start()
-            result_ids = dict(initial_ids or {}); done = False; dataset_counts = {}
+            result_ids = dict(initial_ids or {}); done = False; population_progress = {}; diagnostic_progress = {}; reference_progress = {}
+            last_progress={}
+            def publish_progress(payload):
+                last_progress.clear();last_progress.update(copy.deepcopy(payload))
+                if progress:progress(payload)
             with log_path.open("w", encoding="utf-8") as handle:
                 if source_reuse:
                     event=dict(source_native_run_id=source_reuse["source_native_run_id"],
@@ -1363,7 +1393,7 @@ class TrainingCenter:
                         population_hash=source_reuse["population_hash"],selected_count=source_total,
                         source_reused=True,reused_model_or_label=False)
                     handle.write("SOURCE_REUSE_VERIFIED "+json.dumps(event,ensure_ascii=False)+"\n"); handle.flush()
-                    if progress: progress(dict(stage="frozen_source_verification",completed=source_total,total=source_total,
+                    if progress: publish_progress(dict(stage="frozen_source_verification",completed=source_total,total=source_total,
                         message="复用已实际核验的完整冻结输入，所有模型头在新运行重新训练",children=copy.deepcopy(result_ids),source_reused=True))
                 while not done:
                     if check_cancel: check_cancel()
@@ -1371,35 +1401,84 @@ class TrainingCenter:
                     except queue.Empty: continue
                     if line is None: done=True; continue
                     handle.write(line); handle.flush(); text = line.strip()
+                    identity_changed=False
                     for prefix, key in (("RAW_SOURCE_RUN_ID ", "raw_source_run_id"), ("NATIVE_SOURCE_RUN_ID ", "source_native_run_id"), ("TRAIN_RUN_ID ", "model_run_id"), ("COMPLETED ", "model_run_id"), ("CAPACITY_PROBE ", "model_run_id"), ("DIAGNOSTIC_RUN_ID ","diagnostic_run_id")):
-                        if text.startswith(prefix): result_ids[key] = text[len(prefix):].split()[0]
+                        if text.startswith(prefix):
+                            result_ids[key] = text[len(prefix):].split()[0];identity_changed=True
+                    dataset_event=None
+                    if text.startswith("PROGRESS "):
+                        event=json.loads(text[len("PROGRESS "):])
+                        population=event.get("population");fold=event.get("fold")
+                        if (event.get("stage")!="dataset" or event.get("scope")!="current_population_only"
+                                or type(event.get("completed")) is not int or type(event.get("total")) is not int
+                                or event["total"]!=source_total or not 0<=event["completed"]<=source_total
+                                or not isinstance(population,str)
+                                or not (population in {"E0","E1"} and fold is None or
+                                    isinstance(fold,str) and fold and population=="final_population/"+fold)
+                                or event["completed"]<population_progress.get(population,0)):
+                            raise ValueError("人口进度与冻结股票总数、单折身份或已完成数量不同")
+                        population_progress[population]=event["completed"]
+                        dataset_event=dict(stage=population,population=population,fold=fold,
+                            completed=event["completed"],total=event["total"],scope=event["scope"],
+                            message=text[-500:],children=copy.deepcopy(result_ids))
+                    diagnostic_event=None
+                    if text.startswith("DIAGNOSTIC_PROGRESS "):
+                        event=json.loads(text[len("DIAGNOSTIC_PROGRESS "):]);fold=event.get("fold")
+                        if (event.get("stage")!="diagnostics" or event.get("scope")!="current_diagnostic_fold_stocks"
+                                or not isinstance(fold,str) or not fold
+                                or type(event.get("completed")) is not int or type(event.get("total")) is not int
+                                or event["total"]!=source_total or not 0<=event["completed"]<=source_total
+                                or event["completed"]<diagnostic_progress.get(fold,0)):
+                            raise ValueError("诊断进度与冻结单折股票人口、scope或完成数量不同")
+                        diagnostic_progress[fold]=event["completed"]
+                        diagnostic_event={**event,"children":copy.deepcopy(result_ids)}
+                    reference_event=None
+                    if text.startswith("REFERENCE_QUALITY_PROGRESS "):
+                        event=json.loads(text[len("REFERENCE_QUALITY_PROGRESS "):]);stage=event.get("stage")
+                        if (stage not in {"reference_quality_population", "reference_quality_fee_qualification"}
+                                or event.get("scope")!="current_reference_population_stocks" or event.get("fold") is not None
+                                or type(event.get("completed")) is not int or type(event.get("total")) is not int
+                                or event["total"]!=source_total or not 0<=event["completed"]<=source_total
+                                or event["completed"]<reference_progress.get(stage,0)):
+                            raise ValueError("参考质量进度与冻结股票人口、scope或完成数量不同")
+                        reference_progress[stage]=event["completed"]
+                        reference_event={**event,"children":copy.deepcopy(result_ids),"actual_device":"cpu","device":"cpu"}
                     if progress:
-                        if text.startswith("DIAGNOSTIC_PROGRESS "):
-                            progress(json.loads(text[len("DIAGNOSTIC_PROGRESS "):]))
+                        if reference_event is not None:
+                            publish_progress(reference_event)
+                        elif dataset_event is not None:
+                            publish_progress(dataset_event)
+                        elif diagnostic_event is not None:
+                            publish_progress(diagnostic_event)
                         elif text.startswith("POLICY_STOCK_DONE "):
                             event=json.loads(text[len("POLICY_STOCK_DONE "):])
                             if (event.get("total")!=source_total or type(event.get("current")) is not int
                                     or not 0<=event["current"]<=source_total or event.get("device")!="cpu"):
                                 raise ValueError("政策完成事件与冻结股票人口或实际CPU设备不同")
-                            progress(dict(stage="independent_policy_selection",completed=event["current"],total=event["total"],
+                            publish_progress(dict(stage="independent_policy_selection",completed=event["current"],total=event["total"],
                                 failed=event.get("failed",0),actual_device=event["device"],device=event["device"],message=text[-500:],
                                 children=copy.deepcopy(result_ids),symbol=event.get("symbol"),fold=event.get("fold")))
                         elif text.startswith("HEAD "):
                             event=json.loads(text[len("HEAD "):]); actual=event.get("device") or "unknown"
-                            progress(dict(stage="model_head",completed=0,total=0,actual_device=actual,
+                            publish_progress(dict(stage="model_head",completed=0,total=0,actual_device=actual,
                                 device=actual,
                                 head=event.get("head"),fold=event.get("fold"),architecture=event.get("architecture"),
                                 training_resources=event.get("training_resources"),message=text[-500:],children=copy.deepcopy(result_ids)))
                         elif text.startswith("SOURCE_BATCH "):
                             batch = json.loads(text[len("SOURCE_BATCH "):]); source_total = batch["total"]
-                            progress(dict(stage="raw_source_freeze" if batch["stage"] == "raw" else "native_source_prepare",
+                            publish_progress(dict(stage="raw_source_freeze" if batch["stage"] == "raw" else "native_source_prepare",
                                 completed=batch["completed"], total=batch["total"], message=text[-500:], children=copy.deepcopy(result_ids)))
                         elif text.startswith("DATASET "):
-                            stage = text.split()[1]; dataset_counts[stage] = dataset_counts.get(stage, 0) + 1
-                            progress(dict(stage=stage, completed=dataset_counts[stage], total=source_total,
-                                message=text[-500:], children=copy.deepcopy(result_ids)))
-                        else:
-                            progress(dict(stage=text.split()[1] if text.startswith("STAGE ") else "training", message=text[-500:], children=copy.deepcopy(result_ids)))
+                            # Per-stock detail is retained in the log. Only the
+                            # parent emits complete single-population progress.
+                            pass
+                        elif text.startswith("STAGE "):
+                            publish_progress(dict(stage=text.split()[1],completed=0,total=0,
+                                message=text[-500:],children=copy.deepcopy(result_ids)))
+                        elif identity_changed:
+                            payload=copy.deepcopy(last_progress) or dict(stage="training",completed=0,total=0)
+                            payload.update(message=text[-500:],children=copy.deepcopy(result_ids))
+                            publish_progress(payload)
             code = process.wait()
             if code: raise ValueError(f"训练阶段失败，退出码 {code}；日志：{log_path}")
         except BaseException:
@@ -1730,20 +1809,13 @@ class TrainingCenter:
         if not gate["passed"] or not result["passed"]: raise ValueError("当前实际 Broker 比较未通过：" + "; ".join(gate["reasons"]))
         return result, plan, report
 
-    def _holding_reasons(self):
-        reasons = []
-        if self.holdings_path.exists():
-            with closing(sqlite3.connect(f"file:{self.holdings_path}?mode=ro", uri=True)) as conn:
-                exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='holdings'").fetchone()
-                if exists and conn.execute("SELECT COUNT(*) FROM holdings WHERE shares>0").fetchone()[0]:
-                    reasons.append("存在手动实际持仓，须保持原冻结退出或完成状态等价迁移")
-        if self.holding_guard: reasons.extend(self.holding_guard() or [])
-        return reasons
+    def _selection_reasons(self):
+        return list(self.selection_guard() or []) if self.selection_guard else []
 
     def select_candidate(self, run_id, expected_run_id=None):
         result, plan, report = self._verify_comparison(run_id)
         if expected_run_id != result["incumbent_run_id"]: raise RevisionConflict("调用现任与比较现任不同")
-        reasons = self._holding_reasons()
+        reasons = self._selection_reasons()
         if reasons: return dict(status="blocked", reasons=reasons)
         from my_strategy.services.czsc_trend_support import _calendar
         calendar, _ = _calendar(plan["calendar_run_id"])
@@ -1758,7 +1830,7 @@ class TrainingCenter:
             current = conn.execute("SELECT run_id FROM current_model_selection WHERE id=1").fetchone()
             if (current[0] if current else None) != expected_run_id:
                 raise RevisionConflict("现任已变化，候选须针对新现任重新比较")
-            reasons=self._holding_reasons()
+            reasons=self._selection_reasons()
             if reasons: return dict(status="blocked",reasons=reasons)
             event_id = conn.execute("INSERT INTO current_model_events(kind,payload,created_at) VALUES ('select',?,?)", (json.dumps(payload, ensure_ascii=False), payload["recorded_at"])).lastrowid
             conn.execute("INSERT INTO current_model_selection VALUES (1,?,?,?) ON CONFLICT(id) DO UPDATE SET run_id=excluded.run_id,event_id=excluded.event_id,effective_from=excluded.effective_from", (run_id, event_id, effective))
@@ -1779,7 +1851,7 @@ class TrainingCenter:
                 raise ValueError("回退包必须曾通过当前选择事务并已到核验生效日；待生效模型不能提前激活")
             event=eligible[0]
             proof=self._event_proof(event["event_id"])
-        reasons = self._holding_reasons()
+        reasons = self._selection_reasons()
         if reasons: return dict(status="blocked", reasons=reasons)
         effective = str(local_now().date()) if target_run_id else None
         payload = dict(**(proof or {}))
@@ -1789,7 +1861,7 @@ class TrainingCenter:
             conn.execute("BEGIN IMMEDIATE")
             current = conn.execute("SELECT run_id FROM current_model_selection WHERE id=1").fetchone()
             if (current[0] if current else None) != expected_run_id: raise RevisionConflict("当前选择改变，请刷新后回滚")
-            reasons=self._holding_reasons()
+            reasons=self._selection_reasons()
             if reasons: return dict(status="blocked",reasons=reasons)
             event_id = conn.execute("INSERT INTO current_model_events(kind,payload,created_at) VALUES ('rollback',?,?)", (json.dumps(payload, ensure_ascii=False), payload["recorded_at"])).lastrowid
             conn.execute("INSERT INTO current_model_selection VALUES (1,?,?,?) ON CONFLICT(id) DO UPDATE SET run_id=excluded.run_id,event_id=excluded.event_id,effective_from=excluded.effective_from", (target_run_id, event_id, effective))

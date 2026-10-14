@@ -188,16 +188,17 @@ def test_reference_chart_and_market_history_never_project_account_fields(referen
     assert all(fact["account_available"] is False and fact["holding_shares"] is None for fact in facts + failed)
 
 
-def test_worker_dispatch_keeps_broker_only_for_explicit_backtest(monkeypatch):
+def test_worker_rejects_retired_account_replay(monkeypatch):
     from my_strategy.web_dashboard import trend_strategy
     seen = []
     monkeypatch.setattr(trend_strategy, "_source_vintage", lambda *a, **k: ({"features": pd.DataFrame({"date": DATES})}, "source", DATES[-1]))
-    monkeypatch.setattr(runtime, "reference_overlay", lambda *a, **k: seen.append(("reference", k)) or {})
-    monkeypatch.setattr(runtime, "runtime_overlay", lambda *a, **k: seen.append(("backtest", k)) or {})
+    monkeypatch.setattr(runtime, "reference_overlay", lambda *a, **k: seen.append(k) or {})
+    monkeypatch.setattr(runtime, "runtime_overlay", lambda *a, **k: pytest.fail("reference must not replay an account"))
     trend_strategy._stock_worker(("a", DATES[-1], DATES, {}, DATES[-1]))
-    trend_strategy._stock_worker(("a", DATES[-1], DATES, {"analysis_mode": "backtest", "initial_cash": 100000.}, DATES[-1]))
-    assert [kind for kind, _ in seen] == ["reference", "backtest"]
-    assert "initial_cash" not in seen[0][1] and seen[1][1]["initial_cash"] == 100000.
+    with pytest.raises(ValueError, match="已退役"):
+        trend_strategy._stock_worker(("a", DATES[-1], DATES, {"analysis_mode": "backtest"}, DATES[-1]))
+    assert len(seen) == 1 and "initial_cash" not in seen[0]
+    assert not hasattr(trend_strategy, "backtest_trend_consensus")
 
 
 def test_native_reference_chart_preserves_geometry_without_creating_position(tmp_path, monkeypatch):

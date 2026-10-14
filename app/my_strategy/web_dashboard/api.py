@@ -24,6 +24,7 @@ class AnalysisRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     symbol: str
     analysis_mode: Literal['reference'] = 'reference'
+    current_position_fraction: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
     start: date | None = date(2026, 1, 1)
     end: date | None = None
     as_of: str | None = None
@@ -31,15 +32,12 @@ class AnalysisRequest(BaseModel):
     model_family: Literal['current'] = 'current'
     usage_mode: Literal['forward', 'historical'] = 'historical'
     model_policy: Literal['auto', 'pinned'] = 'auto'
-    entry_policy: Literal['risk', 'legacy'] = 'risk'
     model_run_id: str | None = None
     model_fold: str | None = None
     calendar_run_id: str | None = None
     device: str | None = None
     consensus_config: dict[str, Any] | None = None
     consensus_version: Literal['trend_consensus'] | None = None
-    account_start: date | None = None
-    account_initial_cash: float | None = Field(default=None, gt=0, le=1e12, allow_inf_nan=False)
     _symbol = field_validator('symbol')(clean_symbol)
 
     @field_validator('model_run_id', 'model_fold', 'calendar_run_id')
@@ -47,6 +45,13 @@ class AnalysisRequest(BaseModel):
     def identity(cls, value):
         if value is not None and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,179}', value):
             raise ValueError('运行标识不合法')
+        return value
+
+    @field_validator('current_position_fraction', mode='before')
+    @classmethod
+    def position_fraction(cls, value):
+        if isinstance(value, bool):
+            raise ValueError('当前仓位应为0到1的比例')
         return value
 
     @field_validator('device')
@@ -68,20 +73,21 @@ class AnalysisRequest(BaseModel):
         if self.model_policy == 'pinned' and not self.model_fold:
             self.model_fold = 'production'
         from my_strategy.web_dashboard.trend_routes import resolve_analysis_consensus
+        inherit_selected_consensus = self.consensus_config is None and self.model_run_id is None
         self.consensus_version, self.consensus_config = resolve_analysis_consensus(
             research=self.research, model_family=self.model_family, model_run_id=self.model_run_id,
             config=self.consensus_config, version=self.consensus_version)
-        self.entry_policy = 'risk' if self.research else 'legacy'
+        if inherit_selected_consensus:
+            self.consensus_config = None
         return self
 
 
 class TaskSpec(BaseModel):
     model_config = ConfigDict(extra='forbid')
     symbols: list[str] = Field(default_factory=list, max_length=10000)
-    analysis_mode: Literal['reference', 'backtest'] | None = None
+    analysis_mode: Literal['reference'] | None = None
     start: date | None = None
     end: date | None = None
-    initial_cash: float = Field(default=100000, gt=0, le=1e12, allow_inf_nan=False)
     device: str | None = None
     cpu_workers: int | None = Field(default=None, ge=1, le=16, strict=True)
     batch_size: int | None = Field(default=None, ge=1, le=128, strict=True)
@@ -94,7 +100,6 @@ class TaskSpec(BaseModel):
     calendar_run_id: str | None = None
     usage_mode: Literal['forward', 'historical'] = 'historical'
     model_policy: Literal['auto', 'pinned'] = 'auto'
-    entry_policy: Literal['risk', 'legacy'] = 'risk'
     _identity = field_validator('model_run_id', 'model_fold', 'calendar_run_id')(AnalysisRequest.identity.__func__)
     _device = field_validator('device')(AnalysisRequest.compute_device.__func__)
 
@@ -112,27 +117,27 @@ class TaskSpec(BaseModel):
         if self.model_fold and not self.model_run_id:
             raise ValueError('固定检查点需要模型运行')
         from my_strategy.web_dashboard.trend_routes import validate_consensus_config
+        inherit_selected_consensus = self.consensus_config is None and self.model_run_id is None
         self.consensus_config = validate_consensus_config(self.consensus_config,
             version=self.consensus_version, model_run_id=self.model_run_id, model_family=self.model_family)
         self.consensus_version = 'trend_consensus'
-        self.entry_policy = 'risk' if self.research else 'legacy'
+        if inherit_selected_consensus:
+            self.consensus_config = None
         return self
 
 
 class TaskRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    kind: Literal['scan', 'backtest', 'update']
+    kind: Literal['scan', 'update']
     spec: TaskSpec = Field(default_factory=TaskSpec)
 
     @model_validator(mode='after')
     def start_date(self):
-        expected_mode = 'reference' if self.kind == 'scan' else 'backtest' if self.kind == 'backtest' else None
+        expected_mode = 'reference' if self.kind == 'scan' else None
         if self.spec.analysis_mode is not None and self.spec.analysis_mode != expected_mode:
             raise ValueError('任务用途与分析模式不一致')
         self.spec.analysis_mode = expected_mode
-        if self.kind == 'backtest' and (self.spec.usage_mode != 'historical' or self.spec.model_policy == 'pinned' or self.spec.model_fold is not None):
-            raise ValueError('回测只支持历史按日期匹配，固定检查点与当前时点研究请使用分析入口')
-        if self.kind in {'scan', 'backtest'} and self.spec.start is None:
+        if self.kind == 'scan' and self.spec.start is None:
             self.spec.start = date(2026, 1, 1)
             self.spec.dates()
         return self
@@ -178,16 +183,6 @@ class WatchlistRequest(BaseModel):
         return list(dict.fromkeys(clean_symbol(value) for value in values))
 
 
-class HoldingRequest(BaseModel):
-    shares: int = Field(gt=0, le=1_000_000_000, strict=True)
-    average_cost: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
-
-    @field_validator("average_cost", mode="before")
-    @classmethod
-    def no_boolean_cost(cls, value):
-        if isinstance(value, bool):
-            raise ValueError("平均成本应为正数")
-        return value
 
 
 @router.get("/watchlist")
@@ -205,19 +200,10 @@ def remove_watchlist(symbol: str, request: Request):
     return request.app.state.personal.remove_watchlist(clean_symbol(symbol))
 
 
-@router.get("/holdings")
-def holdings(request: Request):
-    return request.app.state.personal.holdings()
 
 
-@router.put("/holdings/{symbol}")
-def save_holding(symbol: str, spec: HoldingRequest, request: Request):
-    return request.app.state.personal.save_holding(clean_symbol(symbol), spec.shares, spec.average_cost)
 
 
-@router.delete("/holdings/{symbol}")
-def remove_holding(symbol: str, request: Request):
-    return request.app.state.personal.remove_holding(clean_symbol(symbol))
 
 
 @router.get("/health")
@@ -352,7 +338,7 @@ async def analysis(spec: AnalysisRequest, request: Request):
             result = analyze_trend_consensus(**calculation_query, config=settings, consensus_config=spec.consensus_config,
                                          consensus_version=spec.consensus_version)
         else:
-            baseline_query = {key: calculation_query[key] for key in ("symbol", "start", "end", "as_of") if key in calculation_query}
+            baseline_query = {key: calculation_query[key] for key in ("symbol", "start", "end", "as_of", "current_position_fraction") if key in calculation_query}
             from my_strategy.web_dashboard.trend_strategy import analyze_trend_consensus
             result = analyze_trend_consensus(**baseline_query, config=settings, structure_only=True)
         consensus = result.get("consensus_decisions") or {}
@@ -366,16 +352,11 @@ async def analysis(spec: AnalysisRequest, request: Request):
                 query["model_run_id"] = selected_model
             if research_context.get("calendar_run_id"):
                 query["calendar_run_id"] = research_context["calendar_run_id"]
-            account_context = (result.get("account_actions") or {}).get("context", {})
-            if account_context.get("account_start"):
-                query["account_start"] = account_context["account_start"]
-            if account_context.get("initial_cash") is not None:
-                query["account_initial_cash"] = account_context["initial_cash"]
         run_config = {"request": query, "strategy": settings}
         if consensus.get("config_hash"):
             run_config["consensus_config_hash"] = consensus["config_hash"]
             run_config["consensus_version"] = consensus["version"]
-        if spec.entry_policy != "legacy" and result.get("research", {}).get("entry_plan_config_hash"):
+        if result.get("research", {}).get("entry_plan_config_hash"):
             run_config["entry_plan_config_hash"] = result["research"]["entry_plan_config_hash"]
         context = create_run_context(task="czsc-analysis", as_of_date=result.get("decision_date", result["data_end"]),
                                      config=run_config,
@@ -388,7 +369,7 @@ async def analysis(spec: AnalysisRequest, request: Request):
 
 @router.get("/tasks")
 def tasks(request: Request):
-    return {"tasks": request.app.state.tasks.list()}
+    return {"tasks": [job for job in request.app.state.tasks.list() if job["kind"] in {"scan", "update", "model_training", "model_validation"}]}
 
 
 @router.post("/tasks", status_code=202)
@@ -401,6 +382,8 @@ def task(job_id: str, request: Request, view: Literal["scan"] | None = None):
     if view not in (None, "scan"):
         raise HTTPException(status_code=422, detail="任务视图无效")
     saved = request.app.state.tasks.get(job_id)
+    if saved.get("kind") not in {"scan", "update", "model_training", "model_validation"}:
+        raise HTTPException(status_code=404, detail="任务不存在")
     if view == "scan" and saved.get("kind") == "scan" and saved.get("status") == "succeeded" and isinstance(saved.get("result"), dict):
         return {**saved, "result": compact_scan_view(saved["result"])}
     return saved
@@ -413,7 +396,10 @@ def cancel(job_id: str, request: Request):
 
 @router.get("/runs")
 def runs(request: Request, kind: str | None = None, limit: int = Query(default=30, ge=1, le=200)):
-    return {"runs": request.app.state.tasks.results.list(kind, limit)}
+    allowed = {"analysis", "scan", "update", "model_training", "model_validation", "current_train", "current_validation"}
+    if kind is not None and kind not in allowed:
+        raise HTTPException(status_code=422, detail="运行类型不受支持")
+    return {"runs": [run for run in request.app.state.tasks.results.list(kind, limit) if run.get("kind") in allowed]}
 
 
 def _scan_display_metadata(value):
@@ -424,10 +410,11 @@ def _scan_display_metadata(value):
                 if not isinstance(item, (dict, list))}
     for key in ("reason_codes", "reasons", "model_input_reason_codes", "original_opportunity_ids",
                 "original_event_ids", "origin_event_ids", "sources", "point_types", "label_target", "expert_probabilities",
-                "native_labels"):
+                "native_labels", "source_boundaries", "source_ids", "source_event_ids"):
         if key in value:
             retained[key] = value[key]
-    for key in ("model_identity", "fallback_model", "rule_identity", "current_state", "current_valid_zone"):
+    for key in ("model_identity", "fallback_model", "rule_identity", "current_state", "current_valid_zone",
+                "reference_price_band", "reference_risk_plan", "position_reference", "reference_quality_identity"):
         if key in value:
             retained[key] = _scan_display_metadata(value[key])
     if "model_availability_diagnostics" in value:
@@ -456,7 +443,9 @@ _SCAN_EVENT_FIELDS = frozenset(("event_id", "opportunity_id", "original_event_id
     "risk_candidate_eligible", "risk_reason_codes", "reason_codes", "reason", "reference_price",
     "stop_price", "risk_stop_price", "stop_distance", "price_floor", "price_ceiling", "target_weight", "sources",
     "candidate_direction_valid", "evidence_visible", "pattern_id", "version", "family", "rule_name",
-    "is_confirmed", "invalidates_event_id"))
+    "is_confirmed", "invalidates_event_id", "reference_layer", "source_label",
+    "consensus_action", "consensus_qualified", "consensus_reason_codes", "reference_only",
+    "signal_date", "date", "account_scope", "analysis_mode"))
 
 
 def _scan_events(values):
@@ -466,42 +455,19 @@ def _scan_events(values):
             if isinstance(value, dict) else value for value in values]
 
 
-def _scan_account_context(value):
-    if not isinstance(value, dict):
-        return value
-    fields = ("strategy", "symbol", "account_id", "account_kind", "account_start", "initial_cash",
-              "initial_state_hash", "source_hash", "calendar_hash", "config_hash", "mode",
-              "series_context_hash", "entry_recipe_hash", "exit_recipe_hash", "source_revision_verified")
-    result = {key: value[key] for key in fields if key in value}
-    if "model_identity" in value:
-        result["model_identity"] = _scan_display_metadata(value["model_identity"])
-    return result
-
-
 def _scan_row_view(row):
     if not isinstance(row, dict):
         return row
-    # Retain unknown small top-level display fields for older scan families.
-    result = {key: value for key, value in row.items()
-              if key not in {"active_candidates", "raw_risk_plan"}}
-    if "entry_attempt" in row:
-        result["entry_attempt"] = _scan_display_metadata(row["entry_attempt"])
-        if isinstance(row["entry_attempt"], dict) and "evaluation" in row["entry_attempt"]:
-            result["entry_attempt"]["evaluation"] = _scan_display_metadata(row["entry_attempt"]["evaluation"])
-    for key in ("model_resolution", "exit_model", "policy_entry_model"):
+    result = {key: value for key, value in row.items() if not isinstance(value, (dict, list))}
+    for key in ("reason_codes", "original_opportunity_ids"):
+        if key in row:
+            result[key] = row[key]
+    for key in ("model_resolution", "exit_model", "policy_entry_model", "reference_recommendation",
+                "reference_risk_plan", "position_reference", "reference_quality_identity"):
         if key in row:
             result[key] = _scan_display_metadata(row[key])
     if isinstance(row.get("agents"), dict):
         result["agents"] = {key: _scan_display_metadata(value) for key, value in row["agents"].items()}
-    if "account_context" in row:
-        result["account_context"] = _scan_account_context(row["account_context"])
-    if isinstance(row.get("account_action"), dict):
-        action = row["account_action"]
-        result["account_action"] = {key: value for key, value in action.items()
-                                    if key not in {"direction_decision", "entry_evaluation", "exit_evaluation"}}
-        for key in ("entry_evaluation", "exit_evaluation"):
-            if key in action:
-                result["account_action"][key] = _scan_display_metadata(action[key])
     candidate = row.get("candidate_evidence")
     if isinstance(candidate, list):
         result["candidate_evidence"] = _scan_events(candidate)
@@ -511,63 +477,23 @@ def _scan_row_view(row):
         for key in ("facts", "risk_details"):
             if key in candidate:
                 result["candidate_evidence"][key] = _scan_events(candidate[key])
-    for key in ("events", "signal_points"):
+    for key in ("events", "signal_points", "source_reference_points", "reference_points"):
         if key in row:
             result[key] = _scan_events(row[key])
-    if isinstance(row.get("high_return_evidence"), dict):
-        evidence = row["high_return_evidence"]
-        result["high_return_evidence"] = {key: _scan_events(evidence[key]) if key != "sources" else evidence[key]
-                                          for key in ("signal_points", "events", "sources") if key in evidence}
     return result
 
 
 def compact_scan_view(result):
-    """Opt-in transport projection only; the saved report and default GET stay full."""
-    view = {**result, "rows": [_scan_row_view(row) for row in result.get("rows", [])]}
-    contexts = [row.get("account_context") for row in result.get("rows", []) if isinstance(row, dict)]
-    status = "unavailable"
-    if contexts and all(isinstance(context, dict) for context in contexts):
-        shared = {
-            "account_start": [context.get("account_start") for context in contexts],
-            "account_initial_cash": [context.get("initial_cash") for context in contexts],
-            "model_policy": [(context.get("model_identity") or {}).get("model_policy") for context in contexts],
-            "model_fold": [(context.get("model_identity") or {}).get("model_fold") for context in contexts],
-            "model_run_id": [(context.get("model_identity") or {}).get("model_run_id") for context in contexts],
-        }
-        status = "consistent" if all(all(value == values[0] for value in values) for values in shared.values()) else "mixed"
-        status = status if shared["account_start"][0] is not None and shared["account_initial_cash"][0] is not None else "unavailable"
-        sources = [result, result.get("request") or {},
-                   ((result.get("run_context") or {}).get("config") or {}).get("parameters") or {}]
-        if status == "consistent":
-            for key, values in shared.items():
-                for source in sources:
-                    name = "initial_cash" if key == "account_initial_cash" and "initial_cash" in source else key
-                    if source.get(name) is not None and source[name] != values[0]:
-                        status = "mixed"
-            if status == "consistent":
-                for key, values in shared.items():
-                    if key != "model_run_id" and values[0] is not None:
-                        if view.get(key) is None:
-                            view[key] = values[0]
-                        if isinstance(result.get("request"), dict):
-                            view.setdefault("request", dict(result["request"]))
-                            # Do not mutate the saved request while supplying
-                            # the common explicit account for client drilling.
-                            if view["request"] is result["request"]:
-                                view["request"] = dict(result["request"])
-                            if view["request"].get(key) is None:
-                                view["request"][key] = values[0]
-    view["scan_view"] = {"schema": "current_scan_view", "compact": True,
-                         "account_context_status": status, "raw_evidence": "per_stock_analysis"}
-    return view
+    """Project current reference evidence without changing the saved report."""
+    return {**result, "rows": [_scan_row_view(row) for row in result.get("rows", [])],
+            "scan_view": {"schema": "current_scan_view", "compact": True,
+                          "analysis_mode": "reference", "raw_evidence": "per_stock_analysis"}}
 
 
 @router.get("/runs/{run_id}")
 def run(run_id: str, request: Request, view: Literal["scan"] | None = None):
     store = request.app.state.tasks.results
-    if view is None:
-        return store.get(run_id)
-    if view != "scan" or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,179}", run_id):
+    if view not in (None, "scan") or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,179}", run_id):
         raise HTTPException(status_code=422, detail="运行视图无效")
     from contextlib import closing
     from pathlib import Path
@@ -580,6 +506,10 @@ def run(run_id: str, request: Request, view: Literal["scan"] | None = None):
         indexed = conn.execute("SELECT kind FROM czsc_runs WHERE run_id=?", (run_id,)).fetchone()
     if indexed is None:
         raise HTTPException(status_code=404, detail="扫描运行不存在")
+    if indexed[0] not in {"analysis", "scan", "update", "model_training", "model_validation", "current_train", "current_validation"}:
+        raise HTTPException(status_code=404, detail="运行不存在")
+    if view is None:
+        return store.get(run_id)
     if indexed[0] != "scan":
         raise HTTPException(status_code=422, detail="紧凑扫描视图仅适用于扫描运行")
     return compact_scan_view(store.get(run_id))

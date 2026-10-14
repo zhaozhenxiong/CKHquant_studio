@@ -17,7 +17,10 @@ from my_strategy.core.paths import ARTIFACT_RUNS_ROOT, MY_STRATEGY_ROOT
 from my_strategy.core.run_context import stable_hash, create_run_context
 from my_strategy.core.tz import local_now
 from my_strategy.services.czsc_trend_support import _save, _file_hash, _json, resolve_frozen_asset
-from my_strategy.services.czsc_trend_contracts import strategy_config, validate_training_config, STRATEGY_ID, TRAIN_KIND, SPLIT_POLICY, ECONOMIC_WEIGHTING, ENTRY_HEADS
+from my_strategy.services.czsc_trend_contracts import (strategy_config, validate_training_config,
+    STRATEGY_ID, TRAIN_KIND, SPLIT_POLICY, ECONOMIC_WEIGHTING, ENTRY_HEADS, L2_HOLDING_HEADS,
+    HELD_TRAINING_POPULATION, HELD_CONDITION_DOMAIN, HELD_SPLIT_POLICY,
+    HELD_ECONOMIC_WEIGHTING, validate_holding_population)
 from my_strategy.services.czsc_trend_model import (TrendSession, SCHEMA_HASH, bind_trend_inputs,
     build_trend_labels, chronological_folds, load_trend_head, train_trend_head, trend_config)
 from my_strategy.services.czsc_trend_features import (ENTRY_FEATURE_COLUMNS, EXIT_FEATURE_COLUMNS,
@@ -29,7 +32,7 @@ GENERATING_FILES = tuple('services/'+name for name in ('czsc_trend_contracts.py'
     'czsc_trend_dataset.py','czsc_trend_pipeline.py','czsc_trend_consensus.py',
     'czsc_trend_account.py','czsc_trend_runtime.py','czsc_trend_finalization.py',
     'czsc_trend_source.py','czsc_native_evidence.py','czsc_trend_support.py',
-    'czsc_trend_math.py','czsc_liquidity.py','czsc_backtest.py','czsc_account_artifacts.py'))+(
+    'czsc_trend_math.py','czsc_liquidity.py','czsc_backtest.py','czsc_account_artifacts.py','czsc_reference_quality.py'))+(
     'execution/broker.py','execution/cost_model.py','execution/ledger.py','execution/order.py',
     'configs/czsc_trend_strategy.json',)
 POPULATION_VERSION = 'strict_prior_l2_actual_flat_prefix_pre_gate_attempts'
@@ -118,6 +121,17 @@ def _verify_run(report,directory):
         raise ValueError('frozen actual-account population catalogue drift')
     if stable_hash(report.get('dataset_manifests',[]))!=freeze.get('dataset_manifests_hash'):
         raise ValueError('frozen rebuilt dataset manifest catalogue drift')
+    held=report.get('holding_population')
+    if stable_hash(held)!=freeze.get('holding_population_hash'):
+        raise ValueError('frozen independent E1 holding population catalogue drift')
+    audit_holding_population(held,directory,report['config'],report['dataset_records'])
+    from my_strategy.services.czsc_reference_quality import audit_reference_quality
+    reference=report.get('reference_quality')
+    if stable_hash(reference)!=freeze.get('reference_quality_hash'):
+        raise ValueError('frozen independent reference quality population/catalogue drift')
+    audit_reference_quality(directory,reference,report['config'],[r['symbol'] for r in report['dataset_records']],expected_records=report['dataset_records'])
+    if stable_hash(report.get('holding_population_diagnostics'))!=freeze.get('holding_population_diagnostics_hash'):
+        raise ValueError('frozen E1 holding split diagnostics drift')
     selection=report.get('source_policy_selection') or {}
     asset=selection.get('accounts_asset')
     if asset:
@@ -151,6 +165,8 @@ def _verify_run(report,directory):
                 population=next((item for item in report['population_folds'] if item['fold']==bundle['name']),None)
                 if population is None or target.get('reference_population')!=population['reference_population']:
                     raise ValueError('L2 entry head belongs to another actual-account population')
+            if head in L2_HOLDING_HEADS and target.get('holding_population')!=held:
+                raise ValueError('L2 exit head belongs to another independent actual E1 holding population')
 
 
 def read_snapshot(record):
@@ -201,6 +217,8 @@ def _identity(manifest,bundle,root,day):
         'verified_frozen_contract':True,'score_date':day,'publication_allowed':False,
         'continuation_policy_hash':contract.get('continuation_policy_hash'),'continuation_stage':contract.get('stage'),
         'training_population':contract.get('training_population'),'reference_population_hash':contract.get('reference_population_hash'),
+        'holding_population_hash':contract.get('holding_population_hash'),
+        'conditional_holding_domain':contract.get('conditional_holding_domain'),
         'economic_group_identity':contract.get('economic_group_identity'),'attempt_identity':contract.get('attempt_identity'),
         'split_policy':contract.get('split_policy'),'economic_weighting':contract.get('economic_weighting')}
 
@@ -569,7 +587,14 @@ def build_stage(records,calendar,cfg,context,stage,trend_bundles,ma_bundles,cpu_
     subdirectory=subdirectory or stage
     options={'subdirectory':subdirectory,'reference_population':reference_population,'population_end':population_end}
     payloads=((r,calendar,cfg,str(context.run_dir()),trend_bundles,ma_bundles,stage,options) for r in records)
-    summaries=list(_bounded_results(_dataset_worker,payloads,cpu_workers,cfg['stock_batch_size']))
+    def progress(completed):
+        print('PROGRESS '+json.dumps({'stage':'dataset','population':subdirectory,
+            'fold':(reference_population or {}).get('fold',{}).get('name'),
+            'completed':completed,'total':len(records),'scope':'current_population_only'},
+            ensure_ascii=False,separators=(',',':')),flush=True)
+    summaries=[];progress(0)
+    for summary in _bounded_results(_dataset_worker,payloads,cpu_workers,cfg['stock_batch_size']):
+        summaries.append(summary);progress(len(summaries))
     order={record['symbol']:i for i,record in enumerate(records)}
     summaries.sort(key=lambda summary:order[summary['symbol']])
     if [summary['symbol'] for summary in summaries]!=[record['symbol'] for record in records]:
@@ -582,10 +607,94 @@ def build_stage(records,calendar,cfg,context,stage,trend_bundles,ma_bundles,cpu_
         pooled[key]=_pool_parquets(paths,path)
         pooled_files[key]={'path':str(path),'sha256':_file_hash(path)}
     pooled['reference_population']=copy.deepcopy(reference_population or {})
+    pooled['reference_mode']='final' if reference_population else stage
     _save(context.subdir('dataset',subdirectory)/'manifest.json',{'stage':stage,'records':summaries,'failures':[],
         'reference_population':reference_population or {},'reference_population_hash':stable_hash(reference_population or {}),
         'population_end':population_end,'source_snapshot_hash':cfg['source_snapshot_hash'],'pooled_files':pooled_files})
     return pooled,summaries
+
+
+def freeze_holding_population(dataset,root,cfg,records):
+    """Freeze actual E1 held pairs before any L2 head or gate chooses accounts."""
+    root=Path(root).resolve();manifest_path=root/'dataset/E1/manifest.json'
+    manifest=json.loads(manifest_path.read_text())
+    exits=manifest.get('pooled_files',{}).get('exits') or {}
+    value={'version':HELD_TRAINING_POPULATION,'stage':'E1','reference_mode':'E1',
+        'conditional_holding_domain':HELD_CONDITION_DOMAIN,
+        'pending_L2_entry_or_exit_used':False,'candidate_clones_are_holding_population':False,
+        'holding_checkpoint_upgrade':False,'split_policy':HELD_SPLIT_POLICY,
+        'economic_weighting':HELD_ECONOMIC_WEIGHTING,'source_snapshot_hash':cfg['source_snapshot_hash'],
+        'continuation_policy_hash':cfg['E1_policy_hash'],'candidate_policy_hash':cfg['candidate_policy_hash'],
+        'manifest_path':'dataset/E1/manifest.json','manifest_sha256':_file_hash(manifest_path),
+        'pooled_exits_path':'dataset/E1/exits.parquet','pooled_exits_sha256':exits.get('sha256'),
+        'records_hash':stable_hash(manifest.get('records',[])),
+        'frozen_before_L2_training_at':local_now().isoformat()}
+    audit_holding_population(value,root,cfg,records)
+    if dataset.get('reference_population') or dataset.get('reference_mode')!='E1':
+        raise ValueError('independent exit population cannot be selected by an L2 entry gate')
+    dataset['holding_population']=copy.deepcopy(value)
+    return value
+
+
+def audit_holding_population(population,root,cfg,records):
+    validate_holding_population(population)
+    if any(population[field]!=cfg[config_name] for field,config_name in
+            (('source_snapshot_hash','source_snapshot_hash'),('continuation_policy_hash','E1_policy_hash'),
+             ('candidate_policy_hash','candidate_policy_hash'))):
+        raise ValueError('frozen actual E1 holding population belongs to another source/continuation')
+    root=Path(root).resolve()
+    path=(root/population['manifest_path']).resolve();exits=(root/population['pooled_exits_path']).resolve()
+    if not path.is_relative_to(root) or not exits.is_relative_to(root):
+        raise ValueError('frozen actual E1 holding population escaped its model run')
+    if _file_hash(path)!=population['manifest_sha256'] or _file_hash(exits)!=population['pooled_exits_sha256']:
+        raise ValueError('frozen actual E1 holding population manifest or paired rows changed')
+    manifest=json.loads(path.read_text());stored=manifest.get('records') or []
+    if (manifest.get('stage')!='E1' or manifest.get('reference_population') or manifest.get('failures')
+            or manifest.get('source_snapshot_hash')!=cfg['source_snapshot_hash']
+            or stable_hash(stored)!=population['records_hash']
+            or [r['symbol'] for r in stored]!=[r['symbol'] for r in records]
+            or any(r.get('reference_mode')!='E1' or r.get('reference_population') for r in stored)
+            or manifest.get('pooled_files',{}).get('exits',{}).get('sha256')!=population['pooled_exits_sha256']
+            or Path(manifest['pooled_files']['exits']['path']).resolve()!=exits):
+        raise ValueError('frozen actual E1 holding population contains final-gated or foreign account evidence')
+    return manifest
+
+
+def holding_population_diagnostics(dataset,folds):
+    """Exact unchanged split masks; counts belong to this one E1 population."""
+    from my_strategy.services.czsc_trend_interval_model import time_masks
+    frame=dataset['exits'];result={'population':HELD_TRAINING_POPULATION,
+        'holding_population_hash':stable_hash(dataset['holding_population']),
+        'rows':len(frame),'fold_counts_are_additive':False,
+        'conditional_holding_domain':HELD_CONDITION_DOMAIN,'folds':[]}
+    observed=frame.label_available.fillna(False) & frame.label_end.notna()
+    result['mature_rows']=int(observed.sum())
+    result['mature_classes']={str(label):int((observed & frame.label.eq(label)).sum()) for label in (0,1)}
+    for fold in folds:
+        item={'fold':fold,'heads':{}}
+        for head in ('exit','exit_advantage'):
+            values=frame.copy()
+            if head=='exit_advantage':values['label']=values.exit_advantage
+            masks=time_masks(values,fold,head=head,regression=head=='exit_advantage')
+            item['heads'][head]={name:{'rows':int(mask.sum()),
+                'actual_held_episodes':int(values.loc[mask,'episode_id'].nunique()),
+                'classes':{str(label):int((mask & frame.label.eq(label).to_numpy()).sum()) for label in (0,1)},
+                'label_end_max':str(pd.to_datetime(values.loc[mask,'label_end']).max().date()) if mask.any() else None}
+                for name,mask in zip(('train','calibration','policy'),masks)}
+        result['folds'].append(item)
+    return result
+
+
+def holding_head_status(bundles,unavailable,production_name):
+    """Training completion is separate from final-account fee qualification."""
+    return {head:{'completed_heads':sum(bool(bundle.get('heads',{}).get(head)) for bundle in bundles),
+        'production_linear_completed':any(bundle.get('name')==production_name
+            and bundle.get('architecture')=='linear' and bundle.get('heads',{}).get(head) for bundle in bundles),
+        'unavailable_heads':[copy.deepcopy(item) for item in unavailable if item.get('head')==head],
+        'conditional_holding_domain':HELD_CONDITION_DOMAIN,
+        'final_account_performance_qualified':False,
+        'final_account_performance_status':'requires_actual_fee_net_account_evaluation_not_E1_sample_counts'}
+        for head in ('exit','exit_advantage')}
 
 
 def _trend_observation_worker(payload):
@@ -746,7 +855,9 @@ def _train_one(*,source_native_run_id,
         raise ValueError('new raw input source lacks verified calendar provenance')
     cfg['pipeline_contract_hash']=stable_hash({'family':STRATEGY_ID,'source':source,'calendar_hash':stable_hash(calendar),'registered_config':cfg,
         'order':['independent_trend','policy_only_sources','E0_no_HR','MA_exit_E0','pinned_E1',
-            'strict_prior_L2_actual_flat_population_by_fold','L2_entry_forced_E1_clone','L2_exit_shadow'],
+            'preregistered_actual_E1_holding_pairs','account_free_reference_quality_probes',
+            'independent_reference_quality_heads_and_fee_qualification','strict_prior_L2_actual_flat_population_by_fold',
+            'L2_entry_forced_E1_clone','L2_exit_preregistered_actual_E1_pairs'],
         'reference_population_protocol':POPULATION_VERSION,'self_training_population_feedback':False,
         'reassessment':cfg['reassessment'],'no_E2_entry_reuse':True})
     context=create_run_context(task=TRAIN_KIND,as_of_date=end,config=cfg,data_version=source['snapshot_hash'],
@@ -823,7 +934,7 @@ def _train_one(*,source_native_run_id,
         'holding_threshold':cfg['account']['holding_exit_threshold'],'no_head':'entire_position_E0','checkpoint_upgrade':False,'L2_exit_apply':False})
     print('STAGE E1_pinned_exit_rebuild_entry_and_shadow_exit_labels',flush=True)
     final,final_records=build_stage(records,calendar,cfg,context,'E1',trends,ma_bundles,cpu_workers)
-    del final
+    holding_population=freeze_holding_population(final,context.run_dir(),cfg,records)
     models=[];architecture_bundles=[];population_folds=[];population_totals=dict.fromkeys([
         'entry_rows','exit_rows','entries_mature_at_frozen_source','entries_mature_by_population_end',
         'entries_positive_at_frozen_source','entries_positive_by_population_end',
@@ -831,6 +942,11 @@ def _train_one(*,source_native_run_id,
     from my_strategy.services.czsc_trend_interval_model import split_validation
     l2_folds=[split_validation(fold,calendar) for fold in [*cfg['development_windows'],cfg['production']]]
     l2_folds=sorted(l2_folds,key=lambda fold:(fold['policy_end'],fold['name']))
+    held_diagnostics=holding_population_diagnostics(final,l2_folds)
+    _save(context.subdir('validation')/'holding_population.json',held_diagnostics)
+    print('HELD_POPULATION '+json.dumps(held_diagnostics,ensure_ascii=False,separators=(',',':')),flush=True)
+    from my_strategy.services.czsc_reference_quality import run_reference_quality
+    reference_quality=run_reference_quality(records,calendar,cfg,context,trends,ma_bundles,cpu_workers,folds)
     print('STAGE sequential_L2_actual_flat_pre_gate_population_and_forced_E1_labels',flush=True)
     for fold in l2_folds:
         population=make_reference_population(fold,models,cfg['reassessment'])
@@ -845,12 +961,14 @@ def _train_one(*,source_native_run_id,
             **label_maturity_counts(fold_data,source_end=end,population_end=fold['policy_end']),
             'frozen_source_end':end,'effective_population_end':fold['policy_end'],
             'label_counts_scope':'actual_liquidation_cutoff_no_input_or_split_eligibility_inference',
-            'reference_account_ledgers':len(fold_records),'own_head_used_for_population':False}
+            'reference_account_ledgers':len(fold_records),'own_head_used_for_population':False,
+            'holding_population_hash':stable_hash(holding_population),
+            'holding_exit_sample_counts':next(item['heads'] for item in held_diagnostics['folds'] if item['fold']==fold)}
         population_folds.append(population_record)
         for key in population_totals:population_totals[key]+=population_record[key]
         fitted={}
         for head in ('entry','exit','exit_advantage'):
-            data=training_frame(fold_data,head,cfg,calendar,'E1')
+            data=training_frame(fold_data if head in ENTRY_HEADS else final,head,cfg,calendar,'E1')
             for architecture in cfg['architectures']:
                 try:
                     b,m=_fit_interval(data,head,fold,calendar,context,cfg,architecture,device);manifests.append(m)
@@ -869,6 +987,7 @@ def _train_one(*,source_native_run_id,
         _save(context.subdir('validation')/'population_folds.json',population_folds)
         _save(context.subdir('models')/'l2_bundles.json',models)
         del fold_data
+    del final
     dataset_manifests=[]
     for relative in ['E0','E1',*['final_population/'+item['fold'] for item in population_folds]]:
         path=context.subdir('dataset',relative)/'manifest.json'
@@ -880,19 +999,33 @@ def _train_one(*,source_native_run_id,
         'models_hash':stable_hash([m['manifest_sha256'] for m in manifests]),
         'models_catalog_hash':stable_hash({'trend':trends,'ma_exit':ma_bundles,'architecture':architecture_bundles}),
         'population_folds_hash':stable_hash(population_folds),
+        'holding_population_hash':stable_hash(holding_population),
+        'holding_population_diagnostics_hash':stable_hash(held_diagnostics),
+        'reference_quality_hash':stable_hash(reference_quality),
         'dataset_manifests_hash':stable_hash(dataset_manifests),
         'independent_window_status':'pending',
         'historical_available_is_simulated':True,'actual_completion_not_backdated':True}
     freeze['freeze_hash']=stable_hash(freeze)
-    pipeline={'stages':['independent_trend','source_policy','E0','MA_exit','E1','strict_prior_L2_population_by_fold','L2_entry_E1','L2_exit_shadow'],
+    pipeline={'stages':['independent_trend','source_policy','E0','MA_exit','E1','preregistered_actual_E1_holding_pairs',
+        'account_free_reference_quality_probes','independent_reference_quality_heads_and_fee_qualification',
+        'strict_prior_L2_population_by_fold','L2_entry_E1','L2_exit_preregistered_actual_E1_pairs'],
         'complete_model_population_DAG':True,
         'trend_heads':len(trends),'ma_exit_heads':len(ma_bundles),'entry_heads':len(models),
         'holding_checkpoint_upgrade':False,'bootstrap_uses_HR':False,'applied_L2_exit':False,
         **{'final_'+key:value for key,value in population_totals.items()},
         'population_counts_scope':'sum_of_fold_specific_populations_not_unique_examples_actual_liquidation_cutoffs_not_training_masks',
         'reference_population_protocol':POPULATION_VERSION,'entry_attempts_recorded_before_gate':True,
+        'holding_training_population':HELD_TRAINING_POPULATION,'holding_population_hash':stable_hash(holding_population),
+        'holding_exit_rows':held_diagnostics['rows'],'holding_exit_mature_rows':held_diagnostics['mature_rows'],
+        'holding_exit_mature_classes':held_diagnostics['mature_classes'],
+        'holding_exit_fold_counts_are_additive':False,
+        'reference_quality_status':reference_quality['status'],
+        'reference_quality_required_for_core_selection':False,
+        'L2_exit_final_gated_account_validation':'requires_actual_fee_net_final_account_trades_not_E1_sample_count',
         'self_head_controls_its_training_population':False,'label_clones_and_reference_actual_trades_separate':True}
     pipeline['population_mode']=FULL_POPULATION_MODE
+    held_head_status=holding_head_status(architecture_bundles,unavailable,cfg['production']['name'])
+    pipeline['holding_head_status']=held_head_status
     pipeline['full_qualified_pool_completed']=True
     pipeline['actual_training_symbols']=len(records)
     pipeline['resources']={'stock_batch_size':cfg['stock_batch_size'],
@@ -906,7 +1039,10 @@ def _train_one(*,source_native_run_id,
     report={'run_id':context.run_id,'status':'completed','strategy_version':STRATEGY_ID,'config':cfg,'source_snapshot':source,
         'data_end':end,'dataset_records':records,'trend_bundles':trends,'ma_exit_bundles':ma_bundles,'model_bundles':models,
         'architecture_bundles':architecture_bundles,'source_policy_selection':selection,'holding_exit_policy_selection':holding_policy,'continuation_stage':'E1','pipeline':pipeline,
-        'population_folds':population_folds,'dataset_manifests':dataset_manifests,
+        'population_folds':population_folds,'holding_population':holding_population,
+        'holding_population_diagnostics':held_diagnostics,'holding_head_status':held_head_status,
+        'reference_quality':reference_quality,
+        'dataset_manifests':dataset_manifests,
         'unavailable_heads':unavailable,'failures':failures,'protocol_freeze':freeze,'completed_at':local_now().isoformat(),
         'required_recent_heads_ready':ready,'required_head_status':required,
         'automatic_selection_eligible':len(records)>=60 and cfg['full_qualified_pool'] is True and cfg['trend']['horizon_sessions']==10 and cfg['risk_policy']=='confirmed_source_boundary_prior_atr' and ready,

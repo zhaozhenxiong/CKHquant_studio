@@ -85,7 +85,7 @@ global.sessionStorage={getItem:()=>null};
 global.fetch=async()=>({ok:true,status:200,text:async()=>JSON.stringify({available:true,requested_device:'mps',selected_device:'mps',
   devices:[{type:'mps',device:'mps',index:null,name:'Apple MPS',total_memory_bytes:null}]})});
 refreshCompute('data','mps').then(()=>{
-  for (const prefix of ['analysis','scan','backtest','data']) {
+  for (const prefix of ['analysis','scan','data']) {
     assert.equal(element(`${prefix}-device`).value,'mps');
     assert(element(`${prefix}-device`).innerHTML.includes('value="mps"'));
     assert(!element(`${prefix}-device`).innerHTML.includes('value="cuda:0"'));

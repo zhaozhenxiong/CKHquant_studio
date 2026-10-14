@@ -82,13 +82,13 @@ def _owned_tree_cancellation(tmp_path):
              + "],stdout=subprocess.PIPE,text=True); p.stdout.readline(); print('GRAND '+str(p.pid),flush=True); time.sleep(60)")
     code = ("import subprocess,sys,time; p=subprocess.Popen([sys.executable,'-u','-c'," + repr(child)
             + "],stdout=subprocess.PIPE,text=True); grand=p.stdout.readline().strip().split()[1]; "
-              "print('TREE '+str(p.pid)+' '+grand,flush=True); time.sleep(60)")
+              "print('STAGE owned_tree TREE '+str(p.pid)+' '+grand,flush=True); time.sleep(60)")
     stopped = threading.Event()
     owned = []
 
     def progress(event):
-        if event.get("message", "").startswith("TREE "):
-            owned.extend(int(value) for value in event["message"].split()[1:])
+        if event.get("stage")=="owned_tree":
+            owned.extend(int(value) for value in event["message"].split()[-2:])
             stopped.set()
 
     def check_cancel():
@@ -151,18 +151,18 @@ def test_native_parent_exits_before_cancel_while_owned_grandchild_holds_stdout(t
     canary = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     grandchild = "import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(60)"
     child = ("import os,subprocess,sys,time; p=subprocess.Popen([sys.executable,'-u','-c'," + repr(grandchild)
-             + "]); print('ORPHAN '+str(os.getpid())+' '+str(p.pid),flush=True); time.sleep(60)")
-    code = ("import os,subprocess,sys; print('PARENT '+str(os.getpid()),flush=True); "
+             + "]); print('STAGE orphan_pid ORPHAN '+str(os.getpid())+' '+str(p.pid),flush=True); time.sleep(60)")
+    code = ("import os,subprocess,sys; print('STAGE parent_pid PARENT '+str(os.getpid()),flush=True); "
             "subprocess.Popen([sys.executable,'-u','-c'," + repr(child) + "])")
     parent, owned = [], []
     deadline = time.monotonic() + 15
 
     def progress(event):
         message = event.get("message", "")
-        if message.startswith("PARENT "):
-            parent.append(int(message.split()[1]))
-        if message.startswith("ORPHAN "):
-            owned.extend(int(value) for value in message.split()[1:])
+        if event.get("stage")=="parent_pid":
+            parent.append(int(message.split()[-1]))
+        if event.get("stage")=="orphan_pid":
+            owned.extend(int(value) for value in message.split()[-2:])
 
     def check_cancel():
         if parent and owned and not _is_alive(parent[0]):
@@ -208,12 +208,12 @@ def test_native_normal_return_does_not_leave_a_windows_owned_background_descenda
     # The existing POSIX normal-return lifecycle is deliberately retained.
     owned = []
     code = ("import subprocess,sys; p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],"
-            "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); print('BACKGROUND '+str(p.pid),flush=True)")
+            "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); print('STAGE background_pid BACKGROUND '+str(p.pid),flush=True)")
 
     def progress(event):
         message = event.get("message", "")
-        if message.startswith("BACKGROUND "):
-            owned.append(int(message.split()[1]))
+        if event.get("stage")=="background_pid":
+            owned.append(int(message.split()[-1]))
 
     try:
         assert center.TrainingCenter._run_process([sys.executable, "-u", "-c", code],
@@ -457,8 +457,7 @@ def test_windows_job_stop_closes_parent_before_accounting_and_never_hides_native
 
 def test_comparison_registry_uses_portable_relative_asset_path(tmp_path):
     store = ResultStore(tmp_path / "results.db", tmp_path / "runs")
-    service = center.TrainingCenter(store=store, metadata_root=tmp_path / "metadata",
-                                   personal_db=tmp_path / "personal.db")
+    service = center.TrainingCenter(store=store, metadata_root=tmp_path / "metadata")
     result = dict(run_id="candidate", plan_id="plan", status="pending", passed=False)
     service._save_comparison("candidate", result)
     with sqlite3.connect(service.registry_path) as connection:

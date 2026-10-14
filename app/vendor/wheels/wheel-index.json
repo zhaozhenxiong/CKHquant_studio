@@ -5,75 +5,13 @@
   "source_tree_sha256": "23cc880c2eccb8505a011fe61a95dd9a93cb3c8fb58ae09410a37f1e776958a7",
   "wheels": [
     {
-      "filename": "czsc-1.0.1-cp310-abi3-macosx_11_0_arm64.whl",
-      "sha256": "612214f51edfd0887f85a2cd89450811b7ab02f2dd01407f08206352f6813f39",
-      "tags": [
-        "cp310-abi3-macosx_11_0_arm64"
-      ],
-      "build": {
-        "python": "3.12.10",
-        "system": "Darwin",
-        "machine": "arm64",
-        "wheel_tags": [
-          "cp310",
-          "abi3",
-          "macosx_11_0_arm64"
-        ],
-        "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
-        "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
-        "maturin": "maturin 1.13.1",
-        "compiler": "system toolchain",
-        "rustflags": "",
-        "release_profile_overrides": {
-          "CARGO_PROFILE_RELEASE_LTO": "false",
-          "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "16"
-        },
-        "source_tree_sha256": "23cc880c2eccb8505a011fe61a95dd9a93cb3c8fb58ae09410a37f1e776958a7",
-        "cargo_locked": true,
-        "source_algorithm_patches": false,
-        "cargo_target_dir": "<build-local-cargo-target-dir>",
-        "public_build_paths_redacted": true
-      }
-    },
-    {
-      "filename": "czsc-1.0.1-cp310-abi3-manylinux_2_39_x86_64.whl",
-      "sha256": "ed29de14d6a85d548a0e9a1ca84efe16c224665297dbb1f851f3658c80535c5d",
-      "tags": [
-        "cp310-abi3-manylinux_2_39_x86_64"
-      ],
-      "build": {
-        "python": "3.12.15",
-        "system": "Linux",
-        "machine": "x86_64",
-        "wheel_tags": [
-          "cp310",
-          "abi3",
-          "manylinux_2_39_x86_64"
-        ],
-        "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
-        "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
-        "maturin": "maturin 1.13.1",
-        "compiler": "system toolchain",
-        "rustflags": "",
-        "release_profile_overrides": {
-          "CARGO_PROFILE_RELEASE_LTO": "false",
-          "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "16"
-        },
-        "source_tree_sha256": "23cc880c2eccb8505a011fe61a95dd9a93cb3c8fb58ae09410a37f1e776958a7",
-        "cargo_locked": true,
-        "source_algorithm_patches": false,
-        "cargo_target_dir": "<build-local-cargo-target-dir>",
-        "public_build_paths_redacted": true
-      }
-    },
-    {
       "filename": "czsc-1.0.1-cp310-abi3-win_amd64.whl",
-      "sha256": "8bf1cd4d532179e8dd981cc4cff5d09bbbaf61cbbe0f71906e433f9a76e69541",
+      "sha256": "d11d87df958f2f909caf597c754efc4d718aee0623986d9e890dd95609b5f1e0",
       "tags": [
         "cp310-abi3-win_amd64"
       ],
       "build": {
-        "python": "3.12.10",
+        "python": "3.12.13",
         "system": "Windows",
         "machine": "AMD64",
         "wheel_tags": [
@@ -81,8 +19,72 @@
           "abi3",
           "win_amd64"
         ],
-        "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
-        "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+        "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+        "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+        "maturin": "maturin 1.13.1",
+        "compiler": "clang version 23.1.2 (https://github.com/llvm/llvm-project.git 85ac560262434c9ccfc0c183ec22d4138ed647fb)",
+        "rustflags": "-Lnative=<build-local-native-library-dir> -C dlltool=<build-local-dlltool>",
+        "release_profile_overrides": {
+          "CARGO_PROFILE_RELEASE_LTO": "false",
+          "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "16"
+        },
+        "source_tree_sha256": "23cc880c2eccb8505a011fe61a95dd9a93cb3c8fb58ae09410a37f1e776958a7",
+        "cargo_locked": true,
+        "source_algorithm_patches": false,
+        "cargo_target_dir": "<build-local-cargo-target-dir>",
+        "toolchain_archives": [
+          {
+            "name": "rustup-init.exe",
+            "url": "https://win.rustup.rs/x86_64",
+            "sha256": "6f4bef66261261fcb43131be8720bab817d403a09edec7455c371974b90bdb7e"
+          },
+          {
+            "name": "llvm-mingw-20260922-ucrt-x86_64.zip",
+            "url": "https://github.com/mstorsjo/llvm-mingw/releases/download/20260922/llvm-mingw-20260922-ucrt-x86_64.zip",
+            "sha256": "e3ad77d117a4bea19a7a3b333341824d79a5a371004a10e25b8504e7b3047666"
+          }
+        ],
+        "native_imports": [
+          "kernel32.dll",
+          "python3.dll",
+          "api-ms-win-crt-runtime-l1-1-0.dll",
+          "api-ms-win-crt-private-l1-1-0.dll",
+          "api-ms-win-crt-string-l1-1-0.dll",
+          "api-ms-win-crt-math-l1-1-0.dll",
+          "bcryptprimitives.dll",
+          "api-ms-win-core-synch-l1-2-0.dll",
+          "ntdll.dll",
+          "ws2_32.dll",
+          "userenv.dll",
+          "api-ms-win-crt-stdio-l1-1-0.dll",
+          "api-ms-win-crt-heap-l1-1-0.dll",
+          "bcrypt.dll",
+          "advapi32.dll",
+          "shell32.dll",
+          "combase.dll",
+          "crypt32.dll"
+        ],
+        "discarded_attempt": "Original fat LTO/codegen-units=1 was interrupted after more than 21 CPU minutes; source unchanged. Successful build used the recorded overrides.",
+        "public_build_paths_redacted": true
+      }
+    },
+    {
+      "filename": "czsc-1.0.1-cp310-abi3-macosx_11_0_arm64.whl",
+      "sha256": "8049dcf486a2fc228f882943d88f49340df2ac34310d5f57f6dd497f1f95a7ef",
+      "tags": [
+        "cp310-abi3-macosx_11_0_arm64"
+      ],
+      "build": {
+        "python": "3.12.13",
+        "system": "Darwin",
+        "machine": "arm64",
+        "wheel_tags": [
+          "cp310",
+          "abi3",
+          "macosx_11_0_arm64"
+        ],
+        "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+        "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
         "maturin": "maturin 1.13.1",
         "compiler": "system toolchain",
         "rustflags": "",

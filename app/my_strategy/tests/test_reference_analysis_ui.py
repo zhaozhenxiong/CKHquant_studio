@@ -32,13 +32,13 @@ const result={symbol:'000001.SZ',analysis_mode:'reference',as_of:'2026-10-09',re
   account_actions:{context:{account_id:'unrelated-account'},trades:[{symbol:'000001.SZ',action:'BUY',date:'2026-10-09'}]}};
 const selected=ui.referenceMarkerInputs(result);
 assert.equal(selected.events.length,1);assert.equal(selected.events[0].source,'reference_consensus');
-assert.deepEqual(selected.trades,[]);
+assert.equal('trades' in selected,false);
 const grouped=markers.build({bars:[{time:'2026-10-09',is_closed:false}],dailyBars:[{time:'2026-10-09'}],
   frequency:'月线',events:selected.events,symbol:result.symbol,consensusVersion:'trend_consensus',asOf:result.as_of,up:'red',down:'green'});
-assert.equal(grouped.intentCount,1);assert.equal(grouped.tradeCount,0);assert.equal(grouped.formingProjectedCount,1);
+assert.equal(grouped.intentCount,1);assert.equal(grouped.formingProjectedCount,1);
 assert.equal(grouped.markers[0].shape,'arrowUp');assert.equal(grouped.markers[0].color,'red');
-assert(markers.describe(grouped.mappings,'2026-10-09','月线').includes('参考点 2026-10-09'));
-const row={date:'2026-10-09',analysis_mode:'reference',reference_only:true,reference_action:'BUY',action:'BUY',emitted:true,
+assert(markers.describe(grouped.mappings,'2026-10-09','月线').includes('最终共识参考 2026-10-09'));
+const row={symbol:'000001.SZ',date:'2026-10-09',analysis_mode:'reference',reference_only:true,reference_action:'BUY',action:'BUY',emitted:true,
   buy_base_score:.64,sell_base_score:.08,reference_close:23.45,reference_price_date:'2026-10-09',
   available_at:point.available_at,reason_codes:['candidate_not_confirmed_or_observable'],
   agents:{ma:{kind:'trend_probability',status:'model_unavailable',p_up:.9,p_down:.05,p_neutral:.05},
@@ -47,8 +47,8 @@ const row={date:'2026-10-09',analysis_mode:'reference',reference_only:true,refer
     high_return:{kind:'model_probability',probability:.99}},
   account_action:{action:'BUY',shares:100,emitted:true},holding:{shares:100},broker_fills:[{price:99}]};
 result.chart_evidence={rows:[row]};result.trend_consensus={version:'trend_consensus',rows:[row]};
-const evidence=ui.accountEvidence(result),clean=evidence.rows[0];
-assert.equal(Object.hasOwn(clean,'account_action'),false);assert.equal(Object.hasOwn(clean,'holding'),false);
+const evidence=ui.referenceEvidence(result),clean=evidence.rows[0];
+assert.equal('accountActionHtml' in ui,false);assert.equal('accountMarkerInputs' in ui,false);
 assert.equal(ui.currentAgentView(clean,'ma').exit,'');
 assert.equal(ui.trendProbabilities(clean.agents.ma).available,false);
 const popup=ui.popupHtml({evidence,consensus:result.trend_consensus,groups:grouped.groups,barDate:'2026-10-09',frequency:'月线'});
@@ -66,10 +66,9 @@ assert(ui.opinionReasons({...row,as_of:'2026-10-09T14:59:59+08:00'})
 const selection=ui.referenceSelection({evidence,consensus:result.trend_consensus,groups:grouped.groups,barDate:'2026-10-09'});
 assert.equal(selection.price,23.45);assert.equal(selection.signal_date,'2026-10-09');
 const history=ui.historyHtml(ui.mergeEvidenceRows(evidence.rows,result.trend_consensus.rows));
-assert(history.includes('B / S 参考方向'));
+assert(history.includes('来源 B / S'));assert(history.includes('最终共识 / 原因'));
 for(const unexpected of ['高收益概率','账户最终','成交执行记录','拒单记录','风险通过买入','上涨 90%'])assert(!history.includes(unexpected),unexpected);
 // Explicit simulations retain their account marker and display contract.
-assert.equal(ui.accountActionHtml({...row,analysis_mode:'simulation',reference_only:false}).includes('账户买入意图'),true);
 ''')
 
 
@@ -91,7 +90,7 @@ const facts=market.factsHtml({rows:[{symbol:'000001.SZ',direction:'SELL',price_a
 assert(facts.includes('趋势模型状态'));assert(facts.includes('缺少合格模型 · 未评分'));
 for(const unexpected of ['持仓 200','高收益状态','99.00%','B 意图','S 意图'])assert(!facts.includes(unexpected),unexpected);
 const simulated=market.viewHtml({...summary,analysis_mode:'simulation'},state);
-assert(simulated.includes('账户 B'));assert(simulated.includes('高收益评分'));
+assert(!simulated.includes('账户 B'));assert(!simulated.includes('高收益评分'));
 ''')
 
 
@@ -106,5 +105,5 @@ referencePicker.state.research={active_model:{run_id:'qualified'},models:[
  {run_id:'not-passed',model_family:'current',automatic_selection_eligible:false,archived:false},
  {run_id:'archived',model_family:'current',automatic_selection_eligible:true,archived:true}]};
 for(const prefix of ['analysis','scan']) assert.deepEqual(referencePicker.researchModels(prefix).map(item=>item.run_id),['qualified']);
-assert.deepEqual(referencePicker.researchModels('backtest').map(item=>item.run_id),['qualified','not-passed','archived']);
+
 ''')

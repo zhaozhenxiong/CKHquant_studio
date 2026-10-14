@@ -96,7 +96,7 @@ def test_all_structural_patterns_have_unique_immutable_confirmed_identity(pack):
     assert len({item["pattern_id"] for item in patterns}) == len(patterns)
     assert len({item["event_id"] for item in patterns}) == len(patterns)
     allowed = {"cxt_first_buy_V221126", "cxt_first_sell_V221126", "cxt_second_bs_V240524",
-               "cxt_third_buy_V230228", "confirmed_support_close_break"}
+               "cxt_third_buy_V230228", "confirmed_third_sell_price_mirror", "confirmed_support_close_break"}
     for item in patterns:
         assert item["rule_name"] in allowed
         assert item["first_confirmed_at"] == item["available_at"] == item["observed_at"]

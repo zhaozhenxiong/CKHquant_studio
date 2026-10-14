@@ -111,19 +111,14 @@ def test_current_shell_has_one_model_and_separate_training_defaults_views():
     shell = Shell()
     shell.feed(html)
     assert {"training", "parameters"}.issubset(shell.routes)
-    for prefix in ("analysis", "scan", "backtest"):
+    for prefix in ("analysis", "scan"):
         assert shell.options[f"{prefix}-model-family"] == ["current"]
-        assert shell.options[f"{prefix}-entry-policy"] == ["risk"]
+        assert f"{prefix}-entry-policy" not in shell.options
         assert "production" not in shell.options[f"{prefix}-usage-mode"]
     assert shell.options["analysis-usage-mode"] == ["historical", "forward"]
     assert shell.options["scan-usage-mode"] == ["historical", "forward"]
-    assert shell.options["backtest-usage-mode"] == ["historical"]
-    assert 'id="holding-replay-form"' not in html
-    holdings = html.split('<section id="view-holdings"', 1)[1].split('<section id="view-training"', 1)[0]
-    assert "手动记录独立于模拟回测，本页面不下单" in holdings
-    assert "可从持仓列表查看股票的结构与量价参考；持仓记录由你手动维护" in holdings
-    assert 'id="holdings-shares"' in holdings and 'id="holdings-cost"' in holdings
-    assert "模型退出需对应实际Broker账本" not in holdings
+    assert 'id="view-holdings"' not in html and 'id="view-backtest"' not in html
+    assert 'id="analysis-position"' in html and 'id="position-reference-card"' in html
 
 
 def test_form_units_nullable_latest_and_fixed_constraint_cannot_change():
@@ -544,4 +539,37 @@ def test_archived_completed_model_blocks_revalidation_and_keeps_original_diagnos
   assert.equal(ui.validationSpec(job),null);await assert.rejects(()=>ui.revalidate(job),/当前资产不可复核/);
   assert(!requests.some(request=>request.path.endsWith('/validation-jobs')));
 })().catch(error=>{console.error(error);process.exitCode=1;});
+''')
+
+
+def test_reference_quality_stage_has_independent_counts_and_cpu_rule():
+    run_js(r'''
+for(const [stage,label] of [['reference_quality_population','生成独立参考机会人口'],['train_reference_quality','训练独立参考质量头'],['reference_quality_fee_qualification','核验参考人口完整费用资格']]) {
+ const html=ui.renderJob({job_id:'reference',status:'running',progress:25,progress_detail:{stage,current:12,total:3194,actual_device:'cpu'},spec:{parameters:{device:'mps'}}});
+ assert(html.includes(label));assert(html.includes('12 / 3194'));assert(html.includes('CPU'));assert(html.includes('当前阶段 25%'));
+ assert(!html.includes('本阶段已使用GPU'));
+}
+''')
+
+
+def test_reference_quality_failure_is_separate_from_core_model_selection():
+    run_js(r'''
+(async()=>{
+ const q={status:'trained',heads:4,unavailable_heads:[{fold:'latest',reason:'reference_quality_no_positive_class'}],population:'independent_reference',population_hash:'reference-pop-proof',fee_status:'rejected',fee_qualified:false,qualification_path:'validation/reference_quality/qualification.json',qualification_sha256:'ref-fee-proof',required_for_core_selection:false,publication_allowed:false};
+ const result={training_run_id:'model',selection:{status:'accepted',reasons:[]},reference_quality:q,result_reasons:['reference_quality_not_qualified']};
+ let html=ui.renderJob({job_id:'done',status:'succeeded',run_id:'run',result});
+ for(const text of ['独立参考质量','完成头 4','完整费用资格 未通过或证据不足','参考质量与核心自动选模分别核验','参考仓位目标保持待核验','reference-pop-proof','ref-fee-proof','reference_quality_no_positive_class'])assert(html.includes(text),text);
+ assert(!html.includes('<ul class="training-blockers">'));assert(html.includes('reference-quality-diagnostics'));
+ status={models:[{run_id:'model',required_recent_heads_ready:true,automatic_selection_eligible:true,reference_quality:q}],active_model:null,certification:{status:'pending'},jobs:[]};
+ await ui.refresh();html=element('training-selection').innerHTML;
+ assert(html.includes('近期关键头齐备'));assert(html.includes('独立参考质量'));assert(html.includes('参考质量与核心自动选模分别核验'));
+ await ui.showResult(result);assert(element('training-jobs').innerHTML.includes('完成头 4'));
+})().catch(e=>{console.error(e);process.exitCode=1;});
+''')
+
+
+def test_reference_quality_fee_success_is_not_production_certification():
+    run_js(r'''
+const html=ui.renderJob({status:'succeeded',job_id:'q',result:{reference_quality:{status:'completed',heads:12,fee_status:'passed',fee_qualified:true,qualification_sha256:'<img>',publication_allowed:false,required_for_core_selection:false}}});
+assert(html.includes('完成头 12'));assert(html.includes('完整费用资格 已通过'));assert(html.includes('不授予正式生产资格'));assert(html.includes('&lt;img&gt;'));assert(!html.includes('<img>'));
 ''')

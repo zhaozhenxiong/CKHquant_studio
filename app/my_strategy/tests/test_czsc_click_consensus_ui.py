@@ -45,11 +45,11 @@ const wait={...decision,action:'WAIT',proposed_action:'BUY',emitted:false,reason
 const merged=ui.mergeEvidenceRows([row],[wait]);
 assert.equal(ui.finalSide(merged[0].consensus),'');
 assert(ui.historyHtml(merged).includes('独立证据家族支持未达到门槛'));
-assert(!ui.historyHtml(merged).includes('<td>B</td>')); // Raw candidates never become final history points.
-assert(!ui.historyHtml([row]).includes('<td>B</td>'));
+assert(!ui.historyHtml(merged).includes('<td>B<br>')); // Raw candidates never become final history points.
+assert(!ui.historyHtml([row]).includes('<td>B<br>'));
 assert(ui.consensusHtml(wait).includes('方向诊断：观察'));
 assert(ui.consensusHtml(null).includes('最终判断不可用'));
-assert(ui.historyHtml(ui.mergeEvidenceRows([row],[decision])).includes('<td>B</td>'));
+assert(ui.historyHtml(ui.mergeEvidenceRows([row],[decision])).includes('<td>B<br>'));
 assert.equal(ui.probability(null),'不可用');assert.equal(ui.probability(false),'不可用');assert.equal(ui.probability(0),'0%');
 let state=ui.selectionTransition(null,{type:'hover',time:row.date});assert.equal(state.popupOpen,false);
 state=ui.selectionTransition(state,{type:'pin',time:row.date,popupOpen:true});assert.equal(state.popupOpen,true);
@@ -91,18 +91,18 @@ const dates=['2026-07-01','2026-07-02','2026-07-03','2026-07-06'];
 const bars=dates.map(time=>({time,open:10,high:12,low:9,close:11,volume:100,is_closed:true}));
 const profile=as_of=>({status:'available',as_of,window_bars:120,chip70_low:9.5,chip70_high:11.5,chip50:10.5,bins:[{price_low:9,price_high:10,mass_fraction:.2}]});
 const profiles=Object.fromEntries(dates.map(day=>[day,profile(day)]));
-const rows=dates.map((date,i)=>({date,reference_close:11+i,agents:{},events:[{source:'structure',date,action:'BUY',event_type:'raw_candidate'}]}));
+const rows=dates.map((date,i)=>({date,symbol:'600027.SH',reference_close:11+i,agents:{},events:[{source:'structure',date,action:'BUY',event_type:'raw_candidate'}]}));
 const consensusRows=dates.map((date,i)=>({date,action:i===0?'BUY':i===2?'SELL':'WAIT',emitted:i===0||i===2,reason_codes:[i===0||i===2?'consensus_confirmed':'insufficient_support'],agents:{arbiter:{judgment:i===0?'BUY':i===2?'SELL':'WAIT'}}}));
-const consensus={version:'trend_consensus',config:{version:'trend_consensus',min_support:2},rows:consensusRows,events:consensusRows.filter(row=>row.emitted).map(row=>({date:row.date,time:row.date,evidence_date:row.date,source:'consensus',action:row.action,symbol:'600027.SH',event_id:row.date}))};
+const consensus={version:'trend_consensus',config:{version:'trend_consensus',min_support:2},rows:consensusRows,events:consensusRows.filter(row=>row.emitted).map(row=>({date:row.date,time:row.date,evidence_date:row.date,source:'reference_consensus',reference_only:true,action:row.action,symbol:'600027.SH',event_id:row.date}))};
 const raw=dates.map(date=>({source:'structure',date,time:date,action:'BUY',candidate_eligible:true,symbol:'600027.SH'}));
-state.analysis={symbol:'600027.SH',as_of:dates[3],data_end:dates[3],consensus_decisions:consensus,events:raw,chart_evidence:{rows},
+state.analysis={analysis_mode:'reference',reference_points:consensus.events.map(e=>({...e,reference_only:true,first_available_at:e.date+'T15:00:00+08:00',available_at:e.date+'T15:00:00+08:00'})),symbol:'600027.SH',as_of:dates[3],data_end:dates[3],consensus_decisions:consensus,events:raw,chart_evidence:{rows},
   frequencies:{'日线':{bars,indicators:{rows:bars,chip_profile:profiles[dates[3]],chip_profiles:profiles}},
   '周线':{bars:[bars[2]],indicators:{rows:[bars[2]],chip_profile:profiles[dates[2]],chip_profiles:{[dates[2]]:profiles[dates[2]]}}}}};
 state.query={symbol:'600027.SH',start:dates[0],end:dates[3]};state.dates=dates;state.replayIndex=3;
 element('analysis-chart').clientWidth=640;element('view-analysis').hidden=false;
 for(const name of ['fractals','divergences','wyckoff','trades']) element('layer-'+name).checked=false;
 bind();renderAnalysis(false);
-assert.deepEqual(firstSeries.markers.map(({time,text})=>({time,text})),[{time:dates[0],text:'B'},{time:dates[2],text:'S'}]);
+assert.deepEqual(firstSeries.markers.map(({time,text})=>({time,text})),[{time:dates[0],text:'共B'},{time:dates[2],text:'共S'}]);
 const hover=time=>crosshair({time,point:{x:420,y:430},seriesData:new Map([[firstSeries,{close:11}]])});
 const clicked=time=>click({time,point:{x:750,y:700}});
 hover(dates[0]);assert(element('chart-evidence-popup').hidden);assert.equal(selectedChipProfile().as_of,dates[0]);
@@ -119,19 +119,19 @@ clicked(dates[0]);element('analysis-start').listeners.change[0]();hover(dates[0]
 clicked(dates[0]);element('analysis-symbol').listeners.input[0]();hover(dates[0]);assert(element('chart-evidence-popup').hidden);
 clicked(dates[0]);element('chart-range-start').listeners.change[0]();hover(dates[0]);assert(element('chart-evidence-popup').hidden);
 clicked(dates[0]);weeklyButton.listeners.click[0]();hover(dates[2]);assert(element('chart-evidence-popup').hidden);
-assert.deepEqual(firstSeries.markers.map(marker=>marker.text),['B','S']);
-state.backtest={trades:[{symbol:'600027.SH',date:dates[1],action:'BUY',price:11}]};element('layer-trades').checked=true;renderAnalysis(false);
+assert.deepEqual(firstSeries.markers.map(marker=>marker.text),['共B','共S']);
+renderAnalysis(false);
 clicked(dates[2]);assert(!element('chart-evidence-popup').hidden);assert(!element('chart-evidence-popup').innerHTML.includes('data-evidence-date="2026-07-02"'));
-const buyMarker=firstSeries.markers.find(marker=>marker.text==='B');click({time:dates[2],hoveredObjectId:buyMarker.id,point:{x:750,y:700}});
+const buyMarker=firstSeries.markers.find(marker=>marker.text==='共B');click({time:dates[2],hoveredObjectId:buyMarker.id,point:{x:750,y:700}});
 assert(element('chart-evidence-popup').innerHTML.includes('趋势共识策略 · 方向诊断：B'));assert.equal(selectedChipProfile().as_of,dates[0]);
 assert(element('chart-evidence-popup').innerHTML.includes('data-evidence-date="2026-07-01"'));
 assert(element('chart-evidence-popup').innerHTML.includes('data-evidence-date="2026-07-03"'));
 const dateButton=newElement('button');dateButton.dataset.evidenceDate=dates[0];
 documentListeners.click({target:{closest:()=>dateButton}});assert.equal(selectedChipProfile().as_of,dates[0]);
 assert(element('chart-evidence-popup').innerHTML.includes('趋势共识策略 · 方向诊断：B'));
-state.frequency='日线';element('layer-trades').checked=false;delete state.analysis.consensus_decisions;renderAnalysis(false);
+state.frequency='日线';state.analysis.reference_points=[];delete state.analysis.consensus_decisions;renderAnalysis(false);
 assert.equal(firstSeries.markers.length,0);clicked(dates[0]);hover(dates[0]);assert(element('chart-evidence-popup').hidden);
-assert(element('marker-summary').textContent.includes('没有多 Agent 仲裁'));
+assert(element('marker-summary').textContent.includes('最终共识 B 0 / S 0'));
 ''')
 
 
@@ -151,5 +151,5 @@ def test_default_shell_point_labels_are_final_only():
     parser = Layers()
     parser.feed((STATIC.parent / "index.html").read_text(encoding="utf-8"))
     assert parser.layers["layer-signals"]
-    for name in ("fractals", "divergences", "wyckoff", "trades"):
+    for name in ("fractals", "divergences", "wyckoff"):
         assert not parser.layers[f"layer-{name}"]

@@ -16,63 +16,36 @@
   const referenceMode = (...records) => records.some((item) => item?.analysis_mode === 'reference' || item?.reference_only === true || item?.account_scope === 'none');
   const agentKeys = (row, consensus) => referenceMode(row,consensus) ? ['ma','structure','wyckoff'] : Object.keys(labels);
   function referenceMarkerInputs(result, symbol = result?.symbol) {
-    const cutoff = date(result?.as_of || result?.data_end);
-    const events = (result?.reference_points || result?.trend_consensus?.direction_points || []).filter((item) => {
-      const known = date(item.first_available_at || item.available_at || item.date);
-      return item.reference_only === true && item.symbol === symbol && known && (!cutoff || known <= cutoff) && ['BUY','SELL'].includes(item.action || item.side);
-    }).map((item) => ({...item,source:'reference_consensus',source_frequency:item.source_frequency || '日线',evidence_date:date(item.date || item.first_available_at || item.available_at)}));
-    return {events,trades:[],valid:referenceMode(result)};
+    if (!referenceMode(result)) return {events:[],valid:false};
+    const cutoff = result?.as_of || result?.data_end;
+    const visible = (item,layer) => {
+      const known = item.first_available_at || item.available_at;
+      const sameDay = date(item.date || item.reference_price_date) === date(known);
+      const atCutoff = cutoff && String(cutoff).includes('T') ? Number.isFinite(Date.parse(known)) && Date.parse(known) <= Date.parse(cutoff) : !cutoff || date(known) <= date(cutoff);
+      const clocks = [item.first_confirmed_at,item.confirmed_at].filter(Boolean);
+      return item.reference_only === true && item.symbol === symbol && /^\d{4}-\d{2}-\d{2}T/.test(String(known || '')) && sameDay && atCutoff
+        && clocks.every((clock) => Number.isFinite(Date.parse(clock)) && Date.parse(clock) <= Date.parse(known))
+        && item.evidence_visible !== false && item.excluded !== true && ['BUY','SELL'].includes(item.action || item.side)
+        && (layer !== 'source' || item.confirmed === true && item.candidate_eligible !== false && item.input_eligible !== false && ['ma','structure','wyckoff'].includes(item.source));
+    };
+    const sources = (result.source_reference_points || []).filter((item) => visible(item,'source')).map((item) => ({...item,action:item.action || item.side,reference_layer:'source',source_frequency:'日线',evidence_date:date(item.first_available_at || item.available_at)}));
+    const finals = (result.reference_points || []).filter((item) => visible(item,'consensus')).map((item) => ({...item,reference_layer:'consensus',source:'reference_consensus',source_frequency:item.source_frequency || '日线',evidence_date:date(item.first_available_at || item.available_at)}));
+    return {events:[...sources,...finals].sort((a,b) => String(a.first_available_at || a.available_at).localeCompare(String(b.first_available_at || b.available_at))),valid:true};
   }
   function trendProbabilities(item = {}) {
     const present = item.kind === 'trend_probability' || ['p_up','p_down','p_neutral'].some((key) => Object.hasOwn(item,key));
     const available = present && !['unavailable','model_unavailable','rules_no_model','input_ineligible','input_veto','candidate_unqualified'].includes(item.status) && ['p_up','p_down','p_neutral'].every((key) => validProbability(item[key])) && Math.abs(Number(item.p_up)+Number(item.p_down)+Number(item.p_neutral)-1)<1e-5;
     return {present,available,summary:available ? `上涨 ${probability(item.p_up)} · 下跌 ${probability(item.p_down)} · 中性 ${probability(item.p_neutral)}` : '趋势概率未评分'};
   }
-  function accountMarkerInputs(result, symbol = result?.symbol) {
-    const account = result?.account_actions, context = account?.context;
-    const series = account?.series_context_hash || context?.series_context_hash;
-    if (!context?.account_id || !series) return {events:[],trades:[],valid:false,rejectedRecords:0,context};
-    let rejectedRecords = 0;
-    const bound = (items) => (items || []).filter((item) => {
-      const cutoff = date(result.as_of || result.data_end);
-      const knownDate = [item.execution_at,item.first_available_at,item.available_at,item.signal_at,item.date].map(date).filter(Boolean).sort().at(-1);
-      const valid = item.symbol === symbol && item.account_id === context.account_id && item.series_context_hash === series && (!cutoff || knownDate <= cutoff);
-      if (!valid) rejectedRecords++;
-      return valid;
-    });
-    const events = bound(account.intents || account.final_action_intents).map((item) => ({...item,
-      event_id:item.event_id || item.intent_id,source:'account_action',source_frequency:item.source_frequency || '日线',
-      evidence_date:date(item.evidence_date || item.original_signal_at || item.signal_at || item.date),
-      first_available_at:item.first_available_at || item.available_at || item.signal_at}));
-    const trades = bound(account.trades || account.ledger);
-    return {events,trades,valid:true,rejectedRecords,context,series_context_hash:series};
-  }
-  function accountEvidence(result) {
-    const evidence = result?.chart_evidence;
-    if (referenceMode(result)) return {...evidence,analysis_mode:'reference',rows:(evidence?.rows || []).map((row) => {
-      const {account_action,account_context,holding,holding_snapshot,broker_fills,rejections,...saved} = row;
-      return {...saved,analysis_mode:'reference',reference_only:true};
-    })};
-    if (!result?.trend_consensus) return evidence;
-    const selected = accountMarkerInputs(result), account = result.account_actions;
-    const bound = (item) => selected.valid && item.symbol === result.symbol && item.account_id === selected.context.account_id && item.series_context_hash === selected.series_context_hash && (!result.as_of || date(item.available_at || item.date) <= date(result.as_of));
-    const actions = new Map((account?.rows || []).filter(bound).map((item) => [date(item.date),item]));
-    const holdings = new Map((account?.holding_snapshots || []).filter(bound).map((item) => [date(item.date),item]));
-    const rejects = (account?.rejections || []).filter(bound);
-    return {...evidence,rows:(evidence?.rows || []).map((row) => ({...row,
-      account_action:actions.get(row.date) || (bound(row.account_action || {}) ? row.account_action : null),
-      account_context:selected.context,holding:holdings.get(row.date) || (bound(row.holding || row.holding_snapshot || {}) ? row.holding || row.holding_snapshot : null),
-      broker_fills:selected.trades.filter((item) => date(item.date) === row.date || date(item.signal_date) === row.date),
-      rejections:rejects.filter((item) => date(item.date || item.last_attempt_at) === row.date)}))};
-  }
+
+
   const labels = {ma:'均线 ML',structure:'CZSC 结构',wyckoff:'威科夫量价',high_return:'高收益二阶段'};
   function highReturnTargetText(target) {
     const net = finite(target?.min_net_return) ? target.min_net_return : .08;
     const risk = finite(target?.min_r_multiple) ? target.min_r_multiple : 2;
     return `完整交易费用后收益至少${num(net * 100)}%，且≥${num(risk)}倍冻结止损参考风险`;
   }
-  const accountContextText = (context) => context ? `${context.account_kind === 'real_broker' ? '真实账户' : '模拟研究账户'}${context.account_start ? ` · 起点 ${date(context.account_start)}` : ''}${finite(context.initial_cash) ? ` · 初始资金 ${num(context.initial_cash)} 元` : ''}` : '';
-  const reasonLabels = {no_candidate_signal:'本日没有新的买入候选',actual_holding_required:'需要兼容的真实持仓记录',high_return_independent_window_missing:'独立前向验证尚未完成',model_unavailable:'该时点没有可用模型',model_not_available_at_signal:'该模型在信号时点尚不可用',ma_model_not_available_at_signal:'均线模型在信号时点尚不可用',ma_model_veto:'均线分数未达到冻结门槛',model_probability_below_threshold:'模型分数未达到冻结门槛',threshold_met:'达到冻结门槛',calendar_gap:'交易日历存在行情缺口',no_saved_ma_probability:'该时点未保存均线入场评分',no_ma_entry_score:'该时点没有已保存的均线入场评分',no_candidate:'本日没有买入候选',missing_saved_score:'该时点没有已保存的评分',no_fresh_eligible_candidate:'本日没有新的合格候选',score_lineage_availability_unavailable:'缺少评分首次可用时间',score_not_observable:'该评分在此时点尚不可见',retrospective_score_rejected:'事后推理分数不参与历史仲裁',score_date_mismatch:'评分日期与所选日期不一致',score_label_overlap:'训练标签与判断日存在重叠',foreign_or_missing_event_symbol:'事件股票身份不匹配',event_not_eligible_or_visible:'候选未通过资格或尚不可见',event_input_unavailable:'候选输入不可用',event_identity_unavailable:'缺少原始事件身份',event_not_observed_today:'事件不属于当日可知证据',event_not_observable:'事件确认时间晚于判断时点',unknown_event_direction:'事件方向不可识别',actual_holding_required_for_independent_exit:'独立退出证据需要真实持仓',explicit_causal_rule_fallback:'该时点明确使用因果规则回退',ma_entry_score_unavailable:'该时点均线入场评分不可用',ma_entry_below_threshold:'均线入场分数未达到当前仲裁门槛',wyckoff_input_unavailable:'量价输入不可用',wyckoff_strength_unavailable:'量价规则强度不可用',wyckoff_strength_below_threshold:'量价规则强度未达到当前仲裁门槛',explicit_wyckoff_rule_support:'当日威科夫规则明确支持该方向',structure_input_unavailable:'结构输入不可用',opposing_events_within_source:'同一来源同时支持买入与卖出',eligible_causal_source_support:'当日合格证据支持该方向',no_buy_candidate:'本日没有新的买入候选',high_return_score_unavailable:'该时点高收益概率不可用',high_return_below_consensus_threshold:'高收益概率未达到当前质量闸门',high_return_quality_gate_passed:'通过本次高收益质量闸门',ma_assisted_structure_dependency_merged:'均线辅助定义的结构与均线合并为同一证据家族',entry_risk_plan_unavailable:'缺少当日入场风险计划',entry_risk_plan_invalid:'入场风险计划无效',entry_risk_plan_symbol_mismatch:'风险计划股票身份不匹配',entry_risk_plan_not_observable:'风险计划在此时点尚不可见',entry_risk_plan_date_mismatch:'风险计划日期不一致',entry_risk_gate_rejected:'未通过当日入场风险检查',exact_signal_day_reference_price_unavailable:'缺少信号当日有效收盘参考价',direction_evidence_expired:'原方向证据已到有效期，恢复中性',invalid_event:'原始事件格式无效',unknown_evidence_source:'证据来源未纳入仲裁',duplicate_event_identity:'重复事件只保留一次',opportunity_already_consumed:'该机会已产生最终点，不再重复使用',direction_conflict_or_insufficient_margin:'买卖支持相互冲突或方向优势不足',insufficient_independent_support:'独立证据家族支持未达到门槛',no_eligible_source_support:'本日没有合格来源支持方向',same_direction_already_active:'当前方向仍有效，不重复生成同向点',same_direction_cooldown:'同方向新机会仍处于冷却期',multi_agent_direction_confirmed:'多 Agent 已确认最终方向',buy_base_support_below_threshold:'买入基础支持分未达到门槛',buy_total_support_below_threshold:'买入总支持分未达到门槛',sell_base_support_below_threshold:'卖出基础支持分未达到门槛',insufficient_independent_families:'独立证据家族数量未达到门槛',opposing_sources_within_dependency_family:'同一依赖家族方向冲突，已弃权',source_conflict_propagated_to_dependency_family:'同一 Agent 的买卖冲突已传递到依赖家族，相关家族贡献归零',mixed_structure_budget_assigned_to_independent_evidence:'结构包含独立与均线辅助证据，结构权重只分配给独立证据'};
+  const reasonLabels = {no_candidate_signal:'本日没有新的买入候选',actual_holding_required:'需要兼容的真实持仓记录',high_return_independent_window_missing:'独立前向验证尚未完成',model_unavailable:'该时点没有可用模型',model_not_available_at_signal:'该模型在信号时点尚不可用',ma_model_not_available_at_signal:'均线模型在信号时点尚不可用',ma_model_veto:'均线分数未达到冻结门槛',model_probability_below_threshold:'模型分数未达到冻结门槛',threshold_met:'达到冻结门槛',calendar_gap:'交易日历存在行情缺口',no_saved_ma_probability:'该时点未保存均线入场评分',no_ma_entry_score:'该时点没有已保存的均线入场评分',no_candidate:'本日没有买入候选',missing_saved_score:'该时点没有已保存的评分',no_fresh_eligible_candidate:'本日没有新的合格候选',score_lineage_availability_unavailable:'缺少评分首次可用时间',score_not_observable:'该评分在此时点尚不可见',retrospective_score_rejected:'事后推理分数不参与历史仲裁',score_date_mismatch:'评分日期与所选日期不一致',score_label_overlap:'训练标签与判断日存在重叠',foreign_or_missing_event_symbol:'事件股票身份不匹配',event_not_eligible_or_visible:'候选未通过资格或尚不可见',event_input_unavailable:'候选输入不可用',event_identity_unavailable:'缺少原始事件身份',event_not_observed_today:'事件不属于当日可知证据',event_not_observable:'事件确认时间晚于判断时点',unknown_event_direction:'事件方向不可识别',actual_holding_required_for_independent_exit:'独立退出证据需要训练持仓人口',explicit_causal_rule_fallback:'该时点明确使用因果规则回退',ma_entry_score_unavailable:'该时点均线入场评分不可用',ma_entry_below_threshold:'均线入场分数未达到当前仲裁门槛',wyckoff_input_unavailable:'量价输入不可用',wyckoff_strength_unavailable:'量价规则强度不可用',wyckoff_strength_below_threshold:'量价规则强度未达到当前仲裁门槛',explicit_wyckoff_rule_support:'当日威科夫规则明确支持该方向',structure_input_unavailable:'结构输入不可用',opposing_events_within_source:'同一来源同时支持买入与卖出',eligible_causal_source_support:'当日合格证据支持该方向',no_buy_candidate:'本日没有新的买入候选',high_return_score_unavailable:'该时点高收益概率不可用',high_return_below_consensus_threshold:'高收益概率未达到当前质量闸门',high_return_quality_gate_passed:'通过本次高收益质量闸门',ma_assisted_structure_dependency_merged:'均线辅助定义的结构与均线合并为同一证据家族',entry_risk_plan_unavailable:'缺少当日入场风险计划',entry_risk_plan_invalid:'入场风险计划无效',entry_risk_plan_symbol_mismatch:'风险计划股票身份不匹配',entry_risk_plan_not_observable:'风险计划在此时点尚不可见',entry_risk_plan_date_mismatch:'风险计划日期不一致',entry_risk_gate_rejected:'未通过当日入场风险检查',exact_signal_day_reference_price_unavailable:'缺少信号当日有效收盘参考价',direction_evidence_expired:'原方向证据已到有效期，恢复中性',invalid_event:'原始事件格式无效',unknown_evidence_source:'证据来源未纳入仲裁',duplicate_event_identity:'重复事件只保留一次',opportunity_already_consumed:'该机会已产生最终点，不再重复使用',direction_conflict_or_insufficient_margin:'买卖支持相互冲突或方向优势不足',insufficient_independent_support:'独立证据家族支持未达到门槛',no_eligible_source_support:'本日没有合格来源支持方向',same_direction_already_active:'当前方向仍有效，不重复生成同向点',same_direction_cooldown:'同方向新机会仍处于冷却期',multi_agent_direction_confirmed:'多 Agent 已确认最终方向',buy_base_support_below_threshold:'买入基础支持分未达到门槛',buy_total_support_below_threshold:'买入总支持分未达到门槛',sell_base_support_below_threshold:'卖出基础支持分未达到门槛',insufficient_independent_families:'独立证据家族数量未达到门槛',opposing_sources_within_dependency_family:'同一依赖家族方向冲突，已弃权',source_conflict_propagated_to_dependency_family:'同一 Agent 的买卖冲突已传递到依赖家族，相关家族贡献归零',mixed_structure_budget_assigned_to_independent_evidence:'结构包含独立与均线辅助证据，结构权重只分配给独立证据'};
   Object.assign(reasonLabels,{no_fresh_candidate_trigger:'本日没有新的候选触发，活跃证据不会自行生成买卖点',evidence_state_unavailable:'当日状态证据不可用',evidence_state_date_mismatch:'状态证据日期与判断日不一致',evidence_state_not_observable:'当日状态证据尚不可知',active_evidence_expired:'历史方向证据已过有效期',current_state_invalidated:'当日状态已使历史方向证据失效',ma_full_identity_unavailable:'均线评分缺少完整模型身份',ma_causal_trend_not_supported:'当日因果均线趋势不支持该方向',wyckoff_current_direction_not_supported:'当日量价状态不支持该方向',independent_opportunity_cooldown:'独立新机会仍处于冷却期'});
   Object.assign(reasonLabels,{candidate_evidence_contract_unavailable:'缺少候选评估契约',evidence_state_input_unavailable:'当日状态输入未通过',evidence_snapshot_identity_unavailable:'缺少当日证据快照身份',current_state_unavailable:'当日状态未保存',current_state_price_mismatch:'状态参考价与判断日行情不一致',current_state_not_observable:'状态依赖在判断时点尚不可见',active_evidence_expired_or_invalid:'原始证据已过期或失效',ma_frozen_model_contract_unverified:'均线模型冻结契约未核验',ma_candidate_risk_contract_mismatch:'均线模型候选或风险契约不匹配',high_return_candidate_risk_contract_mismatch:'高收益模型候选或风险契约不匹配',high_return_frozen_model_contract_unverified:'高收益模型冻结契约未核验',high_return_score_date_mismatch:'高收益评分日期与判断日不一致',ma_causal_sell_origin_unavailable:'缺少仍有效的均线趋势失效证据',structure_current_support_invalid:'结构支撑或阻力当前无效',structure_current_price_invalidated:'当日价格已突破结构失效边界',wyckoff_strength_below_threshold_or_opposing:'量价强度不足或反向强度占优',currently_revalidated_candidate_support:'已按当日状态复核候选支持',no_current_direction_support:'当日状态不支持方向',no_fresh_qualified_opportunity:'本日没有新的合格机会',fresh_candidate_direction_mismatch:'新候选方向与仲裁支持方向不一致',active_evidence_permanently_invalidated:'原始证据已被当日状态永久失效',invalid_invalidation_reference:'失效记录未指向对应来源的原始事件',ma_current_input_unavailable:'当日均线输入不可用',ma_current_complete_lineage_unavailable:'当日均线完整评分身份不可用',ma_current_entry_probability_veto:'当日均线入场评分未过门槛',structure_current_input_or_confirmation_unavailable:'当日结构输入或确认时间不可用',structure_current_support_invalidated:'原结构支撑已失效',wyckoff_current_metadata_or_input_unavailable:'当日量价时点或输入不可用',wyckoff_current_strength_or_range_invalidated:'原量价方向或价格区间已失效',risk_inputs_unavailable:'风险输入不可用',invalid_causal_stop:'因果止损价无效',stop_distance_exceeds_frozen_maximum:'止损距离超过冻结上限'});
   Object.assign(reasonLabels,{candidate_risk_ineligible:'候选未通过风险检查，未评估高收益概率',risk_blocked:'候选被风险阻止，未评估',input_ineligible:'评分输入未通过资格检查',model_unavailable:'该时点缺少兼容模型',identity_error:'已有评分的模型身份核验失败',ma_candidate_out_of_scope:'该候选不在均线模型已验证的适用范围',candidate_envelope_mismatch:'候选人口与模型训练范围不一致'});
@@ -87,6 +60,8 @@
   Object.assign(reasonLabels,{holding_confirmed_boundary:'入场计划冻结的确认边界失效',risk_plan_identity_or_time_mismatch:'入场风险计划身份或时点不匹配',risk_plan_unavailable_at_signal:'信号时点没有可用风险计划',risk_plan_frozen_fields_missing:'风险计划缺少冻结字段',risk_plan_outside_frozen_contract:'风险计划参数超出冻结契约'});
   Object.assign(reasonLabels,{reference_out_of_scope:'本项不属于参考分析',no_qualified_current_model:'尚无达标模型，趋势概率不可用',reference_direction_confirmed:'独立证据支持参考方向',reference_direction_wait:'方向支持不足，继续观察',reference_buy_support_below_threshold:'买方参考支持未达门槛',reference_sell_support_below_threshold:'卖方参考支持未达门槛'});
   Object.assign(reasonLabels,{risk_stop_distance_outside_contract:'止损距离不符合冻结风险契约'});
+  Object.assign(reasonLabels,{no_final_buy_consensus:'最终买方共识未通过',qualified_trend_model_unavailable:'该日缺少合格趋势模型',entry_quality_not_evaluated_reference_population:'此参考用途尚未完成入场质量核验',reference_population_not_scored:'参考用途尚未评分',no_confirmed_buy_boundary:'缺少已确认买方边界',reference_risk_inputs_unavailable:'风险参考输入不足'});
+  Object.assign(reasonLabels,{reference_quality_not_qualified:'参考质量头尚未通过完整费用资格',reference_quality_below_threshold:'参考质量概率未达到原门槛',reference_total_support_below_threshold:'参考买方总支持未达到原门槛',reference_quality_risk_geometry_mismatch:'参考质量与原机会风险边界不一致',no_qualified_live_original_buy_opportunity:'没有合格且仍有效的原买方机会',original_buy_opportunity_identity_unavailable:'缺少原买方机会身份',original_buy_risk_plan_identity_mismatch:'原买方风险计划身份不一致',original_buy_risk_plan_unavailable:'原买方风险计划不可用',original_buy_risk_geometry_mismatch:'原买方风险边界不一致',reference_quality_policy_requires_new_population:'参考政策已改变，须重新生成专属人口',reference_quality_population_unavailable:'参考质量专属人口尚未完成',reference_population_fee_qualification_not_passed:'参考人口完整费用验收尚未通过',reference_original_BUY_risk_population_ineligible:'当前机会不属于合格参考买方风险人口',no_strictly_prior_reference_quality_head:'该日缺少严格先验参考质量头',reference_quality_untrusted_or_changed_result:'参考质量结果来源不可信或内容已改变',reference_quality_reference_context_mismatch:'参考质量与当前股票及判断时点不一致',reference_quality_scored_population_or_risk_mismatch:'参考质量评分人口或风险边界不一致',reference_quality_upstream_trend_binding_mismatch:'当前趋势检查点与参考质量训练来源不一致',reference_quality_trend_route_out_of_population:'当前趋势检查点与参考质量训练来源不一致'});
   const reason = (value) => String(value || '该时点没有可用评分').split(/[；;]/).map((part) => reasonLabels[part] || part).join('；');
   const statusLabel = (value) => ({available:'可用',unavailable:'不可用',shadow:'影子观察',no_candidate:'没有候选',candidate:'候选',qualified:'资格通过',rules_only:'规则判断',rule_evidence:'规则证据',input_veto:'输入未通过',actual_holding_required:'需要真实持仓',scored:'已评分',score_unavailable:'评分不可用',rule_triggered:'规则触发',rule_fallback:'规则回退',no_signal:'未触发',input_unavailable:'输入未通过',blocked:'已阻止',active:'已生成',current_supported:'当日复核支持',current_conflict:'当日方向冲突',not_supported:'当日未支持',supported:'当日支持',model_unavailable:'缺兼容模型',input_ineligible:'输入不合格',out_of_scope:'范围外研究',identity_error:'评分身份核验失败',risk_blocked_unscored:'风险阻止 · 未评估'})[value] || String(value || '不可用');
   function rowAt(evidence, day) { return (evidence?.rows || []).find((row) => date(row.date) === date(day)) || null; }
@@ -169,6 +144,10 @@
     return '';
   }
   function currentAgentView(row, key, opinion = null) {
+    if (key === 'reference_quality') {
+      const quality = referenceQualityView(row);
+      return {label:'独立参考质量Q',summary:quality.scored ? `参考质量概率 ${probability(quality.probability)}` : '参考质量未评分',kind:'独立参考买方人口',status:quality.status,evaluationLabel:quality.qualification,reason:quality.reasons.map(reason).join('；'),target:'完整费用后至少8%且2R',exit:''};
+    }
     if (referenceMode(row) && key === 'high_return') return {label:labels[key],summary:'参考分析不评估高收益交易概率',kind:'参考分析',status:'reference_out_of_scope',exit:''};
     const item = row?.agents?.[key] || {}, view = agentView(item,key);
     if (key === 'structure') {
@@ -222,11 +201,7 @@
         view.reason = trend.available ? (item.reason_codes || []).map(reason).join('；') : reason(item.reason || (item.reason_codes || []).join('；') || 'model_unavailable');
         view.target = item.target || '未来核验交易日价格方向：上涨／下跌／中性';
         view.trend = trend;
-        const exit = row?.account_action?.exit_evaluation;
-        const holding = row?.holding || row?.account_action?.holding_snapshot;
-        const shares = holding?.shares ?? row?.account_action?.shares;
-        view.exit = referenceMode(row) ? '' : shares > 0 ? exit?.holding_contract_compatible === true && validProbability(exit?.probability)
-          ? `该研究账户持仓退出概率 ${probability(exit.probability)}` : `该研究账户退出未评估${exit?.reason_codes?.length ? ` · ${exit.reason_codes.map(reason).join('；')}` : ''}` : finite(shares) && Number(shares) === 0 ? '该研究账户空仓 · 持仓退出不适用' : '该研究账户持仓状态未提供 · 退出未评估';
+        view.exit = '';
         return view;
       }
       if (item.in_scope === false || opinion?.in_scope === false) view.summary = `范围外研究分 ${probability(item.probability)} · 不计入已验证入场质量`;
@@ -298,7 +273,7 @@
         view.reason = `${facts.riskRejected ? `当日方向事实含 ${facts.riskRejected} 条风险未通过的买入候选；` : '方向事实与原始入场资格分别展示；'}当日结构意见 ${sourceOpinionText(opinion)} · 已按当日状态复核 ${opinion?.origin_event_ids?.length || 0} 条原始来源（含有效历史证据）。新入场仍需通过风险与高收益闸门。`;
       }
       return `<section class="agent-evidence"><div class="agent-heading"><strong>${esc(view.label)}</strong><span>${esc(view.kind)} · ${esc(view.evaluationLabel || statusLabel(view.status))}</span></div><p class="agent-score">${esc(view.summary)}</p>${view.secondary ? `<p class="subtle">${esc(view.secondary)}</p>` : ''}${opinion ? opinionHtml(opinion,key,{decision:consensus,config,version}) : ''}<p class="subtle">${esc(view.reason)}</p>${view.explanation ? `<p class="subtle">${esc(view.explanation)}</p>` : ''}${view.pricingNote ? `<p class="subtle">${esc(view.pricingNote)}</p>` : ''}${!compact ? `${view.pointTypes ? `<p>${esc(view.pointTypes)}</p>` : ''}${view.exit ? `<p class="subtle">${esc(view.exit)}</p>` : ''}${agentDetailsHtml(row,key,view,opinion)}` : ''}</section>`;
-    }).join('')}</div>`;
+    }).join('')}${referenceMode(row,consensus) && referenceQualityView(row).present ? `<section class="agent-evidence reference-quality-agent"><div class="agent-heading"><strong>独立参考质量Q</strong><span>专属参考买方人口</span></div>${referenceQualitySummaryHtml(row)}<p class="subtle">此质量评分用于参考仓位资格；三路方向证据分别核验。</p></section>` : ''}</div>`;
   }
   function agentOverviewHtml(row, consensus = null, config = null) {
     const cellStyle = 'padding:6px;font-size:11px;line-height:1.4;overflow-wrap:anywhere';
@@ -329,38 +304,15 @@
     }).join('');
     const target = row?.agents?.ma?.target || row?.agents?.ma?.model_identity?.target;
     const targetNote = target === 'actual_complete_fee_net_roundtrip_positive' ? '<p class="subtle" style="margin:6px 0">MA 目标：完整交易费用后获利概率。</p>' : '';
-    return `<section class="agent-score-overview" aria-label="${referenceMode(row,consensus) ? '三路参考评分' : '四路评分总览'}"><strong>${referenceMode(row,consensus) ? '三路参考评分' : '四路评分总览'}</strong><div class="table-wrap" style="margin-top:5px"><table style="table-layout:fixed"><colgroup><col style="width:20%"><col style="width:40%"><col style="width:10%"><col style="width:30%"></colgroup><thead><tr>${['Agent','当前分值 / 状态','权重','买 / 卖实际贡献'].map((label) => `<th style="${cellStyle}">${esc(label)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table></div>${targetNote}</section>`;
+    return `<section class="agent-score-overview" aria-label="${referenceMode(row,consensus) ? '三路参考评分' : '四路评分总览'}"><strong>${referenceMode(row,consensus) ? '三路参考评分' : '四路评分总览'}</strong><div class="table-wrap" style="margin-top:5px"><table style="table-layout:fixed"><colgroup><col style="width:20%"><col style="width:40%"><col style="width:10%"><col style="width:30%"></colgroup><thead><tr>${['Agent','当前分值 / 状态','权重','买 / 卖实际贡献'].map((label) => `<th style="${cellStyle}">${esc(label)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table></div>${targetNote}${referenceMode(row,consensus) ? referenceQualitySummaryHtml(row) : ''}</section>`;
   }
   function referenceHtml(row) {
     if (!row) return '<p class="evidence-unavailable">该日期未取得参考价与评分证据。</p>';
     const ohlc = row.ohlc || {}, priceBasis = {unadjusted:'未复权',mixed_legacy_adjustment_unverified:'旧复权口径未核验'}[row.reference_price_basis] || row.reference_price_basis || '价格口径待核验';
     return `<div class="evidence-price"><strong>收盘参考价 ${num(row.reference_close)} 元</strong><span>${esc(row.reference_price_date || row.date)} · ${esc(priceBasis)} · 非成交价</span></div><p class="evidence-ohlc">开 ${num(ohlc.open)} · 高 ${num(ohlc.high)} · 低 ${num(ohlc.low)} · 收 ${num(ohlc.close)}</p><p class="subtle">下一核验交易日 ${esc(row.next_market_session || '等待核验')}</p>`;
   }
-  function accountActionHtml(row) {
-    if (referenceMode(row)) return '';
-    const action = row?.account_action;
-    if (!action) return '';
-    const side = finalSide(action), label = side === 'S' ? 'S · 账户退出意图' : side === 'B' ? 'B · 账户买入意图' : '账户观察';
-    const holding = row.holding || row.holding_snapshot || action.holding_snapshot || action.holding_before;
-    const shares = holding?.shares ?? action.shares;
-    const fills = (row.broker_fills || row.trades || []).map((fill) => `<p>执行 ${esc(date(fill.date || fill.execution_at))} · ${esc(fill.action)} · 成交 ${num(fill.price)} 元 · 信号 ${esc(date(fill.signal_date || fill.signal_at))}</p>`).join('');
-    const rejections = (row.rejections || []).map((item) => `<p>拒单 ${esc(date(item.date || item.last_attempt_at))} · ${esc(item.reason || (item.reason_codes || []).map(reason).join('；'))}</p>`).join('');
-    const origin = action.final_action_intents?.[0] || action;
-    const exit = action.exit_evaluation;
-    const exitText = holding?.shares > 0 && exit?.holding_contract_compatible === true && validProbability(exit.probability) ? `<p>持仓退出概率 ${probability(exit.probability)}</p>` : '';
-    const reasons = opinionReasons(action) || (action.final_action_intents || []).map((intent) => reason(intent.reason || (intent.reason_codes || []).join('；'))).join('；');
-    const contextText = accountContextText(row.account_context);
-    const openRisk = /T09:30:/.test(String(origin.original_signal_at || origin.first_available_at || origin.signal_at || '')) || origin.reference_price_source === 'trigger_open' || [origin.reason,...(origin.reason_codes || []),...(action.reason_codes || [])].includes('gap_open_stop');
-    const openNote = openRisk ? '<p class="subtle">开盘风控触发；以下 Agent 分数为当日收盘复核，不是该卖出的触发依据。</p>' : '';
-    return `<section class="account-action-evidence"><strong>${esc(label)}</strong>${openNote}${contextText ? `<p class="subtle">${esc(contextText)} · 显示区间不会重置账户</p>` : ''}<p>${finite(shares) ? `持仓 ${num(shares,0)} 股` : '持仓状态未提供'} · ${esc(reasons)}</p><p class="subtle">${esc(action.account_id || '')} · 信号 ${esc(origin.original_signal_at || origin.signal_at || origin.date)}${origin.intended_session ? ` · 下一次执行核验 ${esc(origin.intended_session)}` : ''}</p>${exitText}${fills}${rejections}</section>`;
-  }
-  function riskHtml(plan) {
-    if (!plan) return '<p class="subtle">该日没有可用的价格与风险计划。</p>';
-    const canDerive = finite(plan.reference_price) && finite(plan.stop_price) && validProbability(plan.target_weight) && Number(plan.reference_price) > Number(plan.stop_price) && Number(plan.stop_price) > 0;
-    const risk = finite(plan.risk_fraction) ? Number(plan.risk_fraction) : canDerive ? Number(plan.target_weight) * (Number(plan.reference_price) - Number(plan.stop_price)) / Number(plan.reference_price) : null;
-    const riskLabel = finite(plan.risk_fraction) ? '风险预算' : '信号计划风险占比';
-    return `<p class="subtle">价格与风险计划：${plan.entry_allowed === true ? '入场资格通过' : plan.entry_allowed === false ? '未通过入场资格' : '入场资格待核验'} · ${esc(statusLabel(plan.status))}${(plan.reason_codes || []).length ? ` · ${esc(plan.reason_codes.map(reason).join('；'))}` : ''}</p><div class="evidence-risk"><span>参考区间 ${num(plan.price_floor)}–${num(plan.price_ceiling)} 元</span><span>失效价 ${num(plan.stop_price)} 元</span><span>${riskLabel} ${finite(risk) ? probability(risk) : '不可用'}</span><span>目标仓位 ${finite(plan.target_weight) ? probability(plan.target_weight) : '不可用'}</span></div>`;
-  }
+
+
   function groupDates(groups) {
     return [...new Set((groups || []).flatMap((group) => (group.entries || []).map((entry) => date(entry.row?.evidence_date || entry.event_date || entry.row?.date || entry.row?.time || entry.original_date))).filter(Boolean))].sort();
   }
@@ -465,8 +417,7 @@
   }
   function popupSelection({evidence,consensus,groups = [],barDate,selectedDate}) {
     const dates = groupDates(groups), displayedDates = groupDates(groups.map((group) => ({...group,entries:(group.entries || []).filter((entry) => entry.displayed !== false)})));
-    const accountDates = groupDates(groups.filter((group) => group.kind === 'intention' && group.sources?.includes('account_action')));
-    const finalDates = accountDates.length ? accountDates : groupDates(groups.filter((group) => group.kind === 'intention' && group.sources?.some((source) => ['consensus','reference_consensus'].includes(source))));
+    const finalDates = groupDates(groups.filter((group) => group.kind === 'intention' && group.sources?.some((source) => ['consensus','reference_consensus'].includes(source))));
     const selected = dates.includes(selectedDate) ? selectedDate : finalDates.at(-1) || displayedDates.at(-1) || date(barDate);
     const entries = groups.flatMap((group) => group.entries || []).filter((entry) => date(entry.row?.evidence_date || entry.event_date || entry.row?.date || entry.row?.time || entry.original_date) === selected);
     return {dates,selected,entries,row:rowAt(evidence,selected),decision:consensusAt(consensus,selected)};
@@ -476,10 +427,9 @@
     const {selected,entries,row,decision} = popupSelection(context);
     if (entries.length && entries.every((entry) => entry.row?.source === 'wyckoff' && (entry.row?.event || entry.row?.event_type))) return null;
     if (entries.length && entries.every((entry) => entry.kind === 'execution')) return null;
-    const finalEntry = entries.find((entry) => entry.displayed !== false && entry.row?.source === 'account_action') || entries.find((entry) => entry.displayed !== false && ['consensus','reference_consensus'].includes(entry.row?.source)) || entries.find((entry) => entry.displayed !== false);
+    const finalEntry = entries.find((entry) => entry.displayed !== false && ['consensus','reference_consensus'].includes(entry.row?.source)) || entries.find((entry) => entry.displayed !== false);
     const event = finalEntry?.row || {};
     const signalStamp = event.first_available_at || event.available_at || event.original_signal_at || event.signal_at;
-    if (event.source === 'account_action' && /T(?:09|10|11|13|14):/.test(String(signalStamp || '')) && !finite(event.reference_price)) return null;
     const price = finite(event.reference_price) ? Number(event.reference_price) : finite(row?.reference_close) ? Number(row.reference_close) : null;
     const priceDate = date(event.reference_price_date || row?.reference_price_date || selected);
     if (price == null || price <= 0 || priceDate !== selected) return null;
@@ -502,15 +452,15 @@
       const amount = group.event_count || group.entries?.length || 1;
       const wyckoff = amount === 1 ? `W ${esc(group.event_type)}${group.confirmed ? '确认' : '待测试'}`
         : `量价${group.action === 'BUY' ? '需求' : '供给'} ×${amount} · 已确认 ${group.confirmed_count ?? group.entries?.filter((entry) => entry.row?.confirmed === true).length ?? 0}／待测试 ${group.pending_count ?? group.entries?.filter((entry) => entry.row?.confirmed !== true).length ?? 0}`;
-      return `<span class="badge ${group.action === 'BUY' ? 'buy' : 'sell'}">${group.kind === 'wyckoff' ? wyckoff : `${group.kind === 'execution' ? '实际成交 ' : group.diagnostic ? '方向诊断 ' : ''}${group.action === 'BUY' ? 'B' : 'S'}`}</span>`;
+      return `<span class="badge ${group.action === 'BUY' ? 'buy' : 'sell'}">${group.kind === 'wyckoff' ? wyckoff : `${group.kind === 'source_reference' ? `${group.source_label || group.sources?.join('、') || '独立'}来源 ` : '最终共识 '}${group.action === 'BUY' ? 'B' : 'S'}`}</span>`;
     }).join('');
     // Show every constituent event of the displayed candle. The date selector
-    // above still controls the independent daily score/account snapshot.
+    // above still controls the independent daily reference snapshot.
     const wyckoffEntries = visible.flatMap((group) => group.kind === 'wyckoff' ? group.entries || [] : [])
       .filter((entry) => entry.row?.source === 'wyckoff' && (entry.row?.event || entry.row?.event_type))
       .sort((a,b) => String(a.first_available_at || a.event_date).localeCompare(String(b.first_available_at || b.event_date)) || String(a.event_id).localeCompare(String(b.event_id)));
     const wyckoffHtml = wyckoffEntries.length ? `<section class="wyckoff-event-details"><strong>本根K线原始量价事件 ${wyckoffEntries.length} 条</strong>${wyckoffEntries.map((entry) => `<p>W ${esc(entry.row.event || entry.row.event_type)} · ${entry.row.side === 'SELL' ? '供给' : '需求'} · ${entry.row.confirmed === true ? '已确认' : '待测试'}<br>原观察 ${esc(entry.row.origin_observed_at || entry.row.observed_at || entry.original_date)} · 首次可用 ${esc(entry.first_available_at || entry.row.available_at)}${entry.row.event_id ? `<br>事件标识 ${esc(entry.row.event_id)}` : ''}${finite(entry.row.invalidation_price) ? `<br>原冻结失效边界 ${esc(num(entry.row.invalidation_price))} 元` : ''}${entry.row.reason_codes?.length ? `<br>${esc(entry.row.reason_codes.map(reason).join('；'))}` : ''}</p>`).join('')}<p class="subtle">● 需求事件 · ■ 供给事件；主图数字为同方向事件数量，包含已确认和待测试。量价事件与最终 B/S 分别记录；周期内日线证据已可知，形成中周/月线仍按其闭合规则参与原生判断。上方日期选择切换当日证据与评分。</p></section>` : '';
-    return `<header class="chart-popup-heading"><div><strong>${esc(frequency)} ${esc(barDate)}</strong><p>${badges || (inspection ? 'K线评分查看' : '最终判断')} · 点击查看</p></div><button type="button" data-chart-evidence-close aria-label="关闭图表判断">×</button></header><p class="evidence-original-date">${inspection ? '评分日期' : '信号可知日'} ${esc(selected)}${esc(periodText)}</p>${agentOverviewHtml(row,decision,consensus?.config)}${accountActionHtml(row)}${dates.length > 1 || dates.length && frequency !== '日线' ? `<div class="evidence-date-list" aria-label="${inspection ? '周期内评分日期' : '周期内信号与事件可知日期'}">${dates.map((item) => `<button type="button" data-evidence-date="${esc(item)}" aria-pressed="${item === selected}">${esc(item)}</button>`).join('')}</div><p class="subtle">${inspection ? '按核验交易日查看当日评分' : '按首次可知日期查看当日判断'}；点击日期同步对应日线筹码。</p>` : ''}${frequency !== '日线' && !selectedDate ? `<p class="subtle">筹码按所指周期截至 ${esc(profileAsOf || barDate)}；以下判断保留信号可知日。</p>` : ''}${reference?.available_at ? `<p class="subtle">信号首次可用 ${esc(reference.available_at)}</p>` : ''}${anchors}${wyckoffHtml}${consensusHtml(decision,consensus?.config,consensus?.version)}${referenceHtml(row)}${agentsHtml(row,false,decision,consensus?.config,consensus?.version)}${referenceMode(row) ? '' : riskHtml(row?.raw_risk_plan)}<div class="evidence-actions"><button type="button" data-evidence-locate="${esc(selected)}">定位原始证据</button><button type="button" data-evidence-replay="${esc(selected)}">按此日重新判断</button></div>${rawEventsHtml(row,entries,consensus?.version || consensus?.config?.version)}`;
+    return `<header class="chart-popup-heading"><div><strong>${esc(frequency)} ${esc(barDate)}</strong><p>${badges || (inspection ? 'K线评分查看' : '最终判断')} · 点击查看</p></div><button type="button" data-chart-evidence-close aria-label="关闭图表判断">×</button></header><p class="evidence-original-date">${inspection ? '评分日期' : '信号可知日'} ${esc(selected)}${esc(periodText)}</p>${agentOverviewHtml(row,decision,consensus?.config)}${dates.length > 1 || dates.length && frequency !== '日线' ? `<div class="evidence-date-list" aria-label="${inspection ? '周期内评分日期' : '周期内信号与事件可知日期'}">${dates.map((item) => `<button type="button" data-evidence-date="${esc(item)}" aria-pressed="${item === selected}">${esc(item)}</button>`).join('')}</div><p class="subtle">${inspection ? '按核验交易日查看当日评分' : '按首次可知日期查看当日判断'}；点击日期同步对应日线筹码。</p>` : ''}${frequency !== '日线' && !selectedDate ? `<p class="subtle">筹码按所指周期截至 ${esc(profileAsOf || barDate)}；以下判断保留信号可知日。</p>` : ''}${reference?.available_at ? `<p class="subtle">信号首次可用 ${esc(reference.available_at)}</p>` : ''}${anchors}${sourcePointsHtml(entries)}${wyckoffHtml}${consensusHtml(decision,consensus?.config,consensus?.version)}${referenceHtml(row)}${agentsHtml(row,false,decision,consensus?.config,consensus?.version)}${positionHtml(row)}<div class="evidence-actions"><button type="button" data-evidence-locate="${esc(selected)}">定位原始证据</button><button type="button" data-evidence-replay="${esc(selected)}">按此日重新判断</button></div>${rawEventsHtml(row,entries,consensus?.version || consensus?.config?.version)}`;
   }
   function historyPage(rows, requestedPage = 0, pageSize = 20) {
     const sorted = [...(rows || [])].sort((a,b) => date(b.date).localeCompare(date(a.date))), pages = Math.max(1,Math.ceil(sorted.length / pageSize));
@@ -530,23 +480,12 @@
   }
   function historyHtml(rows, page = 0, selectedDate = '', statistics = null) {
     const result = historyPage(rows,page);
-    const reference = (rows || []).some(referenceMode);
-    const accountMode = !reference && (rows || []).some((row) => Object.hasOwn(row,'account_action'));
-    const trendMode = (rows || []).some((row) => trendProbabilities(row.agents?.ma).present);
     const body = result.rows.map((row) => {
-      const action = accountMode ? row.account_action : row.consensus || (reference ? row : null);
-      const intents = finalSide(action) || '—', decisionReason = action ? opinionReasons(action) || (accountMode ? '本日无新账户操作' : '本日未生成最终买卖点') : accountMode ? '账户操作不可用' : '仲裁不可用';
-      const facts = structureFacts(row), structure = row.consensus?.agents?.structure;
-      const structureCell = facts.available ? `原始 ${num(facts.buy,0)} / ${num(facts.sell,0)}${reference ? '' : `<br>风险通过买入 ${num(facts.qualifiedBuy,0)}`}<br>当前 ${esc(sourceOpinionText(structure))}<br>有效历史支持 ${num(structure?.origin_event_ids?.length || 0,0)}` : `${num(facts.buy,0)} / ${num(facts.sell,0)}`;
-      const w = currentAgentView(row,'wyckoff',row.consensus?.agents?.wyckoff), l2 = currentAgentView(row,'high_return',row.consensus?.agents?.high_return);
-      const l2Cell = validProbability(row.agents?.high_return?.probability) ? `${probability(row.agents.high_return.probability)}${l2.evaluationLabel ? `<br>${esc(l2.evaluationLabel)}` : ''}` : esc(l2.evaluationLabel || '不可用');
-      const ma = row.agents?.ma || {}, maScope = ma.in_scope === false || row.consensus?.agents?.ma?.in_scope === false ? '<br>范围外研究分' : '';
-      const shares = (row.holding || row.holding_snapshot)?.shares ?? row.account_action?.shares;
-      const accountCells = accountMode ? `<td>${finite(shares) ? `${num(shares,0)} 股` : '未提供'}</td><td>${esc((row.broker_fills || []).map((fill) => `${date(fill.date)} ${fill.action} ${num(fill.price)}元`).join('；') || '无成交')}</td><td>${esc((row.rejections || []).map((item) => `${date(item.date || item.last_attempt_at)} ${item.reason || (item.reason_codes || []).map(reason).join('；')}`).join('；') || '无拒单')}</td>` : '';
-      const maCell = trendMode ? esc(trendProbabilities(ma).summary) : `${probability(ma.probability)}${maScope}`;
-      return `<tr${row.date === selectedDate ? ' class="history-selected"' : ''}><td><button type="button" data-history-date="${esc(row.date)}">${esc(row.date)}</button></td><td>${num(row.reference_close)}</td><td>${esc(intents)}</td><td>${esc(decisionReason)}</td><td>${maCell}</td><td>${structureCell}</td><td>${esc(w.summary)}${w.secondary ? `<br>${esc(w.secondary)}` : ''}</td>${reference ? '' : `<td data-evaluation-status="${esc(l2.evaluationStatus || '')}">${l2Cell}</td>`}${accountCells}</tr>`;
+      const decision = row.consensus || row, facts = structureFacts(row), w = currentAgentView(row,'wyckoff',decision.agents?.wyckoff);
+      const sources = (row.source_reference_points || []).map((event) => `${event.source_label || event.source} ${event.side === 'SELL' || event.action === 'SELL' ? 'S' : 'B'}`).join('、');
+      return `<tr${row.date === selectedDate ? ' class="history-selected"' : ''}><td><button type="button" data-history-date="${esc(row.date)}">${esc(row.date)}</button></td><td>${num(row.reference_close)}</td><td>${esc(sources || '—')}</td><td>${esc(finalSide(decision) || '—')}<br>${esc(opinionReasons(decision) || '当日没有最终共识点')}</td><td>${esc(trendProbabilities(row.agents?.ma).summary)}</td><td>${num(facts.buy,0)} / ${num(facts.sell,0)}<br>${esc(sourceOpinionText(decision.agents?.structure))}</td><td>${esc(w.summary)}${w.secondary ? `<br>${esc(w.secondary)}` : ''}</td><td>${positionSummaryHtml(row)}</td></tr>`;
     }).join('');
-    return `${reference ? '' : statisticsHtml(statistics)}<div class="table-wrap"><table class="history-evidence-table"><thead><tr><th>日期 · 点击回放</th><th>收盘参考价</th><th>${reference ? 'B / S 参考方向' : accountMode ? '账户最终 B / S' : '最终 B / S'}</th><th>${accountMode ? '操作／退出原因' : '判断原因'}</th><th>${trendMode ? '均线趋势概率（涨／跌／中性）' : '均线入场概率'}</th><th>结构原始买 / 卖与当前意见</th><th>量价需求 / 供给（规则分）</th>${reference ? '' : '<th>高收益概率与评估状态</th>'}${accountMode ? '<th>持仓</th><th>成交执行记录</th><th>拒单记录</th>' : ''}</tr></thead><tbody>${body || `<tr><td colspan="${reference ? 7 : accountMode ? 11 : 8}">尚无历史参考记录。</td></tr>`}</tbody></table></div><div class="history-pagination"><button type="button" data-history-page="${result.page - 1}"${result.page === 0 ? ' disabled' : ''}>上一页</button><span>${result.page + 1} / ${result.pages} · ${result.total} 个交易日 · 每页 20 行</span><button type="button" data-history-page="${result.page + 1}"${result.page + 1 >= result.pages ? ' disabled' : ''}>下一页</button></div>`;
+    return `<div class="table-wrap"><table class="history-evidence-table"><thead><tr><th>日期 · 点击回放</th><th>收盘参考价</th><th>来源 B / S</th><th>最终共识 / 原因</th><th>趋势概率（涨／跌／中性）</th><th>结构买 / 卖与意见</th><th>量价需求 / 供给规则分</th><th>仓位参考 / 风险上限</th></tr></thead><tbody>${body || '<tr><td colspan="8">尚无历史参考记录。</td></tr>'}</tbody></table></div><div class="history-pagination"><button type="button" data-history-page="${result.page - 1}"${result.page === 0 ? ' disabled' : ''}>上一页</button><span>${result.page + 1} / ${result.pages} · ${result.total} 个交易日 · 每页 20 行</span><button type="button" data-history-page="${result.page + 1}"${result.page + 1 >= result.pages ? ' disabled' : ''}>下一页</button></div>`;
   }
   function selectionTransition(current, action) {
     const state = {...{hover:null,pinned:null,selectedDate:null,popupOpen:false},...current};
@@ -557,7 +496,84 @@
     if (action.type === 'date') return {...state,selectedDate:action.date};
     return state;
   }
-  const api = {referenceMode,referenceMarkerInputs,esc,date,finite,probability,ruleScore,supportScore,consensusVersion,weightedConsensus,currentEvidenceConsensus,isTrendConsensus,trendProbabilities,accountMarkerInputs,accountEvidence,accountContextText,accountActionHtml,rowAt,agentView,currentAgentView,riskDetails,structureFacts,highReturnState,agentsHtml,agentOverviewHtml,judgmentLabel,opinionReasons,opinionHtml,consensusAt,mergeEvidenceRows,finalSide,consensusHtml,diagnosticsHtml,popupSelection,referenceSelection,rawEventsHtml,referenceHtml,riskHtml,groupDates,popupHtml,historyPage,historyHtml,statisticsHtml,selectionTransition};
+
+  function referenceEvidence(result) {
+    const evidence = result?.chart_evidence;
+    if (!referenceMode(result)) return {rows:[],analysis_mode:'reference'};
+    return {...evidence,analysis_mode:'reference',rows:(evidence?.rows || []).filter((row) => row.symbol === result.symbol && (!result.as_of || date(row.date) <= date(result.as_of))).map((row) => ({...row,analysis_mode:'reference',reference_only:true}))};
+  }
+  function referenceQualityView(record) {
+    const latest = record?.next_session_decision, plan = record?.position_reference || latest?.position_reference || {};
+    const agent = record?.agents?.reference_quality || latest?.agents?.reference_quality || {};
+    const sources = [plan,record,agent,latest].filter(Boolean);
+    const value = (keys) => { for (const source of sources) for (const key of keys) if (Object.hasOwn(source,key)) return source[key]; return null; };
+    const present = sources.some((source) => ['reference_quality_probability','reference_quality_threshold','reference_quality_identity'].some((key) => Object.hasOwn(source,key))) || Object.keys(agent).length > 0;
+    const status = Object.hasOwn(plan,'quality_status') ? plan.quality_status : agent.status || 'reference_population_not_scored';
+    const raw = value(['reference_quality_probability']);
+    const savedProbability = raw == null && !sources.some((source) => Object.hasOwn(source,'reference_quality_probability')) ? agent.probability : raw;
+    const scored = status === 'scored' && agent.in_scope !== false && validProbability(savedProbability);
+    const identity = value(['reference_quality_identity']) || agent.model_identity || {};
+    const qualityThreshold = value(['reference_quality_threshold']) ?? agent.threshold;
+    const total = value(['reference_buy_total_score']), totalThreshold = value(['reference_buy_total_threshold']);
+    const risk = record?.reference_risk_plan || latest?.reference_risk_plan;
+    const approved = scored && plan.status === 'increase_exposure' && plan.action === 'BUY' && validProbability(plan.target_position_fraction)
+      && risk?.status === 'available' && validProbability(risk.risk_position_cap_fraction) && Number(plan.target_position_fraction) <= Number(risk.risk_position_cap_fraction);
+    const labels = {reference_population_not_scored:'参考人口尚未评分',identity_error:'参考评分来源核验失败',pending:'缺少合格参考质量模型或资格',model_unavailable:'缺少合格参考质量模型',unavailable:'参考质量不可用',out_of_scope:'当前不属于参考买方人口'};
+    const qualification = approved ? '参考仓位资格通过' : scored ? '已评分 · 推荐资格未通过或待核验' : `${labels[status] || statusLabel(status)} · 未评分`;
+    const reasons = [...new Set([...(plan.reason_codes || []),...(agent.reason_codes || [])])];
+    return {present,status,scored,approved,probability:scored ? Number(savedProbability) : null,identity,
+      qualityThreshold:validProbability(qualityThreshold) ? Number(qualityThreshold) : null,
+      total:finite(total) ? Number(total) : null,totalThreshold:finite(totalThreshold) ? Number(totalThreshold) : null,
+      populationHash:value(['reference_population_hash']) || agent.reference_population_hash,
+      qualificationHash:value(['reference_quality_qualification_hash']) || agent.qualification_hash,qualification,reasons};
+  }
+  function referenceQualitySummaryHtml(record) {
+    const quality = referenceQualityView(record);
+    if (!quality.present) return '';
+    return `<span class="stock-name reference-quality-summary">参考质量Q ${quality.scored ? probability(quality.probability) : '未评分'} · ${esc(quality.qualification)}</span><span class="stock-name">质量门槛 ${quality.qualityThreshold == null ? '待核验' : probability(quality.qualityThreshold)} · 参考总支持 ${quality.total == null ? '未评分' : `${supportScore(quality.total)} 分`} / 门槛 ${quality.totalThreshold == null ? '待核验' : `${supportScore(quality.totalThreshold)} 分`}</span>`;
+  }
+  function referenceQualityHtml(record) {
+    const quality = referenceQualityView(record);
+    if (!quality.present) return '';
+    const identity = quality.identity, details = [
+      identity.model_run_id ? `模型运行 ${identity.model_run_id}` : '',
+      identity.head ? `参考质量头 ${identity.head}` : '',
+      identity.checkpoint ? `检查点 ${identity.checkpoint}` : '',
+      identity.available_at ? `数据可用 ${identity.available_at}` : '',
+      identity.actual_training_completed_at ? `实际训练完成 ${identity.actual_training_completed_at}` : ''].filter(Boolean);
+    const proof = details.length || quality.populationHash || quality.qualificationHash ? `<details data-agent-details="reference_quality"><summary>参考质量来源与资格凭据</summary>${details.map((item) => `<p>${esc(item)}</p>`).join('')}${quality.populationHash ? `<p>专属参考人口 <code>${esc(quality.populationHash)}</code></p>` : ''}${quality.qualificationHash ? `<p>费用资格凭据 <code>${esc(quality.qualificationHash)}</code></p>` : ''}</details>` : '';
+    return `<section class="reference-quality-evidence" data-reference-quality-status="${esc(quality.status)}"><h3>独立参考质量Q</h3><p class="reference-quality-qualification">${esc(quality.qualification)}</p><div class="reference-quality-grid"><div><span>参考质量概率</span><strong>${quality.scored ? probability(quality.probability) : '未评分'}</strong></div><div><span>原质量门槛</span><strong>${quality.qualityThreshold == null ? '待核验' : probability(quality.qualityThreshold)}</strong></div><div><span>参考总支持 / 原门槛</span><strong>${quality.total == null ? '未评分' : supportScore(quality.total)} / ${quality.totalThreshold == null ? '待核验' : supportScore(quality.totalThreshold)} 分</strong></div></div><p class="subtle">独立参考买方机会人口；目标为完整费用后至少8%且2R。此分数仅用于参考仓位资格，三路方向评分分别保留。</p>${quality.reasons.length ? `<p class="subtle">${esc(quality.reasons.map(reason).join('；'))}</p>` : ''}${proof}</section>`;
+  }
+  function positionSummaryHtml(record, includeQuality = true) {
+    const plan = record?.position_reference || record?.next_session_decision?.position_reference;
+    const risk = record?.reference_risk_plan || record?.next_session_decision?.reference_risk_plan;
+    if (!plan) return '<span class="position-status">推荐不可用</span>';
+    const validTarget = validProbability(plan.target_position_fraction);
+    const cap = risk?.status === 'available' && validProbability(risk.risk_position_cap_fraction) ? Number(risk.risk_position_cap_fraction) : null;
+    const buyTarget = referenceQualityView(record).approved;
+    const label = buyTarget ? `最终共识B · 参考目标 ${probability(plan.target_position_fraction)}` : plan.status === 'reduce_exposure' && validTarget ? `最终共识S · 参考降至 ${probability(plan.target_position_fraction)}` : plan.status === 'unavailable' ? '风险参考不可用' : '推荐待资格核验';
+    return `<span class="position-status">${esc(label)}</span><span class="stock-name">风险仓位上限 ${cap == null ? '不可用' : probability(cap)} · 上限不等于建议仓位</span>${includeQuality ? referenceQualitySummaryHtml(record) : ''}`;
+  }
+  function positionHtml(record) {
+    const risk = record?.reference_risk_plan || record?.next_session_decision?.reference_risk_plan;
+    const plan = record?.position_reference || record?.next_session_decision?.position_reference;
+    if (!risk || !plan) return '<section class="position-reference"><h3>仓位与风险参考</h3><p>当前未取得完整风险证据；推荐不可用。</p></section>';
+    const available = risk.status === 'available', band = risk.reference_price_band;
+    const status = positionSummaryHtml(record,false);
+    const fields = [['收盘参考价',`${num(risk.reference_price)} 元`],['结构失效价',available ? `${num(risk.invalidation_price)} 元` : '不可用'],['风险止损参考',available ? `${num(risk.stop_price)} 元` : '不可用'],['止损距离',available ? probability(risk.stop_distance_fraction) : '不可用'],['风险预算',probability(risk.risk_budget_fraction)],['仓位上限',available ? probability(risk.risk_position_cap_fraction) : '不可用']];
+    const showChange = plan.status === 'reduce_exposure' && validProbability(plan.target_position_fraction) || referenceQualityView(record).approved;
+    const current = validProbability(plan.current_position_fraction) ? `<p>当前参考仓位 ${probability(plan.current_position_fraction)}${showChange && finite(plan.change_fraction) ? ` · 建议变化 ${num(plan.change_fraction * 100)} 个百分点` : ''}</p>` : '';
+    const basis = plan.basis || risk.basis || '风险资格尚未完整核验。';
+    const bandText = available && finite(band?.low) && finite(band?.high) && band.reference_only === true && band.not_fill_or_order_range === true ? `<p>参考价格区间 ${num(band.low)}–${num(band.high)} 元 · 依据 ${esc(band.basis_date)}，非成交区间</p>` : '';
+    return `<section class="position-reference" data-position-status="${esc(plan.status)}"><header><h3>仓位与风险参考</h3><span>${esc(risk.reference_price_date || risk.date)}</span></header>${status}<div class="position-reference-grid">${fields.map(([label,value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('')}</div>${bandText}${current}${referenceQualityHtml(record)}<p>${esc(basis)}</p><p class="subtle">风险上限按 ${probability(risk.risk_budget_fraction)} 风险预算与当日止损距离计算；缺少完整质量资格时不建议增加仓位。${(plan.reason_codes || risk.reason_codes || []).map(reason).join('；')}</p></section>`;
+  }
+  function sourcePointsHtml(entries = []) {
+    const sources = entries.filter((entry) => entry.row?.reference_layer === 'source' && entry.displayed !== false);
+    if (!sources.length) return '';
+    return `<section class="source-reference-details"><h3>已确认来源 B/S ${sources.length} 条</h3>${sources.map(({row:event}) => `<p><strong>${esc(event.source_label || event.source)} ${event.action === 'SELL' || event.side === 'SELL' ? 'S · 卖方参考' : 'B · 买方参考'}${event.label ? ` · ${esc(event.label)}` : ''}</strong><br>首次可用 ${esc(event.first_available_at || event.available_at)}<br>参考价 ${num(event.reference_price)} 元 · ${esc(event.reference_price_date)}${finite(event.invalidation_price) ? `<br>来源失效价 ${num(event.invalidation_price)} 元` : ''}<br>${event.consensus_qualified ? '同日最终共识通过；来源与最终点分别记录' : '同日最终共识未通过；已确认来源参考独立保留'}</p>`).join('')}</section>`;
+  }
+
+  const api = {referenceMode,referenceMarkerInputs,esc,date,finite,probability,ruleScore,supportScore,consensusVersion,weightedConsensus,currentEvidenceConsensus,isTrendConsensus,trendProbabilities,referenceEvidence,positionHtml,positionSummaryHtml,referenceQualityView,referenceQualityHtml,referenceQualitySummaryHtml,sourcePointsHtml,rowAt,agentView,currentAgentView,riskDetails,structureFacts,highReturnState,agentsHtml,agentOverviewHtml,judgmentLabel,opinionReasons,opinionHtml,consensusAt,mergeEvidenceRows,finalSide,consensusHtml,diagnosticsHtml,popupSelection,referenceSelection,rawEventsHtml,referenceHtml,groupDates,popupHtml,historyPage,historyHtml,statisticsHtml,selectionTransition};
   api.highReturnTargetText = highReturnTargetText;
   root.KHQuantChartEvidence = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

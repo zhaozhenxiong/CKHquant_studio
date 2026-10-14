@@ -22,12 +22,12 @@ def run_js(script):
 
 SCAN = r'''
 const version='trend_consensus';
-const scan={run_id:'final-scan',strategy_version:version,model_family:'current',research:true,
+const scan={analysis_mode:'reference',run_id:'final-scan',strategy_version:version,model_family:'current',research:true,
  model_run_id:'final-360',model_policy:'auto',calendar_run_id:'verified-calendar',
  account_start:'2023-01-01',account_initial_cash:100000,
  consensus_config:{version,sell_threshold:.35},data_range:{start:'2026-01-01',end:'2026-10-12'},
  scan_view:{schema:'current_scan_view',compact:true,account_context_status:'consistent'},
- rows:[{symbol:'002675.SZ',name:'东诚药业',strategy_version:version,model_family:'current',category:'exit',
+ rows:[{symbol:'002675.SZ',name:'东诚药业',strategy_version:version,model_family:'current',category:'exit',analysis_mode:'reference',reference_action:'SELL',
   data_end:'2026-10-12',available_at:'2026-10-12T15:00:00+08:00',reason_codes:['actual_held'],
   account_context:{account_id:'research:real-held-prefix',account_start:'2023-01-01',initial_cash:100000},
   account_action:{action:'SELL',emitted:true,holding_shares:600},
@@ -38,13 +38,13 @@ element('scan-filter').value='all';
 '''
 
 
-def test_saved_compact_scan_renders_search_and_drills_same_held_account():
+def test_saved_compact_scan_renders_search_and_drills_causal_reference():
     run_js(SCAN + r'''
 const calls=[];global.fetch=async(url)=>{calls.push(url);return response(scan);};
 await workbench.openRun('saved/final','scan');
 assert.equal(calls[0],'/api/runs/saved%2Ffinal?view=scan');
 assert.equal(element('scan-count').textContent,'2');
-assert(element('scan-rows').innerHTML.includes('S · 账户退出意图'));
+assert(element('scan-rows').innerHTML.includes('共S · 最终卖方参考'));
 element('scan-search').value='东诚';workbench.renderScan();
 assert(element('scan-rows').innerHTML.includes('002675.SZ'));
 assert(!element('scan-rows').innerHTML.includes('000016.SZ'));
@@ -52,15 +52,15 @@ await workbench.analyzeSymbol('002675.SZ','2026-10-12',workbench.state.scan);
 assert.equal(lastAnalysisQuery.model_run_id,'final-360');
 assert.equal(lastAnalysisQuery.calendar_run_id,'verified-calendar');
 assert.equal(lastAnalysisQuery.consensus_version,version);
-assert.equal(lastAnalysisQuery.account_start,'2023-01-01');
-assert.equal(lastAnalysisQuery.account_initial_cash,100000);
+assert.equal('account_start' in lastAnalysisQuery,false);
+assert.equal('account_initial_cash' in lastAnalysisQuery,false);
 assert.equal(lastAnalysisQuery.as_of,'2026-10-12');
 assert.deepEqual(lastAnalysisQuery.consensus_config,scan.consensus_config);
 assert.equal(scan.rows[0].account_context.account_id,'research:real-held-prefix');
 ''')
 
 
-def test_partial_saved_request_keeps_compact_top_level_account_and_pinned_policy():
+def test_partial_saved_request_keeps_compact_top_level_model_and_pinned_policy():
     run_js(SCAN + r'''
 scan.request={start:'2026-01-01',research:true,model_family:'current',model_run_id:'final-360'};
 scan.account_start='2021-01-01';scan.account_initial_cash=150000;
@@ -70,8 +70,8 @@ scan.rows=scan.rows.slice(0,1);
 scan.rows[0].account_context={account_id:'research:custom-real-prefix',account_start:scan.account_start,
  initial_cash:scan.account_initial_cash,model_identity:{model_run_id:'final-360',model_policy:'pinned',model_fold:'trend_2025Q2'}};
 await workbench.analyzeSymbol('002675.SZ','2026-10-12',scan);
-assert.equal(lastAnalysisQuery.account_start,'2021-01-01');
-assert.equal(lastAnalysisQuery.account_initial_cash,150000);
+assert.equal('account_start' in lastAnalysisQuery,false);
+assert.equal('account_initial_cash' in lastAnalysisQuery,false);
 assert.equal(lastAnalysisQuery.calendar_run_id,'verified-calendar');
 assert.equal(lastAnalysisQuery.model_policy,'pinned');
 assert.equal(lastAnalysisQuery.model_fold,'trend_2025Q2');
@@ -90,7 +90,7 @@ const calls=[];global.fetch=async(url)=>{calls.push(url);
  throw new Error('unexpected full result request: '+url);};
 await workbench.refreshTasks();await settle();
 assert.equal(workbench.state.scan.run_id,'final-scan');
-assert(element('scan-rows').innerHTML.includes('S · 账户退出意图'));
+assert(element('scan-rows').innerHTML.includes('共S · 最终卖方参考'));
 assert.equal(calls.filter(url=>url.includes('?view=scan')).length,1);
 await workbench.refreshTasks();await settle();
 assert.equal(calls.filter(url=>url.includes('?view=scan')).length,1,'completed job must not redeliver a large result');
@@ -143,15 +143,4 @@ assert.equal(workbench.state.scan.run_id,'later');
 global.fetch=async(url)=>{assert.equal(url,'/api/runs/legacy-unknown');return response(scan);};
 await workbench.openRun('legacy-unknown');
 assert.equal(workbench.state.scan.run_id,'final-scan');
-''')
-
-
-@pytest.mark.parametrize('status', ['mixed', 'unavailable'])
-def test_unverifiable_compact_trend_account_cannot_silently_create_a_drill(status):
-    run_js(SCAN + r'''
-element('analysis-symbol').value='original-stock';global.location.hash='scan';
-scan.scan_view.account_context_status=''' + repr(status) + r''';
-await assert.rejects(workbench.analyzeSymbol('002675.SZ','2026-10-12',scan),/研究账户来源/);
-assert.equal(element('analysis-symbol').value,'original-stock');
-assert.equal(location.hash,'scan');assert.equal(globalThis.lastAnalysisQuery,undefined);
 ''')

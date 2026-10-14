@@ -25,7 +25,7 @@ vm.runInThisContext(source);const {state,renderScan}=scanTest;
 element('scan-filter').value='all';
 const first={symbol:'000001.SZ',name:'测试<script>',model_family:'current',strategy_version:'trend_consensus',category:'watch',action:'WAIT',
   data_end:'2026-10-12',point_confirmed_at:null,reason:'风险<detail>',agents:{
-    ma:{kind:'model_probability',p_up:.5,p_down:.2,p_neutral:.3},
+    ma:{kind:'trend_probability',status:'model_unavailable',p_up:.5,p_down:.2,p_neutral:.3},
     high_return:{kind:'model_probability',evaluation_status:'model_unavailable',probability:null}},holding:{shares:0}};
 const second={...first,symbol:'600519.SH',name:'排除',category:'excluded',data_end:'2026-10-09',reason:'missing_target_date'};
 state.scan={model_family:'current',strategy_version:'trend_consensus',data_end:'2026-10-12',
@@ -33,7 +33,7 @@ state.scan={model_family:'current',strategy_version:'trend_consensus',data_end:'
   category_counts:{watch:1,excluded:1},model_gate:{passed:false},rows:[first,second],
   failures:[{symbol:'000002.SZ',error:'缺少行情<script>'}]};
 renderScan();let html=element('scan-rows').innerHTML;
-assert(html.includes('趋势共识策略'));assert(html.includes('缺兼容模型 · 未评估'));
+assert(html.includes('继续观察'));assert(html.includes('趋势概率未评分'));
 assert(html.includes('行情 2026-10-09'));assert(html.includes('结构确认 未确认'));
 assert(html.includes('测试&lt;script&gt;'));assert(html.includes('风险&lt;detail&gt;'));assert(!html.includes('<script>'));
 assert(!html.includes('10日研究概率'));assert(!html.includes('高收益区间概率 0%'));

@@ -352,7 +352,7 @@ def verify_pooled_outcomes(audit):
 def run_diagnostics(model_run_id, *, cpu_workers=2, progress=None):
     if not 1 <= cpu_workers <= 4:
         raise ValueError("diagnostic CPU workers must be between 1 and 4")
-    from my_strategy.services.czsc_trend_pipeline import read_run
+    from my_strategy.services.czsc_trend_pipeline import read_run, audit_holding_population, holding_population_diagnostics
     root, report = read_run(model_run_id)
     config = report["config"]
     calendar_path = root / "data_snapshots/calendar.json"
@@ -382,6 +382,31 @@ def run_diagnostics(model_run_id, *, cpu_workers=2, progress=None):
             "来源价基计数沿用冻结manifest；未重新扫描全量原始库。",
             "滑点已包含在成交价；反解金额仅为费用诊断，不构造新标签或新交易。"]}
     try:
+        held=report['holding_population']
+        held_manifest=audit_holding_population(held,root,config,report['dataset_records'])
+        from my_strategy.services.czsc_trend_finalization import audit_stage_assets
+        held_assets_audit=audit_stage_assets(root,'E1',
+            expected_symbols=[record['symbol'] for record in report['dataset_records']])
+        held_path=root/held['pooled_exits_path']
+        held_frame=pd.read_parquet(held_path)
+        held_diagnostic=holding_population_diagnostics(
+            {'exits':held_frame,'holding_population':held},
+            [population['reference_population']['fold'] for population in report['population_folds']])
+        if held_diagnostic!=report['holding_population_diagnostics']:
+            raise ValueError('actual E1 holding mask/class diagnostics differ from frozen training report')
+        result['held_exit_population']={**held_diagnostic,
+            'manifest_path':held['manifest_path'],'manifest_sha256':held['manifest_sha256'],
+            'actual_reference_accounts':len(held_manifest['records']),
+            'asset_integrity':held_assets_audit,
+            'validation_scope':'conditional_E1_training_population_not_final_gated_strategy_performance',
+            'final_strategy_zero_trades_does_not_validate_exit_model':True}
+        result['input_assets'].extend([
+            {'path':str(root/held['manifest_path']),'sha256':held['manifest_sha256']},
+            {'path':str(held_path),'sha256':held['pooled_exits_sha256']}])
+        for record in held_manifest['records']:
+            result['input_assets'].extend({'path':asset['path'],'sha256':asset['sha256']}
+                for asset in record['files'].values())
+        del held_frame
         for population in report["population_folds"]:
             fold = population["reference_population"]["fold"]
             directory = root / "dataset/final_population" / fold["name"]
@@ -559,6 +584,17 @@ def render_markdown(report):
         "有效标签及目标计数均指该段信号截至冻结行情源已完成的结果；在校准截止前成熟另见时间清洗表。", "",
         "| 折 | 校准期候选 | 有效标签 | 费用后盈利 | ≥净收益目标 | ≥R目标 | 同时达标 | 实际校准正/负 | 训练正/负 | 资格 |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
+    held=report.get('held_exit_population')
+    if held:
+        lines[8:8]=[
+            f"二层退出使用独立冻结的E1实际持仓人口：**{held['rows']} 行**，其中完整两分支成熟 **{held['mature_rows']} 行**。",
+            "入场继续使用严格先验门控的空仓评分前人口；两个人口分开，退出样本不从候选入场克隆或最终全现金账户伪造。",
+            "E1退出头的条件域不等于最终账户费用验收。最终账户没有实际交易时，不能据这些样本宣布退出或收益已验证。", "",
+            "| E1退出折 | 训练正/负 | 校准正/负 | 政策正/负 |",
+            "|---|---:|---:|---:|",
+            *[f"| {item['fold']['name']} | "+ " | ".join(
+                f"{item['heads']['exit'][name]['classes']['1']}/{item['heads']['exit'][name]['classes']['0']}"
+                for name in ('train','calibration','policy'))+" |" for item in held['folds']], ""]
     for item in report["folds"]:
         cal = item["segments"]["calibration"]; target = cal["target"]; train = item["segments"]["train"]["selected"]
         chosen = cal["selected"]

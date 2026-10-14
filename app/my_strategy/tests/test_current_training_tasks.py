@@ -57,9 +57,21 @@ def test_training_progress_keeps_stage_counts_without_fake_overall_percentage(ma
     job=manager.submit("model_training",dict(plan_id="frozen-plan"))
     final=terminal(manager,job["job_id"])
     assert final["status"]=="succeeded",final["error"]
-    assert [row["progress"] for row in seen]==[0,0,0]
+    assert [row["progress"] for row in seen]==pytest.approx([95,95/30,0])
     assert [(row["progress_detail"]["current"],row["progress_detail"]["total"]) for row in seen]==[(2,2),(1,30),(0,1)]
+    assert all(row["progress_detail"]["progress_scope"]=="current_stage" for row in seen)
     assert final["result"]["selection"]["status"]=="blocked"
+
+
+def test_training_rejects_fold_accumulated_progress_beyond_actual_stage_total(manager,monkeypatch):
+    def train(spec,progress,**kwargs):
+        progress("actual_stock_stage",3195,3194)
+        pytest.fail("overflow stage progress passed validation")
+    monkeypatch.setattr(manager.training,"run_training_job",train)
+    job=manager.submit("model_training",dict(plan_id="frozen-plan"))
+    final=terminal(manager,job["job_id"])
+    assert final["status"]=="failed" and "阶段进度超出实际总数" in final["error"]
+    assert final["result"] is None and manager.results.list("model_training")==[]
 
 
 def test_current_scan_cancel_at_stage_boundary_stops_before_inference(manager,monkeypatch):
@@ -101,15 +113,21 @@ def test_current_scan_progress_is_monotonic_and_compute_records_actual_work(mana
 
 def test_current_checkpoint_dispatch_and_http_identity_contract(manager,monkeypatch):
     from my_strategy.web_dashboard import trend_strategy
-    monkeypatch.setattr(trend_strategy,"backtest_trend_consensus",lambda **kwargs:kwargs)
-    result=manager._run("fixture","backtest",dict(research=True,model_run_id="current-model",model_fold="trend_2026Q3",device="cpu"))
+    monkeypatch.setattr(trend_strategy,"scan_trend_consensus",lambda **kwargs:kwargs)
+    result=manager._run("fixture","scan",dict(research=True,model_run_id="current-model",model_fold="trend_2026Q3",device="cpu"))
     assert result["model_run_id"]=="current-model" and result["model_fold"]=="trend_2026Q3"
+    assert result["structure_only"] is False
+    with pytest.raises(ValueError,match="任务类型不受支持"):
+        manager.submit("backtest",{})
+    with pytest.raises(ValueError,match="任务类型不受支持"):
+        manager._run("fixture","backtest",{})
     monkeypatch.setattr(manager,"submit",lambda kind,spec:dict(kind=kind,spec=spec))
     with TestClient(create_app(manager)) as client:
         assert client.get("/api/research/status").status_code==410
         assert client.get("/api/training/status").json()["active_model"] is None
         response=client.post("/api/tasks",json=dict(kind="scan",spec=dict(research=True,model_family="current")))
         assert response.status_code==202
+        assert client.post("/api/tasks",json=dict(kind="backtest")).status_code==422
         for field in ("model_run_id","calendar_run_id"):
             for value in ("../escape","D:\\secret",".","", "a"*181):
                 assert client.post("/api/tasks",json=dict(kind="scan",spec={field:value})).status_code==422

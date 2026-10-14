@@ -35,7 +35,14 @@ NATIVE_SEMANTICS = {
     "structure": {"engine": {"min_bi_len": 6, "max_bi_num": 200, "higher_period_closure": "next_period_observed"},
         "rules": ["cxt_first_buy_V221126", "cxt_first_sell_V221126",
                               "cxt_second_bs_V240524", "cxt_third_buy_V230228"],
-        "finished_di": "len(bi_list)-len(finished_bis)+1", "third_sell": "not_implemented_native_has_buy_only",
+        "finished_di": "len(bi_list)-len(finished_bis)+1",
+        "third_sell": {"rule": "confirmed_third_sell_price_mirror",
+            "basis": "exact_price_reflection_of_cxt_third_buy_V230228_geometry",
+            "input": "finished_pens_only_no_MA;minimum12_finished;counts14_12_10_8_6",
+            "key_pens": "even_offset_down_pens_with_strictly_lower_lows",
+            "break": "last_high<max_key_low<min_key_high",
+            "price": "last_high>max_all_high-1.618*mean_key_power_price",
+            "third_party_source_modified": False},
         "identity": "rule,label,all_referenced_finished_pens,symbol;first_observed_immutable",
         "support": "buy_last_finished_pen_low;sell_last_finished_pen_high",
         "zone": "latest_valid_first_three_finished_pens;forming_zone_does_not_hide_previous",
@@ -65,11 +72,43 @@ NATIVE_SCHEMA_HASH = stable_hash(NATIVE_SEMANTICS)
 _RULES = (("first_buy", "cxt_first_buy_V221126"),
           ("first_sell", "cxt_first_sell_V221126"),
           ("second_bs", "cxt_second_bs_V240524"),
-          ("third_buy", "cxt_third_buy_V230228"))
-_SIDES = {"一买": "BUY", "二买": "BUY", "三买": "BUY", "一卖": "SELL", "二卖": "SELL"}
+          ("third_buy", "cxt_third_buy_V230228"),
+          ("third_sell", "confirmed_third_sell_price_mirror"))
+_SIDES = {"一买": "BUY", "二买": "BUY", "三买": "BUY", "一卖": "SELL", "二卖": "SELL", "三卖": "SELL"}
 _W_EVENTS = {"Spring", "Test", "SOS", "LPS", "Upthrust", "SOW", "LPSY"}
 _W_BUYS = {"Spring", "Test", "SOS", "LPS"}
 _W_WEIGHTS = {"Spring": .5, "Test": 1., "SOS": .75, "LPS": 1., "Upthrust": .5, "SOW": .75, "LPSY": 1.}
+
+
+def _pure_third_sell_signal(analysis: Any) -> tuple[str, int | None]:
+    """Exact price-reflected native third-buy geometry on finished pens.
+
+    The frozen vendor only exposes a pure third BUY. Its third-BS alternatives
+    also read moving averages, so they cannot spend independent structure
+    weight. This owned rule mirrors each inequality and direction without
+    changing vendor code or using a forming pen or an eventual chart anchor.
+    """
+    finished = analysis.finished_bis
+    # Native's len(bi_list) >= di+11, with the delivered finished-di mapping.
+    if len(finished) < 12:
+        return "其他", None
+    for length in (14, 12, 10, 8, 6):
+        if len(finished) < length:
+            continue
+        pens = finished[-length:]
+        if str(pens[-1].direction) != "向上" or pens[0].direction == pens[-1].direction:
+            continue
+        keys = [pen for offset, pen in enumerate(pens[:-2]) if offset % 2 == 0
+                and (offset == 0 or float(pen.low) < float(pens[offset - 2].low))]
+        if len(keys) < 2:
+            continue
+        last_high = float(pens[-1].high)
+        key_low = max(float(pen.low) for pen in keys)
+        key_high = min(float(pen.high) for pen in keys)
+        power = sum(float(pen.power_price) for pen in keys) / len(keys)
+        if last_high < key_low < key_high and last_high > max(float(pen.high) for pen in pens) - 1.618 * power:
+            return "三卖", length
+    return "其他", None
 
 
 def _number(value: Any) -> float | None:
@@ -260,13 +299,17 @@ def _structure_evidence(bars: pd.DataFrame, raw_quality: np.ndarray, metrics: pd
         if not raw_quality[i]:
             invalidations.extend(_invalidate(active, invalidated, list(active), available, "input_quality_gap"))
         for short, name in _RULES:
-            signal = session.czsc._native.call_signal(name, analysis, {"di": di, **({"w": 9, "t": 2} if short == "second_bs" else {})})[0] if finished else None
-            label = str(signal.v1) if signal is not None else "其他"
+            if short == "third_sell":
+                label, count = _pure_third_sell_signal(analysis)
+                signal = None
+            else:
+                signal = session.czsc._native.call_signal(name, analysis, {"di": di, **({"w": 9, "t": 2} if short == "second_bs" else {})})[0] if finished else None
+                label, count = str(signal.v1) if signal is not None else "其他", None
             current_labels[short] = label
             if label not in _SIDES:
                 continue
-            match = re.search(r"(\d+)笔", str(signal.v2))
-            n = int(match.group(1)) if match else 9
+            match = re.search(r"(\d+)笔", str(signal.v2)) if signal is not None else None
+            n = count or (int(match.group(1)) if match else 9)
             dependencies = finished[-n:]
             start = min(int(raw.id) for pen in dependencies for raw in pen.raw_bars)
             dependency_start = min(dependency_start, start)

@@ -64,8 +64,13 @@ def finalize_existing_run(run_id):
         raise ValueError('foreign completion report cannot serve reassessment strategy')
     symbols=[record['symbol'] for record in report['dataset_records']]
     audits=[audit_stage_assets(root,stage,expected_symbols=symbols) for stage in ('E0','E1')]
+    from my_strategy.services.czsc_trend_pipeline import audit_holding_population
+    audit_holding_population(report['holding_population'],root,report['config'],report['dataset_records'])
+    from my_strategy.services.czsc_reference_quality import audit_reference_quality
+    reference_audit=audit_reference_quality(root,report['reference_quality'],report['config'],symbols,expected_records=report['dataset_records'])
     for population in report['population_folds']:
         audits.append(audit_stage_assets(root,'final_population/'+population['fold'],
             expected_symbols=symbols,expected_population=population['reference_population']))
     return {**report,'completion_audit':{'read_only':True,'family':STRATEGY_ID,
-        'model_population_DAG_verified':True,'dataset_assets':audits,'report_sha256':_file_hash(target)}}
+        'model_population_DAG_verified':True,'dataset_assets':audits,'reference_quality_fee_status':reference_audit['status'],
+        'report_sha256':_file_hash(target)}}

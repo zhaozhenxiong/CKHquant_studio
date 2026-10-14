@@ -40,16 +40,13 @@ assert(html.includes('供给 80 / 100'));assert(!html.includes('供给 80%'));
 assert(html.includes('持仓退出概率 不可用'));assert(!html.includes('28%'));
 assert(html.includes('影子观察'));assert(html.includes('本日没有新的买入候选'));
 assert(html.includes('forward actual policy'));
-assert(ui.riskHtml({price_floor:40,price_ceiling:43,entry_allowed:false,status:'blocked',reason_codes:['calendar_gap']}).includes('未通过入场资格'));
-assert(ui.riskHtml({entry_allowed:true,status:'active',reason_codes:['high_return_independent_window_missing']}).includes('已生成'));
-assert(ui.riskHtml({entry_allowed:true,status:'active',reason_codes:['high_return_independent_window_missing']}).includes('独立前向验证尚未完成'));
 const group={kind:'intention',action:'BUY',visible:true,source_count:3,event_count:3,time:'2026-07-03',closed_at:'2026-07-03',entries:[
   {event_date:'2026-07-02',displayed:true,row:{source:'ma',event_type:'x<script>'}},
   {event_date:'2026-07-03',displayed:true,row:{source:'structure',event_type:'三买'}},
   {event_date:'2026-07-06',displayed:false,excluded:true,row:{source:'wyckoff'}}]};
 const popup=ui.popupHtml({evidence,groups:[group],barDate:'2026-07-03',frequency:'周线',pinned:true,profileAsOf:'2026-07-03'});
 assert(popup.includes('信号可知日 2026-07-03'));assert(!popup.includes('信号可知日 2026-07-06'));
-assert(popup.includes('>B</span>'));assert(!popup.includes('B · 3 路'));assert(popup.includes('data-evidence-date="2026-07-02"'));
+assert(popup.includes('最终共识 B</span>'));assert(!popup.includes('B · 3 路'));assert(popup.includes('data-evidence-date="2026-07-02"'));
 assert(popup.includes('周期闭合 2026-07-03'));assert(popup.includes('42.4 元'));
 assert(popup.includes('筹码按所指周期截至 2026-07-03'));
 const delayed={...group,entries:[{event_date:'2026-07-02',displayed:true,row:{evidence_date:'2026-07-03',original_event_date:'2026-07-02',available_at:'2026-07-03T15:00:00',source:'structure'}}]};
@@ -59,12 +56,12 @@ const escaped=ui.popupHtml({evidence,groups:[group],barDate:'2026-07-03',frequen
 assert(escaped.includes('x&lt;script&gt;'));assert(!escaped.includes('x<script>'));
 const sell={...group,action:'SELL',event_count:1,source_count:1};
 const both=ui.popupHtml({evidence,groups:[group,sell],barDate:'2026-07-03',frequency:'日线',pinned:true});
-assert(both.includes('>B</span>'));assert(both.includes('>S</span>'));
+assert(both.includes('最终共识 B</span>'));assert(both.includes('最终共识 S</span>'));
 const rows=Array.from({length:45},(_,i)=>({...row,date:`2026-07-${String(i+1).padStart(2,'0')}`}));
 assert.equal(ui.historyPage(rows,0).rows.length,20);assert.equal(ui.historyPage(rows,2).rows.length,5);
 assert.equal(ui.historyPage(rows,50).page,2);assert.equal(ui.historyPage(rows,-1).page,0);
 const hidden=ui.historyHtml([{...row,events:[{action:'BUY',candidate_eligible:false},{action:'SELL',evidence_visible:false}]}]);
-assert(!hidden.includes('<td>B</td>'));assert(!hidden.includes('<td>S</td>'));
+assert(!hidden.includes('<td>B<br>'));assert(!hidden.includes('<td>S</td>'));
 let selection=ui.selectionTransition(null,{type:'hover',time:'2026-07-02'});
 selection=ui.selectionTransition(selection,{type:'pin',time:'2026-07-02'});
 assert.equal(ui.selectionTransition(selection,{type:'hover',time:'2026-07-03'}).pinned,'2026-07-02');
@@ -107,7 +104,7 @@ const events=['ma','structure','wyckoff'].map((source,i)=>({time:dates[0],availa
 events.push({time:dates[0],available_at:dates[0]+'T15:00:00+08:00',source:'ma',action:'SELL',event_type:'exit',symbol:'600027.SH'});
 const consensusRows=dates.map((date,i)=>({date,action:i===0?'BUY':i===2?'SELL':'WAIT',emitted:i!==1,buy_support:i===0?2:0,sell_support:i===2?2:0,reason_codes:[i===1?'insufficient_consensus':'consensus_confirmed'],agents:{ma:{judgment:i===0?'BUY':'WAIT',reason_codes:['saved_model_score']},structure:{judgment:i===2?'SELL':'BUY',reason_codes:['confirmed_structure']},wyckoff:{judgment:'WAIT',reason_codes:['balanced_supply_demand']},high_return:{judgment:'UNAVAILABLE',reason_codes:['no_candidate_signal']},arbiter:{judgment:i===0?'BUY':i===2?'SELL':'WAIT',reason_codes:['independent_evidence_families']}}}));
 const consensus={config:{version:'trend_consensus',min_support:2},rows:consensusRows,events:consensusRows.filter(row=>row.emitted).map(row=>({source:'consensus',date:row.date,evidence_date:row.date,action:row.action,symbol:'600027.SH',event_id:row.date}))};
-state.analysis={symbol:'600027.SH',consensus_decisions:consensus,as_of:dates[2],data_end:dates[2],frequencies:{'日线':{bars,indicators:{rows:bars.map(bar=>({...bar,ma5:11})),chip_profile:latest,chip_profiles:{[dates[0]]:old,[dates[2]]:latest}}}},events,chart_evidence:{rows}};
+state.analysis={analysis_mode:'reference',reference_points:consensus.events.map(e=>({...e,reference_only:true,first_available_at:e.date+'T15:00:00+08:00',available_at:e.date+'T15:00:00+08:00'})),symbol:'600027.SH',consensus_decisions:consensus,as_of:dates[2],data_end:dates[2],frequencies:{'日线':{bars,indicators:{rows:bars.map(bar=>({...bar,ma5:11})),chip_profile:latest,chip_profiles:{[dates[0]]:old,[dates[2]]:latest}}}},events,chart_evidence:{rows}};
 state.query={symbol:'600027.SH',start:dates[0],end:dates[2]};state.dates=dates;state.replayIndex=2;
 element('analysis-chart').clientWidth=640;element('view-analysis').hidden=false;
 renderAnalysis(false);interactions.seedHistory(rows);updateReplay();

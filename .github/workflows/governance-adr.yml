@@ -27,7 +27,7 @@ jobs:
       - run: python install.py --venv-dir .venv-ci --device cpu
       - run: ${{ matrix.python }} -m my_strategy.scripts.ci_guard --skip-docker
       - run: ${{ matrix.python }} -m pip wheel . --no-deps --no-build-isolation --wheel-dir .scratch/application-wheels
-      - run: ${{ matrix.python }} -m pip install --no-deps --force-reinstall .scratch/application-wheels/khquant-0.1.5-py3-none-any.whl
+      - run: ${{ matrix.python }} -m pip install --no-deps --force-reinstall .scratch/application-wheels/khquant-0.1.6-py3-none-any.whl
       - name: Verify the actual installed application wheel
         shell: python
         env:
@@ -35,11 +35,11 @@ jobs:
         run: |
           import hashlib, os, subprocess
           from pathlib import Path
-          wheel = Path('.scratch/application-wheels/khquant-0.1.5-py3-none-any.whl')
+          wheel = Path('.scratch/application-wheels/khquant-0.1.6-py3-none-any.whl')
           digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
           executable = str(Path(os.environ['KHQUANT_CI_PYTHON']).absolute())
           subprocess.run([executable, '-I', 'app/verify_installation.py', '--device', 'cpu',
-                          '--expected-version', '0.1.5', '--expected-wheel-sha256', digest,
+                          '--expected-version', '0.1.6', '--expected-wheel-sha256', digest,
                           '--output', 'installation-cpu.json'], check=True)
       - uses: actions/upload-artifact@v4
         with:

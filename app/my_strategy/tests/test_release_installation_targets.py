@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import runpy
+from urllib.error import HTTPError
 
 import pytest
 
@@ -12,11 +13,17 @@ def no_model_installation_probe(monkeypatch):
     import verify_installation
 
     status = {"mode": "rule_observation_no_model", "current_selection": None, "active_model": None, "models": []}
-    result = {"strategy_version": "trend_consensus", "research": {"model_run_id": None},
+    result = {"strategy_version": "trend_consensus", "research": {"model_run_id": None, "account_simulated": False},
               "run_id": "installation-analysis", "publication_allowed": False,
-              "chart_evidence": {"rows": [{"agents": {
+              "analysis_mode": "reference", "account_scope": "none", "account_actions": None,
+              "source_reference_points": [], "reference_points": [],
+              "chart_evidence": {"statistics": {"visible_window": {"broker_fills": 0}}, "rows": [{
+                  "direction": "BUY", "reference_risk_plan": {"risk_budget_fraction": .01},
+                  "position_reference": {"account_scope": "none", "reference_only": True,
+                      "target_position_fraction": None, "reference_quality_threshold": .1,
+                      "reference_buy_total_threshold": .5}, "agents": {
                   "ma": {"model_available": False, "p_up": None, "p_down": None, "p_neutral": None},
-                  "high_return": {"probability": None}}}]}}
+                  "high_return": {"probability": None}, "reference_quality": {"probability": None}}}]}}
     calls = []
 
     def request(base, path, method="GET", body=None):
@@ -36,6 +43,7 @@ def test_installation_verifier_accepts_only_current_untrained_default(no_model_i
     assert result["status"] == "passed" and result["strategy"] == "trend_consensus"
     assert result["model_run_id"] is None and result["probabilities"] is None
     assert result["publication_allowed"] is False and result["analysis_rows"] == 1
+    assert result["account_simulated"] is False and result["unqualified_allocation_blocked"] is True
     body = calls[1][3]
     assert body == {"symbol": "000001.SZ", "start": "2024-01-01", "end": "2024-12-30",
                     "model_family": "current", "calendar_run_id": "fixture-calendar",
@@ -86,6 +94,68 @@ def test_installation_verifier_rejects_fabricated_high_return_probability(no_mod
         verify("http://isolated", "fixture-calendar", "2024-12-30")
 
 
+@pytest.mark.parametrize("case", ["quality_probability", "account_simulation", "broker_fill", "missing_source_points",
+    "wrong_reference_clock", "unqualified_target", "lower_quality_gate", "lower_total_gate", "higher_risk_budget",
+    "actual_exit_probability"])
+def test_installation_verifier_preserves_account_free_unqualified_reference(no_model_installation_probe, case):
+    verify, _, result, _ = no_model_installation_probe
+    row = result["chart_evidence"]["rows"][0]
+    if case == "quality_probability":
+        row["agents"]["reference_quality"]["probability"] = .9
+    elif case == "account_simulation":
+        result["research"]["account_simulated"] = True
+    elif case == "broker_fill":
+        result["chart_evidence"]["statistics"]["visible_window"]["broker_fills"] = 1
+    elif case == "missing_source_points":
+        result.pop("source_reference_points")
+    elif case == "wrong_reference_clock":
+        result["source_reference_points"] = [{"side": "SELL", "date": "2024-01-05",
+            "reference_price_source": "signal_day_close", "reference_price_date": "2024-01-08"}]
+    elif case == "unqualified_target":
+        row["position_reference"]["target_position_fraction"] = .2
+    elif case == "lower_quality_gate":
+        row["position_reference"]["reference_quality_threshold"] = .05
+    elif case == "lower_total_gate":
+        row["position_reference"]["reference_buy_total_threshold"] = .4
+    elif case == "higher_risk_budget":
+        row["reference_risk_plan"]["risk_budget_fraction"] = .02
+    else:
+        row["position_reference"]["exit_probability"] = .6
+    with pytest.raises(RuntimeError):
+        verify("http://isolated", "fixture-calendar", "2024-12-30")
+
+
+def test_installation_verifier_accepts_source_sell_and_final_exposure_reduction(no_model_installation_probe):
+    verify, _, result, _ = no_model_installation_probe
+    row = result["chart_evidence"]["rows"][0]
+    row["direction"] = "SELL"
+    row["position_reference"]["target_position_fraction"] = 0.
+    result["source_reference_points"] = [{"side": "SELL", "date": "2024-01-05",
+        "reference_price_source": "signal_day_close", "reference_price_date": "2024-01-05"}]
+    actual = verify("http://isolated", "fixture-calendar", "2024-12-30")
+    assert actual["source_reference_sides"] == ["SELL"]
+
+
+@pytest.mark.parametrize("code", [200, 400, 405])
+def test_installation_verifier_rejects_reintroduced_route_or_method_alias(monkeypatch, code):
+    import verify_installation
+    def request(*args):
+        if code != 200:
+            raise HTTPError("http://isolated/api/holdings", code, "unexpected", {}, None)
+        return {}
+    monkeypatch.setattr(verify_installation, "request", request)
+    with pytest.raises(RuntimeError, match="Retired route"):
+        verify_installation.expect_removed_route("http://isolated", "/api/holdings")
+
+
+def test_installation_verifier_accepts_exact_retired_404(monkeypatch):
+    import verify_installation
+    def request(*args):
+        raise HTTPError("http://isolated/api/holdings", 404, "removed", {}, None)
+    monkeypatch.setattr(verify_installation, "request", request)
+    assert verify_installation.expect_removed_route("http://isolated", "/api/holdings") is None
+
+
 def test_application_wheel_resource_copies_redact_host_paths_without_changing_source(monkeypatch, tmp_path):
     import setuptools
     from setuptools.command.build_py import build_py
@@ -131,4 +201,8 @@ def test_installation_probe_reloads_new_direction_MA_exit_and_entry_targets(monk
     assert heads["ma_exit"]["input_columns"] == 30 and heads["ma_exit"]["stage"] == "E0"
     assert "exit_next_open_minus_frozen_continue" in heads["ma_exit"]["target"]
     assert heads["entry"]["stage"] == "E1" and "high_return_and_initial_risk" in heads["entry"]["target"]
+    quality = heads["reference_quality"]
+    assert quality["population"] == "account_free_daily_original_BUY_risk_probes"
+    assert quality["account_input_columns"] == [] and quality["fee_qualified"] is False
+    assert quality["publication_allowed"] is False and "complete_fee_net_8pct_and_2R" in quality["target"]
     assert all(head["prediction_rows"] == 4 and head["save_reload_identical"] and head["actual_device"] == "cpu" for head in heads.values())

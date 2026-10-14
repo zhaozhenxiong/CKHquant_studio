@@ -77,7 +77,7 @@ let latest=dates('002436.SZ','2026-10-09');
 global.fetch=async()=>response(latest);
 await workbench.refreshLatestDates();
 assert.equal(element('analysis-end').value,'2026-10-09','single-stock latest must use its actual last bar');
-assert.equal(element('scan-end').value,'2026-10-12');assert.equal(element('backtest-end').value,'2026-10-12');
+assert.equal(element('scan-end').value,'2026-10-12');
 assert.equal(element('connection-state').textContent,'最新日部分覆盖');
 assert(element('coverage-label').textContent.includes('1 / 2'));
 element('analysis-end').value='2026-08-21';await fire('analysis-end','change');
@@ -86,7 +86,7 @@ assert.equal(element('analysis-date-mode').textContent,'历史截止日');
 latest=dates('002436.SZ','2026-10-12','2026-10-13');
 await workbench.refreshLatestDates();
 assert.equal(element('analysis-end').value,'2026-08-21','manual history survives availability refresh');
-assert.equal(element('scan-end').value,'2026-08-31');assert.equal(element('backtest-end').value,'2026-10-13');
+assert.equal(element('scan-end').value,'2026-08-31');
 await fire('analysis-latest','click');
 assert.equal(element('analysis-end').value,'2026-10-12');
 assert.equal(element('analysis-date-mode').textContent,'自动最新可用行情');
@@ -161,7 +161,7 @@ assert(popup.details.every(node=>node.open),'a new date starts with useful agent
 ''')
 
 
-def test_scan_history_before_display_start_drills_without_resetting_account_context():
+def test_scan_history_before_display_start_drills_with_causal_model_context():
     run_js(r'''
 const source={strategy_version:'trend_consensus',request:{start:'2026-10-01',research:true,model_family:'current',
   model_run_id:'saved-model',usage_mode:'historical',model_policy:'auto',calendar_run_id:'verified-calendar',
@@ -170,7 +170,7 @@ const source={strategy_version:'trend_consensus',request:{start:'2026-10-01',res
   data_range:{start:'2026-10-01',end:'2026-10-12'},market_history:{window_start:'2026-09-01'}};
 await workbench.analyzeSymbol('002436.SZ','2026-09-15',source);
 assert.equal(lastAnalysisQuery.start,'2026-09-01');assert.equal(lastAnalysisQuery.end,'2026-09-15');
-assert.equal(lastAnalysisQuery.as_of,'2026-09-15');assert.equal(lastAnalysisQuery.account_start,'2023-01-01');
+assert.equal(lastAnalysisQuery.as_of,'2026-09-15');assert.equal('account_start' in lastAnalysisQuery,false);
 assert.equal(lastAnalysisQuery.model_run_id,'saved-model');assert.equal(lastAnalysisQuery.calendar_run_id,'verified-calendar');
 assert.deepEqual(lastAnalysisQuery.consensus_config,source.request.consensus_config);
 await workbench.analyzeSymbol('002436.SZ','2026-10-09',source);
@@ -195,7 +195,7 @@ assert.equal(actual.analysis_mode,'reference');assert.equal(actual.account_start
 assert.equal(actual.consensus_config.version,'trend_consensus');
 const context=workbench.resultResearchContext({strategy_version:'trend_consensus',research:{model_run_id:'new-run'},
  request:{consensus_version:'trend_consensus',account_start:'2023-01-01',account_initial_cash:150000}});
-assert.equal(context.consensus_version,'trend_consensus');assert.equal(context.account_initial_cash,150000);
+assert.equal(context.consensus_version,'trend_consensus');assert.equal('account_initial_cash' in context,false);
 ''')
 
 
