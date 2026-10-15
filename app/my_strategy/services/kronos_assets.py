@@ -35,10 +35,22 @@ def _stat_identity(info) -> tuple:
 
 
 def _memo_version(info) -> tuple | None:
-    # Windows st_ctime is creation time; a same-size edit may also retain the
-    # observed write timestamp. Read the entire pinned weight on each check
-    # instead of treating that tuple as proof that its contents are unchanged.
+    # Windows ctime semantics vary between stat APIs/Python versions. Read the
+    # entire pinned weight on each check instead of using metadata as proof that
+    # its contents are unchanged.
     return None if _WINDOWS else _stat_identity(info)
+
+
+def _path_observation(path: Path, raw: bytes | None) -> tuple:
+    # CPython 3.12's Windows path stat copies birthtime into ctime, but fstat
+    # exposes FILE_BASIC_INFO.ChangeTime. Compare like APIs without dropping
+    # ctime. Bind the current pathname and optional small-byte reread to one
+    # read-only handle, checking that handle before and after its observation.
+    with path.open('rb') as current:
+        before = _stat_identity(os.fstat(current.fileno()))
+        bytes_changed = raw is not None and current.read() != raw
+        after = _stat_identity(os.fstat(current.fileno()))
+    return before, after, bytes_changed
 
 
 def _verify(path: Path, entry: dict) -> dict:
@@ -72,12 +84,22 @@ def _verify(path: Path, entry: dict) -> dict:
                       'repo': entry['repo'], 'revision': entry['revision']}
         else:
             result = cached
+        path_before, path_after, bytes_changed = _path_observation(path, raw)
         after = os.fstat(handle.fileno())
-        if (_stat_identity(after) != _stat_identity(before)
-                or _stat_identity(path.stat()) != _stat_identity(after)
-                or (version is not None and _memo_version(after) != version)
-                or (raw is not None and path.read_bytes() != raw)):
-            raise ValueError('Kronos asset changed during verification')
+        before_identity = _stat_identity(before)
+        after_identity = _stat_identity(after)
+        version_changed = version is not None and _memo_version(after) != version
+        if (after_identity != before_identity or path_before != after_identity
+                or path_after != path_before
+                or version_changed or bytes_changed):
+            # Keep failures closed and retain the small physical observations
+            # needed to diagnose platform-specific metadata races. No local
+            # path, model contents or unbounded manifest is included.
+            raise ValueError('Kronos asset changed during verification: '
+                             f'before={before_identity}, after={after_identity}, '
+                             f'path_before={path_before}, path_after={path_after}, '
+                             f'memo_changed={version_changed}, '
+                             f'bytes_changed={bytes_changed}')
         if key is not None and cached is None:
             for old in [item for item in _VERIFIED if item[0] == str(path)]:
                 del _VERIFIED[old]

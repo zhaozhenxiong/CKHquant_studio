@@ -331,10 +331,15 @@ def test_subprocess_cancel_terminates_own_child_tree(tmp_path):
         center.LegacyTrainingCenter._run_process([sys.executable,"-u","-c",code],tmp_path/"child.log",progress,check)
     assert child_pids
     deadline=time.monotonic()+2
-    while psutil.pid_exists(child_pids[0]) and time.monotonic()<deadline:
-        if psutil.Process(child_pids[0]).status()==psutil.STATUS_ZOMBIE: break
+    def child_is_alive():
+        try:
+            return psutil.Process(child_pids[0]).status() != psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            # The owned process may exit between the PID lookup and status read.
+            return False
+    while child_is_alive() and time.monotonic()<deadline:
         time.sleep(.02)
-    assert not psutil.pid_exists(child_pids[0]) or psutil.Process(child_pids[0]).status()==psutil.STATUS_ZOMBIE
+    assert not child_is_alive()
 
 
 def test_capacity_tier_uses_frozen_full_native_evaluation_pool(service,monkeypatch):
