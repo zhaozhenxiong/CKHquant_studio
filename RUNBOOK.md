@@ -1,11 +1,12 @@
-# KHQuant 0.1.7 运行说明
+# v1.0.0 日常运行与升级
 
-从本目录执行 `python3.12 install.py --device auto`（Windows 使用 `py -3.12`），随后运行 `./khquant-native.sh dashboard` 或 `.\khquant-native.bat dashboard`。网页默认地址为 <http://127.0.0.1:8124>。
+1. 启动dashboard，核对真实行情日期与覆盖。执行 `khquant verify-workspace --target-date YYYY-MM-DD --strict --json` 做只读健康检查；这不等于全市场原生已完成。
+2. 结构页查看确认来源；模拟页明确选取股票池、时间和候选，保存需要续算的账户。来源B/S与成交B/S分别验收。
+3. 板块补齐先预览差异，确认范围与预算再执行；缺行情保留缺失。取消任务保持终态，新的手工请求才可利用已提交内容继续补齐。
+4. 日更只处理已启用账户和持仓/关注小池。模型资格、策略或依赖变更建立新分支；旧历史结果不改写，日更不训练。
+5. 普通缓存先检查引用再维护。原始行情、必要Kronos/评分模型、关注和保存账户保留；失败和重复产物只有无引用时才能回收。
+6. 更新代码前备份个人 `.env`、行情、必要模型和保存账户。发行包只包含代码/安装依赖；本地生成身份与公开安装环境分别校验，不用发行包索引直接覆盖运行中的生成来源。
 
-先运行 `khquant doctor --check-write --strict --json` 核验环境，再准备自己的行情、已核验日历与完整 native 来源。六个页面为结构分析、全市场扫描、我的关注、模型训练、参数设置、数据与任务。来源 B/S 与参考目标变化分别显示；每股增减幅度相对上一参考目标计算，不执行模拟成交或组合资金分配。
+诊断依据是实际API状态、过程日志、原子检查点与SHA。部分结果分别显示完整评估截止和风险截止，不用旧日期或退出码0冒充完成。完整指标和限制随导出JSON保存。
 
-在“模型训练”先预检再提交，或运行 `khquant train-reference --source-native-run-id YOUR_VALID_NATIVE_RUN --device auto`。来源必须完整且来源链、人口、日历、生成代码和资产 SHA 可核验；新行情不自动补入冻结来源。训练默认 12 轮、8192 行批、4 个准备线程。Torch 训练、校准和批推理优先 CUDA、其次 MPS、最后 CPU；精确价格与因果结构保留 CPU。明确请求不可用设备会阻断。旧 `train-trend` 入口已退役。
-
-本机来源截止 2026-10-12 的 3,194 股 MPS 训练和技术验证已经完成，但当前预测基线未通过，不启用积极增仓目标。公开安装不带这些研究权重；技术完成、预测门槛和前瞻资格分别判定。缺评分保留最后参考值并标记 stale，WAIT 保持，可靠硬风险失效可清零。
-
-运行路径由 `.env` 与 `core.paths` 解析，正式 wheel 状态默认位于 `~/.khquant`。用 `khquant package --verify /path/to/package` 核验导出包；默认包只含代码，数据和模型状态需显式选择，关注列表另需 `--include-personal`。公开发行包不带行情、模型权重、研究账本、秘密或个人记录。实际平台安装验证以随 Release 的 `release-validation.json` 为准。见 [安装说明](INSTALL_NATIVE.md)、[参数说明](app/PARAMETERS.md) 和 [参考架构](app/my_strategy/docs/reference_position.md)。
+更多见 `app/my_strategy/docs/agent_research.md`、`INSTALL_NATIVE.md`、`RELEASE_VALIDATION.md`。

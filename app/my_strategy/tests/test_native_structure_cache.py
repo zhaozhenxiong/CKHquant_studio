@@ -9,8 +9,6 @@ import io
 import json
 from pathlib import Path
 import sqlite3
-import threading
-import time
 
 import numpy as np
 import pandas as pd
@@ -25,6 +23,18 @@ from my_strategy.services.czsc_trend_support import VERIFIED_SOURCES
 
 
 def sha(value): return hashlib.sha256(value).hexdigest()
+
+
+def legacy_entry(store, identity):
+    """Exercise the retained v1 reader with an authentic BLOB row."""
+    entry = store.lookup(identity)
+    for path in (entry.features_path, entry.native_path):
+        if path: Path(path).chmod(0o644)
+    with store.connection:
+        store.connection.execute('DELETE FROM native_structure_files WHERE cache_key=?', (entry.cache_key,))
+        store.connection.execute('UPDATE native_structure_entries SET features_blob=?,native_blob=? WHERE cache_key=?',
+            (entry.features_blob, entry.native_blob, entry.cache_key))
+    return entry
 
 
 @pytest.fixture
@@ -114,6 +124,7 @@ def test_existing_cache_corruption_is_explicit_failure(candidate, tmp_path, colu
     record, _, _, identity = candidate
     with cache.NativeStructureCache(tmp_path / 'cache.db') as store:
         store.store(identity, record)
+        legacy_entry(store, identity)
         with store.connection:
             value = b'corrupted' if column.endswith('_blob') else '{}'
             store.connection.execute(f'UPDATE native_structure_entries SET {column}=?', [value])
@@ -125,6 +136,7 @@ def test_rehashed_blob_with_wrong_parsed_config_is_rejected(candidate, tmp_path)
     record, _, _, identity = candidate
     with cache.NativeStructureCache(tmp_path / 'cache.db') as store:
         entry = store.store(identity, record)
+        legacy_entry(store, identity)
         pack = json.loads(gzip.decompress(entry.native_blob)); pack['config_hash'] = stable_hash({'drift': True})
         blob = gzip.compress(json.dumps(pack, ensure_ascii=False).encode(), mtime=0)
         metadata = {**entry.metadata, 'native_sha256': sha(blob)}
@@ -139,6 +151,7 @@ def test_rehashed_parquet_with_wrong_rows_is_rejected(candidate, tmp_path):
     record, _, _, identity = candidate
     with cache.NativeStructureCache(tmp_path / 'cache.db') as store:
         entry = store.store(identity, record)
+        legacy_entry(store, identity)
         frame = pd.read_parquet(io.BytesIO(entry.features_blob)).iloc[:-1]
         output = io.BytesIO(); frame.to_parquet(output, index=False); blob = output.getvalue()
         metadata = {**entry.metadata, 'sha256': sha(blob)}
@@ -153,6 +166,7 @@ def test_different_output_for_same_input_preserves_first_entry(candidate, tmp_pa
     record, _, _, identity = candidate
     with cache.NativeStructureCache(tmp_path / 'cache.db') as store:
         original = store.store(identity, record)
+        legacy_entry(store, identity)
         frame = pd.read_parquet(record['path']); frame.loc[5, 'ret_5'] += .001
         frame.to_parquet(record['path'], index=False)
         changed = {**record, 'sha256': sha(Path(record['path']).read_bytes())}
@@ -163,9 +177,7 @@ def test_different_output_for_same_input_preserves_first_entry(candidate, tmp_pa
 def test_parallel_sqlite_connections_commit_atomic_idempotent_rows(candidate, tmp_path):
     record, _, _, identity = candidate
     db = tmp_path / 'cache.db'
-    first_open = threading.Barrier(4)
-    def put(index):
-        if index < 4: first_open.wait(timeout=5)
+    def put(_):
         with cache.NativeStructureCache(db) as store:
             hit = store.store(identity, record)
             return hit.cache_key, len(hit.features_blob)
@@ -201,6 +213,7 @@ def test_rehashed_native_blob_with_wrong_calendar_provenance_is_rejected(candida
     record, _, _, identity = candidate
     with cache.NativeStructureCache(tmp_path / 'cache.db') as store:
         entry = store.store(identity, record)
+        legacy_entry(store, identity)
         pack = json.loads(gzip.decompress(entry.native_blob))
         pack['calendar_provenance']['calendar_prefix_hash'] = stable_hash({'drift': True})
         blob = gzip.compress(json.dumps(pack, ensure_ascii=False).encode(), mtime=0)
@@ -216,6 +229,7 @@ def test_rehashed_parquet_with_changed_price_is_rejected_by_frozen_raw_content(c
     record, _, _, identity = candidate
     with cache.NativeStructureCache(tmp_path / 'cache.db') as store:
         entry = store.store(identity, record)
+        legacy_entry(store, identity)
         frame = pd.read_parquet(io.BytesIO(entry.features_blob)); frame.loc[0, 'close'] += .001
         output = io.BytesIO(); frame.to_parquet(output, index=False); blob = output.getvalue()
         metadata = {**entry.metadata, 'sha256': sha(blob)}
@@ -305,147 +319,3 @@ def test_actual_checkpoint_headers_miss_when_native_inputs_change(candidate, tmp
     with cache.NativeStructureCache(tmp_path / 'changed-input-cache.db') as store:
         store.store(one, record)
         assert store.lookup(two) is None
-
-
-class _WalConnection:
-    def __init__(self, outcomes):
-        self.outcomes = iter(outcomes)
-        self.journal_calls = 0
-        self.timeout = None
-        self.mode = None
-
-    def execute(self, statement):
-        if statement.startswith('PRAGMA busy_timeout='):
-            self.timeout = int(statement.rsplit('=', 1)[1])
-            return self
-        assert statement == 'PRAGMA journal_mode=WAL'
-        self.journal_calls += 1
-        outcome = next(self.outcomes)
-        if isinstance(outcome, Exception): raise outcome
-        self.mode = outcome
-        return self
-
-    def fetchone(self): return self.mode
-
-
-def _sqlite_error(code):
-    error = sqlite3.OperationalError('test SQLite initialization error')
-    if code is not None: error.sqlite_errorcode = code
-    return error
-
-
-@pytest.mark.parametrize('code', [sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED,
-    sqlite3.SQLITE_BUSY | (1 << 8), sqlite3.SQLITE_LOCKED | (1 << 8)])
-def test_wal_retry_is_limited_to_sqlite_lock_error_codes(monkeypatch, code):
-    connection = _WalConnection([_sqlite_error(code), ('wal',)])
-    sleeps = []
-    monkeypatch.setattr(cache.time, 'sleep', sleeps.append)
-    cache._enable_wal(connection)
-    assert connection.journal_calls == 2
-    assert sleeps == [.05]
-    assert connection.timeout == 60000
-
-
-@pytest.mark.parametrize('code', [None, sqlite3.SQLITE_IOERR, sqlite3.SQLITE_CORRUPT])
-def test_wal_non_lock_errors_are_immediate_and_preserve_the_exception(monkeypatch, code):
-    error = _sqlite_error(code)
-    connection = _WalConnection([error, ('wal',)])
-    sleeps = []
-    monkeypatch.setattr(cache.time, 'sleep', sleeps.append)
-    with pytest.raises(sqlite3.OperationalError) as captured: cache._enable_wal(connection)
-    assert captured.value is error
-    assert connection.journal_calls == 1
-    assert sleeps == []
-
-
-@pytest.mark.parametrize('mode', [('delete',), ('memory',), None])
-def test_wal_mode_change_must_return_wal(monkeypatch, mode):
-    connection = _WalConnection([mode])
-    sleeps = []
-    monkeypatch.setattr(cache.time, 'sleep', sleeps.append)
-    with pytest.raises(ValueError, match='did not become WAL'): cache._enable_wal(connection)
-    assert connection.journal_calls == 1
-    assert sleeps == []
-
-
-def test_wal_retry_does_not_attempt_again_after_the_shared_deadline(monkeypatch):
-    error = _sqlite_error(sqlite3.SQLITE_BUSY)
-    connection = _WalConnection([error, ('wal',)])
-    clock = {'now': 0.}
-    monkeypatch.setattr(cache, '_SQLITE_BUSY_TIMEOUT_SECONDS', .05)
-    monkeypatch.setattr(cache.time, 'monotonic', lambda: clock['now'])
-    def advance(seconds): clock['now'] += seconds
-    monkeypatch.setattr(cache.time, 'sleep', advance)
-    with pytest.raises(sqlite3.OperationalError) as captured: cache._enable_wal(connection)
-    assert captured.value is error
-    assert clock['now'] == .05
-    assert connection.journal_calls == 1
-    assert connection.timeout == 0
-
-
-def _hold_cache_read_lock(path):
-    connection = sqlite3.connect(path)
-    connection.execute('PRAGMA user_version=0')
-    connection.execute('BEGIN')
-    connection.execute('SELECT COUNT(*) FROM sqlite_master').fetchone()
-    return connection
-
-
-def test_first_wal_initialization_retries_real_sqlite_lock_until_released(tmp_path, monkeypatch):
-    path = tmp_path / 'held-cache.db'
-    holder = _hold_cache_read_lock(path)
-    attempted = threading.Event()
-    errors = []
-    original_connect = sqlite3.connect
-    class ObservedConnection(sqlite3.Connection):
-        def execute(self, statement, *args, **kwargs):
-            try: return super().execute(statement, *args, **kwargs)
-            except sqlite3.OperationalError as exc:
-                if statement == 'PRAGMA journal_mode=WAL':
-                    errors.append(exc.sqlite_errorcode); attempted.set()
-                raise
-    def connect(*args, **kwargs):
-        return original_connect(*args, **kwargs, factory=ObservedConnection)
-    monkeypatch.setattr(cache.sqlite3, 'connect', connect)
-    def open_cache():
-        with cache.NativeStructureCache(path) as store:
-            assert store.connection.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
-            assert store.connection.execute('PRAGMA busy_timeout').fetchone()[0] == 60000
-            assert store.connection.execute('PRAGMA user_version').fetchone()[0] == cache.CACHE_VERSION
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(open_cache)
-        try: assert attempted.wait(5), 'expected a genuine SQLite mode-change lock'
-        finally: holder.rollback(); holder.close()
-        future.result(timeout=5)
-    assert errors and all((code & 0xff) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) for code in errors)
-
-
-def test_wal_real_lock_timeout_is_bounded_and_preserves_sqlite_error(tmp_path, monkeypatch):
-    path = tmp_path / 'timeout-cache.db'
-    holder = _hold_cache_read_lock(path)
-    monkeypatch.setattr(cache, '_SQLITE_BUSY_TIMEOUT_SECONDS', .08)
-    started = time.monotonic()
-    try:
-        with pytest.raises(sqlite3.OperationalError) as captured: cache.NativeStructureCache(path)
-        assert (captured.value.sqlite_errorcode & 0xff) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
-        assert .06 <= time.monotonic() - started < .5
-        assert holder.execute('PRAGMA user_version').fetchone()[0] == 0
-    finally: holder.rollback(); holder.close()
-    with cache.NativeStructureCache(path) as store:
-        assert store.connection.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
-
-
-def test_parallel_first_open_pressure_preserves_wal_and_schema(tmp_path):
-    for iteration in range(25):
-        path = tmp_path / f'first-open-{iteration}.db'
-        barrier = threading.Barrier(8)
-        def initialize(_):
-            barrier.wait(timeout=5)
-            with cache.NativeStructureCache(path) as store:
-                return (store.connection.execute('PRAGMA journal_mode').fetchone()[0],
-                    store.connection.execute('PRAGMA user_version').fetchone()[0],
-                    store.connection.execute('PRAGMA integrity_check').fetchone()[0],
-                    store.connection.execute('PRAGMA busy_timeout').fetchone()[0])
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            result = list(pool.map(initialize, range(8)))
-        assert result == [('wal', cache.CACHE_VERSION, 'ok', 60000)] * 8

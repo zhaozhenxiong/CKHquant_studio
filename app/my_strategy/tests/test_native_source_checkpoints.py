@@ -160,6 +160,9 @@ def test_resume_refuses_corrupt_assets_or_checkpoints(frozen,change):
     record=checkpoint['record']
     if change in {'raw','parquet','native'}:
         target=Path(record[{'raw':'raw_path','parquet':'path','native':'native_path'}[change]])
+        # Run aliases now share read-only CAS files. Deliberately unlock only
+        # this isolated corruption fixture to exercise the unchanged SHA guard.
+        target.chmod(target.stat().st_mode | 0o200)
         target.write_bytes(target.read_bytes()+b'changed')
     elif change=='checkpoint':
         checkpoint['identity']['raw_sha256']='0'*64
@@ -169,10 +172,13 @@ def test_resume_refuses_corrupt_assets_or_checkpoints(frozen,change):
         if change=='native_schema':
             native=Path(record['native_path'])
             with gzip.open(native,'rt',encoding='utf-8') as stream:pack=json.load(stream)
+            native.chmod(native.stat().st_mode | 0o200)
             pack['schema_hash']='bad-schema';source._save_native_pack(native,pack)
             record['native_sha256']=support._file_hash(native)
         else:
-            parquet=Path(record['path']);pd.read_parquet(parquet).iloc[:-1].to_parquet(parquet,index=False)
+            parquet=Path(record['path'])
+            parquet.chmod(parquet.stat().st_mode | 0o200)
+            pd.read_parquet(parquet).iloc[:-1].to_parquet(parquet,index=False)
             record['sha256']=support._file_hash(parquet)
         checkpoint['checkpoint_hash']=stable_hash({k:v for k,v in checkpoint.items() if k!='checkpoint_hash'})
         support._save(path,checkpoint)

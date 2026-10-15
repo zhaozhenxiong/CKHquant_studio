@@ -1,8 +1,8 @@
 """Verified native structure outputs, keyed by complete causal inputs.
 
-The coordinator alone reads/writes this SQLite cache. It contains numerical
-feature Parquet and native evidence gzip, never a model, target, or label.
-Each run receives its own immutable files materialized from verified blobs.
+The coordinator alone reads/writes this SQLite cache. New entries reference
+immutable files once; legacy BLOB entries remain readable. Run paths are hard
+links to the same verified content, never separate full copies.
 """
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 import shutil
 import sqlite3
+import stat
 import tempfile
 import time
 from typing import Any
@@ -25,12 +26,30 @@ from my_strategy.core.paths import DATA_ROOT
 
 CACHE_FORMAT = 'native_structure_cache'
 CACHE_VERSION = 1
+DATABASE_VERSION = 2
 _OUTPUT_KEYS = {'events', 'evaluations', 'wyckoff_events', 'auxiliary_evaluations',
                 'calendar_provenance', 'version', 'config_hash', 'schema_hash', 'semantics'}
 _RAW_KEYS = ('symbol', 'raw_sha256', 'raw_content_sha256', 'raw_series_hash', 'raw_columns',
              'raw_attrs', 'raw_rows', 'raw_data_start', 'data_end')
 _LIQUIDITY_KEYS = ('liquidity_policy_hash', 'liquidity_sha256', 'liquidity_rows',
                    'liquidity_eligible_sessions')
+
+
+def _enable_wal(connection, *, timeout=5.0):
+    # SQLite may return BUSY immediately during concurrent first-time mode
+    # changes despite busy_timeout. Retry only that transient initialization.
+    deadline=time.monotonic()+timeout
+    while True:
+        try:
+            connection.execute('PRAGMA journal_mode=WAL')
+            return
+        except sqlite3.OperationalError as exc:
+            code=getattr(exc,'sqlite_errorcode',None)
+            busy=(code is not None and (code & 0xff) in {sqlite3.SQLITE_BUSY,sqlite3.SQLITE_LOCKED})
+            if code is None:busy=str(exc).lower() in {'database is locked','database table is locked','database is busy'}
+            remaining=deadline-time.monotonic()
+            if not busy or remaining<=0:raise
+            time.sleep(min(.05,remaining))
 
 
 def _canonical(value):
@@ -53,6 +72,73 @@ def _strict_json(value):
 
 def _sha(value):
     return isinstance(value, str) and re.fullmatch(r'[a-f0-9]{64}', value) is not None
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        for chunk in iter(lambda: stream.read(4 * 1024 * 1024), b''): digest.update(chunk)
+    return digest.hexdigest()
+
+
+def retain_file_object(source, root, digest, *, expected_bytes=None):
+    """Keep one immutable physical file, retaining original run paths as links."""
+    source, root = Path(source), Path(root).resolve()
+    if not _sha(digest) or source.is_symlink() or not source.is_file():
+        raise ValueError('native file object source invalid')
+    if file_sha256(source) != digest: raise ValueError('native file object SHA mismatch')
+    target = root / digest[:2] / digest
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.is_symlink() or not target.resolve().is_relative_to(root):
+        raise ValueError('native content object path escaped root')
+    if target.exists():
+        if file_sha256(target) != digest: raise ValueError('native content object SHA drift')
+    else:
+        try:
+            os.link(source, target)
+        except FileExistsError:
+            if file_sha256(target) != digest: raise ValueError('native content object publication race drift')
+    if expected_bytes is not None and target.stat().st_size != expected_bytes:
+        raise ValueError('native content object byte count mismatch')
+    if source.name in ('features.parquet', 'native.json.gz') and not os.path.samefile(source, target):
+        share_native_file(source, target, digest)
+    target.chmod(stat.S_IMODE(target.stat().st_mode) & ~0o222)
+    return target
+
+
+def share_native_file(source, target, digest):
+    """Atomically replace a byte-identical run copy with an immutable hard link."""
+    source, target = Path(source), Path(target)
+    if source.is_symlink() or target.is_symlink() or file_sha256(source) != digest or file_sha256(target) != digest:
+        raise ValueError('native alias deduplication SHA mismatch')
+    if os.path.samefile(source, target): return False
+    fd, alias = tempfile.mkstemp(prefix='.native-link-', dir=source.parent)
+    os.close(fd); os.unlink(alias)
+    try:
+        os.link(target, alias)
+        if os.name == 'nt': source.chmod(source.stat().st_mode | 0o200)
+        os.replace(alias, source)
+    finally:
+        if os.path.exists(alias): os.unlink(alias)
+    return True
+
+
+def read_native_payload(connection, key, features_blob, native_blob):
+    """Read v1/v2 payloads without creating tables or changing a read-only DB."""
+    exists = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_structure_files'").fetchone()
+    files = connection.execute('SELECT features_path,native_path,paths_sha256 FROM native_structure_files WHERE cache_key=?', (key,)).fetchone() if exists else None
+    if not files: return bytes(features_blob), bytes(native_blob), '', ''
+    if features_blob or native_blob:
+        raise ValueError('native cache actual blob SHA drift: file-index entry contains unexpected duplicate BLOB')
+    if _object_hash({'features_path': files[0], 'native_path': files[1]}) != files[2]:
+        raise ValueError('native file index paths SHA drift')
+    root = connection.execute("SELECT value FROM native_structure_settings WHERE name='object_root'").fetchone()
+    if root is None: raise ValueError('native file object root missing')
+    for filename in files[:2]:
+        p = Path(filename)
+        if p.is_symlink() or not p.resolve().is_relative_to(Path(root[0]).resolve()):
+            raise ValueError('native file index escaped object root')
+    return Path(files[0]).read_bytes(), Path(files[1]).read_bytes(), files[0], files[1]
 
 
 @lru_cache(maxsize=1)
@@ -214,6 +300,8 @@ class NativeCacheEntry:
     features_blob: bytes
     native_blob: bytes
     cache_key: str
+    features_path: str = ''
+    native_path: str = ''
 
     def materialize(self, directory, raw_record):
         """Atomically publish exactly these verified bytes in a fresh run directory."""
@@ -230,8 +318,14 @@ class NativeCacheEntry:
         temporary = Path(tempfile.mkdtemp(prefix='.cache-', dir=directory))
         try:
             for filename, blob in [('features.parquet', self.features_blob), ('native.json.gz', self.native_blob)]:
-                with (temporary / filename).open('wb') as output:
-                    output.write(blob); output.flush(); os.fsync(output.fileno())
+                source = self.features_path if filename == 'features.parquet' else self.native_path
+                if source:
+                    if file_sha256(source) != _hash(blob): raise ValueError('native content object changed before materialization')
+                    os.link(source, temporary / filename)
+                else:
+                    # Legacy compatibility only. All new writes are file indexes.
+                    with (temporary / filename).open('wb') as output:
+                        output.write(blob); output.flush(); os.fsync(output.fileno())
             temporary.replace(target)
         finally:
             if temporary.exists(): shutil.rmtree(temporary)
@@ -242,52 +336,19 @@ class NativeCacheEntry:
                 'raw_only_rebuild': True, 'reused_model_or_label': False}
 
 
-_SQLITE_BUSY_TIMEOUT_SECONDS = 60.0
-
-
-def _enable_wal(connection):
-    """Mode changes can bypass SQLite's busy handler during simultaneous opens."""
-    deadline = time.monotonic() + _SQLITE_BUSY_TIMEOUT_SECONDS
-    # One retry budget controls mode changes; an inner busy handler must not
-    # add another full timeout to a late attempt. Construction closes failures.
-    connection.execute('PRAGMA busy_timeout=0')
-    last_busy = None
-    while True:
-        if time.monotonic() >= deadline:
-            if last_busy is not None:
-                raise last_busy
-            raise sqlite3.OperationalError('native cache WAL initialization timed out')
-        try:
-            mode = connection.execute('PRAGMA journal_mode=WAL').fetchone()
-        except sqlite3.OperationalError as exc:
-            code = getattr(exc, 'sqlite_errorcode', None)
-            if not isinstance(code, int) or (code & 0xff) not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
-                raise
-            last_busy = exc
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise
-            time.sleep(min(.05, remaining))
-        else:
-            if not mode or str(mode[0]).lower() != 'wal':
-                raise ValueError('native cache SQLite journal mode did not become WAL')
-            connection.execute('PRAGMA busy_timeout=' + str(int(_SQLITE_BUSY_TIMEOUT_SECONDS * 1000)))
-            return
-
-
 class NativeStructureCache:
-    def __init__(self, cache_db_path=None):
+    def __init__(self, cache_db_path=None, *, object_root=None):
         self.path = Path(cache_db_path or DATA_ROOT / 'processed' / 'czsc' / 'native_structure.db').expanduser().resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(str(self.path), timeout=_SQLITE_BUSY_TIMEOUT_SECONDS)
+        self.connection = sqlite3.connect(str(self.path), timeout=60)
         try:
-            self.connection.execute('PRAGMA busy_timeout=' + str(int(_SQLITE_BUSY_TIMEOUT_SECONDS * 1000)))
+            self.connection.execute('PRAGMA busy_timeout=60000')
             _enable_wal(self.connection)
             self.connection.execute('PRAGMA synchronous=FULL')
             self.connection.execute('BEGIN IMMEDIATE')
             with self.connection:
                 version = self.connection.execute('PRAGMA user_version').fetchone()[0]
-                if version not in (0, CACHE_VERSION): raise ValueError('unsupported native cache database version')
+                if version not in (0, 1, DATABASE_VERSION): raise ValueError('unsupported native cache database version')
                 tables = {x[0] for x in self.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 if version == 0 and tables: raise ValueError('native cache database identity missing')
                 self.connection.execute('''CREATE TABLE IF NOT EXISTS native_structure_entries (
@@ -295,7 +356,18 @@ class NativeStructureCache:
                     metadata_sha256 TEXT NOT NULL, producer_json TEXT NOT NULL, producer_sha256 TEXT NOT NULL,
                     features_blob BLOB NOT NULL, native_blob BLOB NOT NULL,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)''')
-                self.connection.execute('PRAGMA user_version=1')
+                self.connection.execute('''CREATE TABLE IF NOT EXISTS native_structure_files (
+                    cache_key TEXT PRIMARY KEY, features_path TEXT NOT NULL, native_path TEXT NOT NULL,
+                    paths_sha256 TEXT NOT NULL)''')
+                self.connection.execute('''CREATE TABLE IF NOT EXISTS native_structure_settings (
+                    name TEXT PRIMARY KEY, value TEXT NOT NULL)''')
+                stored_root = self.connection.execute("SELECT value FROM native_structure_settings WHERE name='object_root'").fetchone()
+                configured_root = Path(object_root or self.path.with_suffix('.objects')).expanduser().resolve()
+                self.object_root = Path(stored_root[0]) if stored_root else configured_root
+                if object_root is not None and self.object_root != configured_root:
+                    raise ValueError('native object root differs from existing index')
+                self.connection.execute("INSERT OR IGNORE INTO native_structure_settings VALUES('object_root',?)", (str(self.object_root),))
+                self.connection.execute('PRAGMA user_version=2')
             expected = {'cache_key', 'identity_json', 'metadata_json', 'metadata_sha256', 'producer_json', 'producer_sha256', 'features_blob', 'native_blob', 'created_at'}
             if {x[1] for x in self.connection.execute('PRAGMA table_info(native_structure_entries)')} != expected:
                 raise ValueError('native cache database schema drift')
@@ -323,7 +395,7 @@ class NativeStructureCache:
             if (not isinstance(producer, dict) or _hash(row[3].encode('utf-8')) != row[4] or
                     set(producer) != {'raw_path', 'features_path', 'native_path'}):
                 raise ValueError('native cache producer audit identity drift')
-            features_blob, native_blob = bytes(row[5]), bytes(row[6])
+            features_blob, native_blob, features_path, native_path = read_native_payload(self.connection, key, row[5], row[6])
             if (_hash(features_blob) != metadata.get('sha256') or
                     _hash(native_blob) != metadata.get('native_sha256')):
                 raise ValueError('native cache actual blob SHA drift')
@@ -331,7 +403,7 @@ class NativeStructureCache:
                 raise ValueError('native cache parsed schema/config/metadata drift')
         except (OSError, EOFError, TypeError, KeyError) as exc:
             raise ValueError('native cache stored content invalid') from exc
-        return NativeCacheEntry(stored_identity, metadata, producer, features_blob, native_blob, key)
+        return NativeCacheEntry(stored_identity, metadata, producer, features_blob, native_blob, key, features_path, native_path)
 
     def store(self, identity, record):
         _validate_identity(identity)
@@ -347,11 +419,21 @@ class NativeStructureCache:
         metadata_json = _canonical(metadata)
         producer_json = _canonical({'raw_path': str(record['raw_path']),
             'features_path': str(record['path']), 'native_path': str(record['native_path'])})
+        existing = self.lookup(identity)
+        if existing is not None:
+            if existing.metadata != metadata or existing.features_blob != features_blob or existing.native_blob != native_blob:
+                raise ValueError('native cache equivalent input produced different output; existing entry preserved')
+            return existing
+        features_path = retain_file_object(record['path'], self.object_root, metadata['sha256'], expected_bytes=len(features_blob))
+        native_path = retain_file_object(record['native_path'], self.object_root, metadata['native_sha256'], expected_bytes=len(native_blob))
+        paths = {'features_path': str(features_path), 'native_path': str(native_path)}
         with self.connection:
             self.connection.execute('''INSERT OR IGNORE INTO native_structure_entries
                 (cache_key,identity_json,metadata_json,metadata_sha256,producer_json,producer_sha256,features_blob,native_blob)
                 VALUES (?,?,?,?,?,?,?,?)''', (key, _canonical(identity), metadata_json,
-                    _hash(metadata_json.encode('utf-8')), producer_json, _hash(producer_json.encode('utf-8')), features_blob, native_blob))
+                    _hash(metadata_json.encode('utf-8')), producer_json, _hash(producer_json.encode('utf-8')), b'', b''))
+            self.connection.execute('INSERT OR IGNORE INTO native_structure_files VALUES(?,?,?,?)',
+                (key, str(features_path), str(native_path), _object_hash(paths)))
         result = self.lookup(identity)
         if (result.features_blob != features_blob or result.native_blob != native_blob or result.metadata != metadata):
             raise ValueError('native cache equivalent input produced different output; existing entry preserved')

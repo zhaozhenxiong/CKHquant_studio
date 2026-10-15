@@ -78,7 +78,7 @@ def scope_from_task(task: str) -> str:
 
 
 @dataclass(frozen=True)
-class RunContext:
+class RunIdentity:
     run_id: str
     as_of_date: str
     git_commit: str
@@ -94,16 +94,21 @@ class RunContext:
     start_date: str = ""
     end_date: str = ""
 
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["artifact_root"] = str(artifact_run_dir(self.run_id, create=False))
+        return data
+
+
+@dataclass(frozen=True)
+class RunContext(RunIdentity):
+    """Explicit artifact writer; constructing/serializing it never writes files."""
+
     def run_dir(self) -> Path:
         return artifact_run_dir(self.run_id)
 
     def subdir(self, *parts: str) -> Path:
         return artifact_subdir(self.run_id, *parts)
-
-    def to_dict(self) -> dict[str, Any]:
-        data = asdict(self)
-        data["artifact_root"] = str(self.run_dir())
-        return data
 
     def write_metadata(self, extra: dict[str, Any] | None = None) -> Path:
         payload = self.to_dict()
@@ -123,7 +128,7 @@ def make_run_id(task: str = "run", as_of_date: str | date | None = None, commit:
     return f"{stamp}-{date_part}-{slugify(task, 36)}-{git_part}"
 
 
-def create_run_context(
+def create_run_identity(
     *,
     task: str = "run",
     as_of_date: str | date | None = None,
@@ -136,7 +141,7 @@ def create_run_context(
     source: str | None = None,
     start_date: str | date | None = None,
     end_date: str | date | None = None,
-) -> RunContext:
+) -> RunIdentity:
     commit = current_git_commit()
     effective_date = str(as_of_date or local_now().date())
     inferred_scope = scope_from_task(task) if scope is None else scope
@@ -144,7 +149,7 @@ def create_run_context(
     inferred_source = source or "cli"
     _validate_choice(inferred_source, "source", _VALID_SOURCES)
 
-    context = RunContext(
+    return RunIdentity(
         run_id=run_id or make_run_id(task=task, as_of_date=effective_date, commit=commit),
         as_of_date=effective_date,
         git_commit=commit,
@@ -158,10 +163,16 @@ def create_run_context(
         start_date=str(start_date or effective_date),
         end_date=str(end_date or effective_date),
     )
+
+
+def create_run_context(**kwargs) -> RunContext:
+    """Legacy explicit persistence. Preview callers use create_run_identity."""
+    identity = create_run_identity(**kwargs)
+    context = RunContext(**asdict(identity))
     context.run_dir()
     for name in ["config", "data_snapshots", "signals", "backtests", "reports", "logs", "validation"]:
         context.subdir(name)
-    context.write_metadata({"config": config or {}})
+    context.write_metadata({"config": kwargs.get("config") or {}})
     return context
 
 

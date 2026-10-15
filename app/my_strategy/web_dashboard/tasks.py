@@ -51,6 +51,19 @@ def _daily_update_failure(summary: dict[str, Any], returncode: int) -> str:
     return "；".join(reasons) or f"行情更新进程退出码 {returncode}，请查看完整日志"
 
 
+def _project_completed_scan_progress(job: dict[str, Any], coverage: Any) -> dict[str, Any]:
+    """Read final population counts for scans saved by older progress emitters."""
+    if job.get("kind") != "scan" or job.get("status") not in {"succeeded", "partial"} or not isinstance(coverage, dict):
+        return job
+    requested, failed = coverage.get("requested"), coverage.get("failed")
+    successful = coverage.get("successful", coverage.get("success"))
+    if (type(requested) is not int or type(failed) is not int or not 0 <= failed <= requested
+            or successful is not None and (type(successful) is not int or successful + failed != requested)):
+        return job
+    return {**job, "progress_detail": {**(job.get("progress_detail") or {}),
+        "current": requested, "total": requested, "failed": failed}}
+
+
 class Cancelled(RuntimeError):
     pass
 
@@ -104,12 +117,33 @@ class TaskManager:
             raise KeyError(job_id)
         job = json.loads(row[0])
         job["result"] = self.results.get(job["run_id"]) if job.get("result_saved") or job["status"] in {"succeeded", "partial"} else None
-        return job
+        return _project_completed_scan_progress(job, (job["result"] or {}).get("coverage"))
 
     def list(self, limit: int = 50) -> list[dict[str, Any]]:
         with closing(sqlite3.connect(self.db_path)) as conn:
-            rows = conn.execute("SELECT payload FROM czsc_tasks ORDER BY rowid DESC LIMIT ?", (min(max(limit, 1), 200),)).fetchall()
-        return [{**json.loads(row[0]), "result": None} for row in rows]
+            # UI retention is a read-only projection; exact get(job_id), audit
+            # records and all business assets remain available. Active jobs and
+            # legacy rows with an unknown timestamp must not silently vanish.
+            rows = conn.execute("""SELECT payload FROM czsc_tasks
+                WHERE status IN ('queued','running','cancelling')
+                   OR julianday(COALESCE(json_extract(payload,'$.updated_at'),json_extract(payload,'$.created_at'))) IS NULL
+                   OR julianday(COALESCE(json_extract(payload,'$.updated_at'),json_extract(payload,'$.created_at'))) >=
+                      julianday(?) - CASE WHEN status='failed' THEN 90 ELSE 30 END
+                ORDER BY status IN ('queued','running','cancelling') DESC,rowid DESC LIMIT ?""",
+                (local_now().isoformat(), min(max(int(limit), 1), 1000))).fetchall()
+        jobs = [{**json.loads(row[0]), "result": None} for row in rows]
+        scan_runs = list(dict.fromkeys(job["run_id"] for job in jobs
+            if job.get("kind") == "scan" and job.get("status") in {"succeeded", "partial"} and job.get("run_id")))
+        coverage = {}
+        if scan_runs:
+            # One bounded index query also covers older task results outside the
+            # latest scans. Never read a full market report per listed job.
+            with closing(sqlite3.connect(self.results.db_path)) as conn:
+                summaries = conn.execute(
+                    "SELECT run_id,summary FROM czsc_runs WHERE kind='scan' AND run_id IN (" +
+                    ",".join("?" for _ in scan_runs) + ")", scan_runs).fetchall()
+            coverage = {run_id: json.loads(summary).get("coverage") for run_id, summary in summaries}
+        return [_project_completed_scan_progress(job, coverage.get(job.get("run_id"))) for job in jobs]
 
     def _patch(self, job_id: str, **updates: Any) -> dict[str, Any]:
         with self._lock:
@@ -276,13 +310,13 @@ class TaskManager:
             from my_strategy.services.daily_feature_sync import sync_daily_features, SyncCancelled
             try:
                 result = sync_daily_features(sync_id=spec.get('resume_sync_id'), source_root=PROJECT_ROOT,
-                    cpu_workers=spec.get('cpu_workers', 6), stock_batch_size=spec.get('stock_batch_size', 360),
+                    cpu_workers=spec.get('cpu_workers', 1), stock_batch_size=spec.get('stock_batch_size', 360),
                     progress=progress, check_cancel=lambda: self._check(job_id))
             except SyncCancelled as exc:
                 raise Cancelled(str(exc)) from exc
         else: raise ValueError('任务类型不受支持')
         if result.get('status') == 'busy' or result.get('reused_sync') and result.get('status') in {'running', 'queued'}:
-            result = {**result, 'status': 'partial', 'error': '已有同步任务持有数据库，请等待当前任务完成'}
+            result = {**result, 'status': 'partial', 'error': result.get('error') or '已有同步任务持有数据库，请等待当前任务完成'}
         return {**result, 'kind': kind, 'run_id': context.run_id, 'run_context': context.to_dict(), 'training_started': False}
 
     def _update(self, job_id: str, spec: dict[str, Any]) -> dict[str, Any]:
@@ -358,14 +392,21 @@ class TaskManager:
         summary = update_result.get('summary') or {}
         derived = summary.get('feature_sync') or update_result.get('feature_sync') or {}
         universe = summary.get('update_universe') or {}
-        self._patch(job_id, progress_detail={"stage": "行情处理完成" if summary.get("status") == "completed" else "行情处理结束，部分股票未更新",
+        derived_pending = (derived.get('status') in {'partial', 'failed', 'interrupted', 'cancelled', 'blocked', 'busy', 'queued', 'running'}
+            or derived.get('reason_code') == 'target_date_not_covered')
+        raw_status = summary.get('raw_status', summary.get('status'))
+        stage = ("行情已提交，结构与特征同步未完成" if derived_pending else
+            "行情与特征更新完成" if raw_status == "completed" and derived.get('status') == 'completed' else
+            "行情处理完成" if raw_status == "completed" else "行情处理结束，部分股票未更新")
+        self._patch(job_id, progress_detail={"stage": stage,
             "current": summary.get("total", 0), "total": summary.get("total", 0), "failed": summary.get("failed", 0),
             "not_updated": summary.get("not_updated", summary.get("skipped", 0)), "excluded": universe.get("excluded"),
-            "target_date_covered": summary.get("target_date_covered")})
+            "target_date_covered": summary.get("target_date_covered"), "feature_sync_status": derived.get('status'),
+            "sync_id": derived.get('sync_id')})
         return {"run_id": context.run_id, "run_context": context.to_dict(), "data_status": status,
             "update_summary": summary, "feature_sync": derived,
-            "status": 'partial' if summary.get('status') in {'partial', 'no_updates'} or derived.get('status') in {'partial', 'failed', 'interrupted', 'cancelled', 'blocked'} else 'completed',
-            "error": derived.get('error'), "log": log[-6000:]}
+            "status": 'partial' if summary.get('status') in {'partial', 'no_updates', 'cancelled'} or derived_pending else 'completed',
+            "error": derived.get('error') or (derived.get('reason') if derived_pending else None), "log": log[-6000:]}
 
     def close(self) -> None:
         with self._lock:

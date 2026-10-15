@@ -22,6 +22,7 @@ def test_wheel_defaults_keep_state_outside_code(monkeypatch, tmp_path):
     assert runtime_env.os.environ["KHQUANT_PROJECT_ROOT"] == str(package.parent)
     assert runtime_env.os.environ["KHQUANT_RAW_DB"] == str(home / "data" / "raw" / "khquant_raw.db")
     assert runtime_env.os.environ["KHQUANT_ARTIFACT_ROOT"] == str(home / "artifacts")
+    assert runtime_env.os.environ["KHQUANT_KRONOS_ROOT"] == str(home / "models" / "Kronos-base")
     assert runtime_env.runtime_resource_root() == package / "_runtime"
     assert not home.exists()
 
@@ -34,11 +35,26 @@ def test_checkout_environment_does_not_override_explicit_state(monkeypatch, tmp_
     (repo / ".env").write_text('KHQUANT_PROJECT_ROOT=./app\nKHQUANT_DATA_ROOT=./my_strategy/data\n', encoding="utf-8")
     monkeypatch.setattr(runtime_env, "__file__", str(app / "my_strategy" / "runtime_env.py"))
     monkeypatch.delenv("KHQUANT_PROJECT_ROOT", raising=False)
+    monkeypatch.delenv("KHQUANT_KRONOS_ROOT", raising=False)
     explicit = tmp_path / "selected-data"
     monkeypatch.setenv("KHQUANT_DATA_ROOT", str(explicit))
     runtime_env.initialize_runtime_environment()
     assert runtime_env.os.environ["KHQUANT_PROJECT_ROOT"] == str(app)
     assert runtime_env.os.environ["KHQUANT_DATA_ROOT"] == str(explicit)
+    assert "KHQUANT_KRONOS_ROOT" not in runtime_env.os.environ
+
+
+def test_wheel_keeps_explicit_single_model_location(monkeypatch, tmp_path):
+    package=tmp_path/'site-packages'/'my_strategy'
+    monkeypatch.setattr(runtime_env,'__file__',str(package/'runtime_env.py'))
+    for key in list(runtime_env.os.environ):
+        if key.startswith('KHQUANT_') or key=='PYTHONPATH':monkeypatch.delenv(key)
+    explicit=tmp_path/'existing-model'
+    monkeypatch.setenv('KHQUANT_HOME',str(tmp_path/'state'))
+    monkeypatch.setenv('KHQUANT_KRONOS_ROOT',str(explicit))
+    runtime_env.initialize_runtime_environment()
+    assert runtime_env.os.environ['KHQUANT_KRONOS_ROOT']==str(explicit)
+    assert not explicit.exists()
 
 
 def test_platform_wheel_provenance_is_bound_to_frozen_source(monkeypatch, tmp_path):

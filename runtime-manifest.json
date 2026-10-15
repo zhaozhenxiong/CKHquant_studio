@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "application_version": "0.1.7",
+  "application_version": "1.0.0",
   "method": "CZSC",
   "version": "1.0.1",
   "source_manifest": "app/czsc-source-manifest.json",
@@ -12,8 +12,7 @@
     "analysis",
     "scan",
     "watchlist",
-    "training",
-    "parameters",
+    "simulation",
     "data"
   ],
   "capabilities": [
@@ -43,7 +42,16 @@
     "sha-verified-frozen-training-resume",
     "cuda-mps-cpu-auto-device",
     "single-owner-gpu-batch-inference",
-    "current-sector-reference-panel"
+    "current-sector-reference-panel",
+    "local-kronos-offline-prediction",
+    "bounded-torch-mlp-fusion",
+    "same-input-l2-ablation",
+    "causal-daily-observation-scheduler",
+    "broker-ledger-position-simulation",
+    "signed-share-and-weight-deltas",
+    "incremental-structure-plan",
+    "sha-verified-json-native-state",
+    "scoped-daily-backfill"
   ],
   "python": "3.12",
   "devices": [
@@ -52,12 +60,12 @@
     "cuda"
   ],
   "platform_verification": {
-    "macos_arm64_cpu": "pending_0_1_7_exact_installed_asset_verification",
-    "macos_arm64_mps": "pending_0_1_7_exact_installed_asset_verification",
-    "windows_x64_cpu": "pending_0_1_7_exact_installed_asset_verification",
-    "linux_x64_cpu": "pending_0_1_7_exact_installed_asset_verification",
-    "windows_x64_cuda": "not_verified_0_1_7",
-    "linux_x64_cuda": "not_verified_0_1_7",
+    "macos_arm64_cpu": "pending_1_0_0_exact_installed_asset_verification",
+    "macos_arm64_mps": "pending_1_0_0_exact_installed_asset_verification",
+    "windows_x64_cpu": "pending_1_0_0_exact_installed_asset_verification",
+    "linux_x64_cpu": "pending_1_0_0_exact_installed_asset_verification",
+    "windows_x64_cuda": "not_verified_1_0_0",
+    "linux_x64_cuda": "not_verified_1_0_0",
     "macos_x64": "not_in_release_matrix"
   },
   "verification_report": "release-validation.json",
@@ -68,22 +76,20 @@
   "runs": "artifacts/runs",
   "legacy_compatibility": false,
   "previous_release_verification": {
-    "application_version": "0.1.6",
-    "release_url": "https://github.com/zhaozhenxiong/CKHquant_studio/releases/tag/v0.1.6"
+    "application_version": "0.1.7",
+    "release_url": "https://github.com/zhaozhenxiong/CKHquant_studio/releases/tag/v0.1.7"
   },
   "verification_scope": {
-    "version_0_1_7": "pending_exact_installed_asset_and_platform_validation",
+    "version_1_0_0": "pending_exact_installed_asset_and_platform_validation",
     "financial_certification": false,
     "source_commit_binding": "release_manifest_generated_from_actual_release_checkout"
   },
   "software_release": {
-    "version": "0.1.7",
-    "status": "user_authorized_production_software_release",
+    "version": "1.0.0",
+    "status": "functional_acceptance_passed_pending_exact_asset_ci",
     "authorized_by": "user",
-    "parameter_policy": "reference_price_labels_per_stock_target_risk_cap_and_predictive_gate",
-    "research_version": "reference_position_v1",
-    "model_training_status_at_release_preparation": "full_local_training_completed_3194_stocks_5_folds_on_mps",
-    "model_production_qualification": "predictive_baseline_not_passed_independent_forward_pending"
+    "parameter_policy": "frozen_research_candidates_no_automatic_promotion",
+    "research_version": "agent_mlp_sim_v1"
   },
   "parameter_profiles": {
     "defaults_source": "app/my_strategy/services/reference_training.py:DEFAULTS",
@@ -102,21 +108,20 @@
       "cuda",
       "mps",
       "cpu"
-    ]
+    ],
+    "legacy_reference_defaults": true,
+    "ordinary_workflow": "light_research"
   },
   "model_qualification": {
-    "predictive_baseline_passed": false,
+    "research_only": true,
     "independent_forward_validation_complete": false,
-    "ordinary_routes": "account_free_reference_position_v1",
+    "ordinary_routes": "structure_sources_and_explicit_simulation",
     "production_qualification": "pending",
     "publication_allowed": false,
     "training_models_published": false,
-    "training_complete_at_release_preparation": true,
-    "local_training_source_cutoff": "2026-10-12",
-    "local_full_population_stocks": 3194,
-    "local_completed_folds": 5,
     "risk_cap_is_target_position": false,
-    "positive_target_requires_policy_logloss_and_brier_baseline": true
+    "positive_paper_allocation_requires_qualified_policy": true,
+    "predictive_baseline_passed": false
   },
   "github_release": {
     "repository": "zhaozhenxiong/CKHquant_studio",
@@ -125,7 +130,7 @@
     "contains_trained_models": false,
     "contains_personal_data": false,
     "local_model_baseline_published": false,
-    "tag": "v0.1.7",
+    "tag": "v1.0.0",
     "source_commit_binding": "release.json.git_revision_generated_from_exact_release_checkout",
     "contains_research_ledgers": false
   },
@@ -146,10 +151,29 @@
       "preserved_manifest": "app/release_history/0.1.4/runtime-manifest.json"
     }
   ],
-  "public_product_retirements": [
-    "strategy_backtest",
-    "cash_and_trade_ledger",
-    "manual_holdings_management"
+  "public_product_retirements": [],
+  "internal_research_simulation_retained": "independent_broker_ledger_paper_accounts",
+  "advanced_views": [
+    "training",
+    "parameters"
   ],
-  "internal_research_simulation_retained": "legacy_archive_only_not_in_reference_training_or_analysis"
+  "light_research": {
+    "model": "local_Kronos_base_frozen",
+    "tokenizer": "local_single_copy",
+    "score": "light_score_v2",
+    "variants": {
+      "A": 34,
+      "B": 44
+    },
+    "automatic_training": false,
+    "cache_days": 7,
+    "unreferenced_cache_gib": 8,
+    "native_workers": 1,
+    "cancelled_full_market_tasks_resumed": false,
+    "candidate_trials": {
+      "mlp": 6,
+      "kronos": 2,
+      "policy": 6
+    }
+  }
 }

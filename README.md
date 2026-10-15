@@ -1,14 +1,14 @@
-# CZSC量价研究工作台
+# KHQuant · 结构、预测与持仓研究
 
-当前软件版：**0.1.7（2026-10-15）**。仓库为 [zhaozhenxiong/CKHquant_studio](https://github.com/zhaozhenxiong/CKHquant_studio)，发行入口为 [v0.1.7](https://github.com/zhaozhenxiong/CKHquant_studio/releases/tag/v0.1.7)。本版默认使用 `reference_position_v1`，输出参考买卖点、每股参考目标仓位及相对上一参考目标的增减幅度，不执行模拟成交或组合资金分配。公开包不包含行情、个人记录、训练权重或研究账本。
+**v1.0.0** 提供结构与量价分析、本地 Kronos 预测、轻量 PyTorch MLP 融合、独立持仓模拟及按缺口补齐结构。软件源码和安装包在 [CKHquant_studio](https://github.com/zhaozhenxiong/CKHquant_studio)，本版资产在 [v1.0.0 Release](https://github.com/zhaozhenxiong/CKHquant_studio/releases/tag/v1.0.0)。公开包不含行情、模型权重、个人账户或私有审计。
 
-六个网页入口为结构分析、全市场扫描、我的关注、模型训练、参数设置、数据与任务。来源结构 B/S 独立展示；最终参考 B/S 仅在目标仓位实际变化时产生，支持部分减仓。WAIT 保持参考目标，评分缺失时保留上次参考并标记 stale；可靠价格触发既有硬风险边界时可清零。手工仓位仅用于独立比较，不改变参考轨迹。详见 [新架构](app/my_strategy/docs/reference_position.md)。
+结构页保留已确认的来源 B/S、确认时间和量价证据。预测与回测页用 Broker/Ledger 记录实际模拟买卖：收盘决策在下一核验开盘执行，整手、T+1、费用、拒单及待退出均可追溯。部分减仓同时显示负股数、剩余股数、计划仓位与实际成交仓位。
 
-本机完整训练已覆盖 **3,194 股、四个滚动留出窗口和一个当前参考模型**，使用 MPS 完成拟合、校准及数值评价，来源截止 **2026-10-12**。技术完整性和真实分析/扫描验证通过；**当前模型未通过预测基线，不启用积极增仓目标**。这些本地研究资产不随软件发布。完整指标见 [训练验证报告](app/my_strategy/docs/reference_position_validation_20261014.md)。
+本地 Agent 分别整理结构、量价、Kronos 和风险证据；MLP 作为融合层。历史回测与每日续算共用逐日观察日程，持仓风险检查独立运行。模型缺失、过期或无效有明确原因，不以缺失冒充零分。历史候选研究、影子研究续算与已获资格的纸上账户分别标识，训练完成不会自动授予增仓资格。
 
 ## 安装和启动
 
-使用原生 **Python 3.12**。下载 `KHQuant-0.1.7.zip` 和随附 `SHA256SUMS.txt`，核验后解压。首次安装创建 `.venv`，升级保留已有 `.env` 和本机路径。
+使用原生 Python 3.12。下载 `KHQuant-1.0.0.zip`，按随附 `SHA256SUMS.txt` 核验后解压。升级保留自己的 `.env` 和业务数据。
 
 Windows x64：
 
@@ -17,47 +17,37 @@ py -3.12 install.py --device auto
 .\khquant-native.bat dashboard
 ```
 
-Apple Silicon Mac（原生 ARM64 Python）及 Linux x64：
+Apple Silicon Mac / Linux x64：
 
 ```bash
 python3.12 install.py --device auto
 ./khquant-native.sh dashboard
 ```
 
-浏览器打开 <http://127.0.0.1:8124>。新数值模型自动选择 **CUDA → MPS → CPU**；训练、概率校准和批推理使用 Torch，文件读取、精确价格、因果结构与状态协调保留 CPU。明确请求不可用设备会报错。支持路线与本版实际验收范围分别记录，以随 Release 的 `release-validation.json` 和资产 SHA 为准。
+浏览器打开 <http://127.0.0.1:8124>。安装器核验冻结 CZSC 原生 wheel 的平台和 SHA。公开空模型安装可以查看结构功能；Kronos 需要自己的本地模型、配置和 tokenizer，状态页会报告缺失项，程序不暗中下载权重。配置与迁移参见 [轻量工作流](app/my_strategy/docs/agent_research.md) 及 [安装说明](INSTALL_NATIVE.md)。
 
-安装器只接受经冻结 CZSC 1.0.1 源码、目标平台和物理 SHA 核验的原生 wheel。GitHub 自动 Source code 归档不等同已验收发行包；缺匹配 wheel 时需要 Rust 和本机编译工具。见 [INSTALL_NATIVE.md](INSTALL_NATIVE.md)。
+## 日常使用
 
-## 首次使用
-
-先准备自己的行情和已核验日历。新训练还要求完整、无失败、来源与生成代码可核验的 native 结构快照；`train-reference` 复用这些输入并重建新标签和权重。没有完整来源时预检会阻断，更新原始行情不会自动扩展已有快照。公开空模型安装可查看结构事实，无法提供合格模型概率和积极增仓目标。
+1. 更新自己的原始行情与核验交易日历。
+2. 在结构页选股与日期，查看来源证据；来源点不等于已成交。
+3. 在预测与回测页训练有界小池 MLP 候选，和结构量价、Kronos、同输入 L2 账户比较。
+4. 板块图点击“预览结构补齐”，检查直接复用、追加、逐股重建、缺行情及延后数量，再执行本批。
+5. 已明确启用的账户及持仓/关注小池随每日更新续算；日更不训练，不自动恢复取消任务。
 
 ```bash
 khquant doctor --check-write --strict --json
 khquant update-data --mode local --stocks 600519.SH
-khquant analyze --symbol 600519.SH --usage-mode historical --device auto --json
-khquant scan --stocks 600519.SH,000001.SZ --usage-mode historical --device auto --json
-khquant train-reference --source-native-run-id YOUR_VALID_NATIVE_RUN --device auto --preflight-only --json
-khquant train-reference --source-native-run-id YOUR_VALID_NATIVE_RUN --device auto --json
+khquant light-research status
+khquant light-research score --symbols 002436.SZ,600519.SH --end 2025-12-31 --model-type mlp --variant A --device cpu
+khquant light-research simulate --symbols 002436.SZ,600519.SH --start 2026-01-01 --end 2026-10-14 --save
 ```
 
-将来源 ID 替换为自己的完整核验来源。也可在“模型训练”预检并提交计划；参数改变需重新预检。旧 `train-trend` 已退役。参数默认训练 12 轮、每批 8192 行、数据准备线程 4 个，处理批次不截断历史合格人口。见 [参数说明](app/PARAMETERS.md) 和 [训练指南](app/my_strategy/docs/current_model_training.md)。
+实际 CLI 子命令以 `khquant --help` 为准。MLP A 使用结构量价和缺失标记，B 另需冻结人口的历史 Kronos 摘要；覆盖不足保持待补齐。默认小网络、有限候选、独立校准及同输入 L2 对照，不全量微调 Kronos。首次结构准备可能逐股重建；只有恢复等价核验通过才使用原生状态续接，量价滚动指标仍保留逐股向量计算。
 
-## 分发与迁移
+## 结果与验证边界
 
-默认只导出代码。行情、来源、模型与训练状态属于私有状态包，关注列表通过 `--include-personal` 独立选择。
+查看 [v1.0.0 功能验收](app/my_strategy/docs/v1_0_0_acceptance.md)、[发行验证](RELEASE_VALIDATION.md) 和随资产的 `release-validation.json`。安装平台、设备、测试和 SHA 以本版实际报告为准；上一版本证据不代替本版。
 
-```bash
-python app/build_release.py --output-dir dist/releases/0.1.7-rebuild
-khquant package --target ../khquant-code
-khquant package --target ../khquant-state --include-data --include-artifacts all
-khquant package --verify ../khquant-state
-```
+历史窗口、未复权价格、公司行为及历史交易规则的完整性会影响回测。Kronos 预训练范围未知；历史研究不能当独立前瞻认证。收益、夏普、回撤、换手、实际成交和完整持仓周期一起报告，未通过的资格保持待定。
 
-wheel 用户导出时用 `--from-project /path/to/KHQuant` 指定源码安装来源。模型、来源、核验日历及证据依赖必须完整，导入不会自动授予资格。跨机器模型状态迁移与软件安装分别验收。
-
-## 验证边界
-
-新目标为下一核验日开盘至未来第 10 或 20 个核验交易日收盘的纯价格方向，不把参考价当成交价。预处理仅训练段拟合，选型仅用训练内部时间划分，校准、政策基线检查与留出评价相互隔离。政策段 LogLoss 与 Brier 均不得劣于冻结训练先验基线；测试段不参与选型。新架构不使用旧 Broker 标签、费用后 8%/2R 质量头或旧权重。
-
-训练完成、技术验证、预测门槛与实际冻结后的独立前瞻资格分别判定。历史研究重建不能冒充当时发布的模型，方向指标不能冒充交易收益。历史记录见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
+默认预览为7天/8 GiB可清理缓存；已保存账户、当前/回滚模型与必要引用受保护。原始行情不按缓存期限删除。迁移使用代码包和明确选择的私有状态包，详见 [RUNBOOK.md](RUNBOOK.md)。

@@ -46,6 +46,19 @@ element('scan-filter').value='excluded';renderScan();
 assert(!element('scan-rows').innerHTML.includes('000001.SZ'));assert(element('scan-rows').innerHTML.includes('600519.SH'));
 element('scan-filter').value='all';element('scan-search').value='测试';renderScan();
 assert(element('scan-rows').innerHTML.includes('000001.SZ'));assert(!element('scan-rows').innerHTML.includes('600519.SH'));
+element('scan-search').value='';
+const scored={...first,symbol:'600519.SH',name:'贵州茅台',strategy_version:'reference_position_v1',
+  analysis_mode:'reference',position_reference:{schema:'reference_position_v1',status:'stale',stale:true,
+    target_position_fraction:0,previous_reference_target:0,change_fraction:0,
+    probability_scored:true,risk_geometry_available:false,predictive_gate_passed:false,
+    reason_codes:['reference_risk_geometry_unavailable','reference_predictive_gate_pending']},
+  reference_risk_plan:{status:'unavailable'},
+  agents:{ma:{status:'scored',probability_scored:true,p_up:.2854868173599243,p_down:.41692468523979187,
+    p_neutral:.2975884974002838,risk_geometry_available:false,predictive_gate_passed:false}}};
+state.scan={...state.scan,analysis_mode:'reference',strategy_version:'reference_position_v1',rows:[scored]};
+renderScan();html=element('scan-rows').innerHTML;
+for(const text of ['上涨 28.55%','下跌 41.69%','中性 29.76%','风险计划不可用','预测基线未通过']) assert(html.includes(text),text);
+assert(!html.includes('缺兼容模型'));assert(!html.includes('B · 参考增仓'));assert(!html.includes('S · 参考减仓'));
 '''
     result = subprocess.run([node, "-e", script, str(path)], capture_output=True, text=True, encoding="utf-8")
     assert result.returncode == 0, result.stderr

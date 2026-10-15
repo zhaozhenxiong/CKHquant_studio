@@ -2,8 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager, nullcontext
+from copy import deepcopy
 from datetime import date
+import hashlib
+from pathlib import Path
 import re
+import threading
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -11,6 +16,82 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 router = APIRouter(prefix="/api")
 SYMBOL = re.compile(r"^\d{6}\.(SH|SZ|BJ)$")
+_SUBMISSION_FALLBACK = threading.Lock()
+_ACTIVE_COMPUTE = frozenset({'queued', 'running', 'cancelling'})
+
+
+@contextmanager
+def compute_submission(request, duplicate_request=None):
+    """Atomically check both task queues before submitting any new computation.
+
+    The in-process lock lasts through submission (or synchronous analysis), not
+    a background update's lifetime: its child daily hook must acquire its own
+    lightweight compute lock. An existing external lightweight worker is also
+    detected before accepting a request.
+    """
+    state = request.app.state
+    lock = getattr(state, 'compute_submit_lock', _SUBMISSION_FALLBACK)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(409, '已有计算请求正在提交或执行，请稍后再试')
+    try:
+        manager = getattr(state, 'tasks', None)
+        legacy = manager.list() if manager is not None else []
+        light = getattr(state, 'light', None)
+        with getattr(light, 'lock', None) or nullcontext():
+            lightweight = list(getattr(light, 'jobs', {}).values())
+        boards = list(getattr(state, 'board_jobs', {}).values())
+        active = [(lane, row) for lane, rows in (('legacy', legacy), ('light', lightweight), ('board', boards))
+                  for row in rows if row.get('status') in _ACTIVE_COMPUTE]
+        if active:
+            if duplicate_request and len(active) == 1:
+                lane, kind, spec = duplicate_request
+                owner, row = active[0]
+                if owner == lane and row.get('kind') == kind and row.get('spec') == spec:
+                    yield deepcopy(row)
+                    return
+            raise HTTPException(409, '已有后台任务占用资源，待其结束后再开始新的计算')
+        compute_lock = getattr(light, 'compute_lock', None)
+        if compute_lock is not None:
+            from filelock import FileLock, Timeout
+            try:
+                # Release before submission so the newly started worker can
+                # acquire the lock. Do not reuse the potentially reentrant lock.
+                with FileLock(compute_lock.lock_file).acquire(timeout=0):
+                    pass
+            except Timeout as exc:
+                raise HTTPException(409, '外部轻量任务正在使用计算资源') from exc
+        yield None
+    finally:
+        lock.release()
+
+
+def submit_compute(request, lane, kind, spec):
+    with compute_submission(request, (lane, kind, spec)) as duplicate:
+        if duplicate is not None:
+            return duplicate
+        manager = request.app.state.light if lane == 'light' else request.app.state.tasks
+        return manager.submit(kind, spec)
+
+
+def _structure_preview_identity(spec, settings):
+    """Verify actual causal inputs before deciding whether analysis is cached."""
+    from my_strategy.adapters.czsc_adapter import load_bars
+    from my_strategy.core.run_context import stable_hash
+    from my_strategy.services.czsc_trend_support import _calendar
+    from my_strategy.services.light_research import structure_identity
+    raw = load_bars(spec.symbol, end=spec.end, as_of=spec.as_of)
+    dates, calendar_id = _calendar(None)
+    base = Path(__file__).parent
+    sources = [base/'api.py', base/'trend_strategy.py', base/'chart_evidence_trend.py', base/'structure_projection.py',
+               base.parent/'services'/'czsc_trend_runtime.py',
+               base.parent/'services'/'czsc_trend_support.py',
+               base.parent/'services'/'czsc_analysis.py']
+    return {'kind':'structure_analysis_preview_v2',
+        'request':spec.model_dump(mode='json',exclude_none=True),
+        'raw_prefix_sha256':raw.attrs['data_version'],
+        'calendar':{'run_id':calendar_id,'sha256':stable_hash(dates)},
+        'strategy':settings,'structure':structure_identity(),
+        'adapter_code':{path.name:hashlib.sha256(path.read_bytes()).hexdigest() for path in sources}}
 
 
 def clean_symbol(value: str) -> str:
@@ -23,6 +104,7 @@ def clean_symbol(value: str) -> str:
 class AnalysisRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     symbol: str
+    save: bool = False
     analysis_mode: Literal['reference'] = 'reference'
     current_position_fraction: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
     start: date | None = date(2026, 1, 1)
@@ -267,13 +349,13 @@ async def training_preflight(spec: TrainingPreflightRequest, request: Request):
 @router.post('/training/jobs', status_code=202)
 async def training_job(spec: TrainingJobRequest, request: Request):
     await asyncio.to_thread(request.app.state.training.validate_plan, spec.plan_id, spec.parameters)
-    return request.app.state.tasks.submit('model_training', spec.model_dump(exclude_none=True))
+    return submit_compute(request, 'legacy', 'model_training', spec.model_dump(exclude_none=True))
 
 
 @router.post('/training/validation-jobs', status_code=202)
 async def model_validation_job(spec: ModelValidationJobRequest, request: Request):
     await asyncio.to_thread(request.app.state.training.validate_plan, spec.plan_id, check_code=False)
-    return request.app.state.tasks.submit('model_validation', spec.model_dump())
+    return submit_compute(request, 'legacy', 'model_validation', spec.model_dump())
 
 
 @router.get('/training/status')
@@ -332,11 +414,17 @@ async def symbols(q: str = "", limit: int = Query(default=50, ge=1, le=10000)):
 async def analysis(spec: AnalysisRequest, request: Request):
     from my_strategy.services.czsc_analysis import analyze_stock, strategy_config
     from my_strategy.core.run_context import create_run_context
-    def calculate():
+    def calculate_guarded():
         query = spec.model_dump(mode="json", exclude_none=True)
         calculation_query = {key: value for key, value in query.items()
-                             if key not in {"consensus_config", "consensus_version"}}
+                             if key not in {"consensus_config", "consensus_version", "save"}}
         settings = strategy_config()
+        preview_identity = None
+        if not spec.save and not spec.research:
+            preview_identity = _structure_preview_identity(spec, settings)
+            cached = request.app.state.light.store.get(preview_identity, namespace='analysis_previews')
+            if cached:
+                return {**cached, 'reused':True}
         if spec.research:
             from my_strategy.web_dashboard.trend_strategy import analyze_trend_consensus
             result = analyze_trend_consensus(**calculation_query, config=settings, consensus_config=spec.consensus_config,
@@ -362,12 +450,30 @@ async def analysis(spec: AnalysisRequest, request: Request):
             run_config["consensus_version"] = consensus["version"]
         if result.get("research", {}).get("entry_plan_config_hash"):
             run_config["entry_plan_config_hash"] = result["research"]["entry_plan_config_hash"]
+        if not spec.save:
+            from my_strategy.core.run_context import stable_hash
+            if preview_identity is not None and preview_identity != _structure_preview_identity(spec, settings):
+                raise ValueError('分析期间行情、日历或代码已改变，请重试')
+            identity = preview_identity or {"kind":"analysis_preview_v1", "config":run_config,
+                                           "result_sha256":stable_hash(result)}
+            store = request.app.state.light.store
+            cached = store.get(identity, namespace="analysis_previews")
+            if cached:
+                return {**cached, "reused":True}
+            result.update(request=query, saved=False, preview=True,
+                          preview_id=stable_hash(identity), reused=False)
+            store.gc(dry_run=False)
+            store.put(identity, result, namespace="analysis_previews")
+            return result
         context = create_run_context(task="czsc-analysis", as_of_date=result.get("decision_date", result["data_end"]),
                                      config=run_config,
                                      data_version=result["data_version"], scope="single", source="web",
                                      stocks=[spec.symbol], start_date=spec.start, end_date=result["data_end"])
         result.update(run_id=context.run_id, run_context=context.to_dict(), request=query)
         return request.app.state.tasks.results.save("analysis", result)
+    def calculate():
+        with compute_submission(request):
+            return calculate_guarded()
     return await asyncio.to_thread(calculate)
 
 
@@ -378,7 +484,7 @@ def tasks(request: Request):
 
 @router.post("/tasks", status_code=202)
 def submit(spec: TaskRequest, request: Request):
-    return request.app.state.tasks.submit(spec.kind, spec.spec.model_dump(mode="json", exclude_none=True))
+    return submit_compute(request, 'legacy', spec.kind, spec.spec.model_dump(mode="json", exclude_none=True))
 
 
 @router.get("/tasks/{job_id}")

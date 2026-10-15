@@ -65,7 +65,9 @@ def test_fixed_pool_keeps_missing_and_failed_rows_and_actual_account_states():
     summary = builder.finish()
     first, second, third = summary["daily"]
     assert first["universe_size"] == 3
-    assert first["coverage"] == {"price_available": 2, "input_available": 2, "model_scored": 2, "account_available": 1, "failed": 1, "missing_price": 0}
+    assert first["coverage"] == {"price_available": 2, "input_available": 2, "model_scored": 2,
+        "probability_scored": 2, "risk_geometry_available": 0, "reference_increase_eligible": 0,
+        "account_available": 1, "failed": 1, "missing_price": 0}
     assert second["coverage"]["missing_price"] == 1
     assert third["coverage"]["missing_price"] == 2
     assert first["counts"]["account_buy"] == 1
@@ -202,3 +204,36 @@ def test_scan_uses_existing_overlays_once_per_stock_and_persists_bounded_facts(t
     assert len(result["market_history"]["daily"]) == 3
     assert market_history_facts("scan", db_path=db)["total"] == 6
     assert real_store.get("scan")["market_history"] == result["market_history"]
+
+
+def test_reference_coverage_separates_probabilities_risk_and_increase_qualification():
+    rows = []
+    for i, day in enumerate(DATES):
+        value = row(day, direction="WAIT")
+        value["agents"]["ma"].update(probability_scored=True, predictive_gate_passed=i == 2)
+        value["reference_risk_plan"] = {"status": "unavailable" if i == 0 else "available"}
+        value["position_reference"] = {"target_position_fraction": 0, "stale": i != 2,
+            "predictive_gate_passed": i == 2}
+        rows.append(value)
+    builder = MarketHistoryBuilder(["a", "b"], DATES, DATES[-1], run_id="reference", contract={"analysis_mode": "reference"})
+    facts = builder.add_stock("a", overlay={"analysis_mode": "reference", "rows": rows})
+    builder.add_stock("b", failure={"error": "no raw prices"})
+    summary = builder.finish()
+    for i, day in enumerate(summary["daily"]):
+        assert day["coverage"]["model_scored"] == day["coverage"]["probability_scored"] == 1
+        assert day["coverage"]["risk_geometry_available"] == int(i > 0)
+        assert day["coverage"]["reference_increase_eligible"] == int(i == 2)
+        assert day["coverage"]["failed"] == 1 and day["universe_size"] == 2
+        assert facts[i]["model_scored"] and facts[i]["probability_scored"]
+        assert facts[i]["reference_increase_eligible"] == (i == 2)
+        assert day["counts"]["direction_buy"] == day["counts"]["direction_sell"] == 0
+
+
+def test_probability_unavailable_cannot_inherit_market_history_scored_coverage():
+    value = row(DATES[0], direction="UNAVAILABLE")
+    value["agents"]["ma"].update(status="input_ineligible", probability_scored=False)
+    value["reference_risk_plan"] = {"status": "available"}
+    facts = stock_facts("a", DATES, overlay={"analysis_mode": "reference", "rows": [value]})
+    assert facts[0]["risk_geometry_available"] and not facts[0]["probability_scored"]
+    assert not facts[0]["model_scored"] and not facts[0]["reference_increase_eligible"]
+    assert not facts[1]["probability_scored"] and not facts[1]["risk_geometry_available"]

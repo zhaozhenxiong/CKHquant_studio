@@ -121,3 +121,14 @@ app/my_strategy/.serena/
 /release.json
 /image-manifest.json
 app/my_strategy/knowledge_base_system/
+
+# Local AI change/session audit is private and stays outside source archives.
+app/my_strategy/knowledge_base/04_AI_Changes/
+app/my_strategy/knowledge_base/05_AI_Sessions/
+app/AI_CHANGELOG.md
+
+# All local research notes stay private.
+app/my_strategy/knowledge_base/
+
+# Local Kronos model/config/tokenizer assets stay outside public source.
+kronos_model/

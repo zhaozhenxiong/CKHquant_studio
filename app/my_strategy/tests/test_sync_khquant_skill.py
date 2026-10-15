@@ -19,8 +19,6 @@ SCRIPT_PATH = (
 
 
 def _load_module():
-    if not SCRIPT_PATH.is_file():
-        pytest.skip("Optional AI skill tools are excluded from the portable application")
     spec = importlib.util.spec_from_file_location("sync_khquant_skill", SCRIPT_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

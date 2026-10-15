@@ -14,11 +14,12 @@ def build_parser():
     for flag in ('raw-db', 'kb-db', 'fluent-db', 'native-cache-db', 'source-root', 'artifacts-root', 'config'):
         parser.add_argument('--' + flag, type=Path)
     parser.add_argument('--calendar-run-id')
+    parser.add_argument('--price-date', help='Require this exact qualified ISO price date before any publication')
     parser.add_argument('--resume-sync-id')
     parser.add_argument('--parent-update-id')
     parser.add_argument('--source-native-run-id')
     parser.add_argument('--raw-source-run-id')
-    parser.add_argument('--cpu-workers', type=int, default=6)
+    parser.add_argument('--cpu-workers', type=int, default=1)
     parser.add_argument('--stock-batch-size', type=int, default=360)
     parser.add_argument('--kb-request-budget', type=int, default=2000)
     parser.add_argument('--kb-min-interval', type=float, default=1.3)
@@ -35,6 +36,7 @@ def main(argv=None):
         result = sync_daily_features(raw_db_path=args.raw_db, kb_db_path=args.kb_db,
             fluent_db_path=args.fluent_db, native_cache_db_path=args.native_cache_db,
             calendar_run_id=args.calendar_run_id, sync_id=args.resume_sync_id,
+            required_price_date=args.price_date,
             parent_update_id=args.parent_update_id, cpu_workers=args.cpu_workers,
             source_native_run_id=args.source_native_run_id, raw_source_run_id=args.raw_source_run_id,
             stock_batch_size=args.stock_batch_size, kb_request_budget=args.kb_request_budget,

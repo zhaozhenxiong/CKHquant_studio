@@ -108,3 +108,97 @@ referencePicker.state.research={active_model:{run_id:'qualified'},models:[
 for(const prefix of ['analysis','scan']) assert.deepEqual(referencePicker.researchModels(prefix).map(item=>item.run_id),['qualified']);
 
 ''')
+
+
+def test_reference_probability_risk_and_predictive_gate_are_independent():
+    run_js(r'''
+const assert=require('node:assert/strict'),path=require('path');
+const ui=require(path.join(process.argv[1],'chart_evidence.js'));
+const day='2026-09-24';
+const row={symbol:'600519.SH',date:day,analysis_mode:'reference',reference_only:true,
+  reference_close:1237,available_at:day+'T15:00:00+08:00',action:'WAIT',direction:'UNAVAILABLE',
+  position_reference:{schema:'reference_position_v1',status:'stale',stale:true,date:day,
+    target_position_fraction:0,previous_reference_target:0,change_fraction:0,
+    probability_scored:true,risk_geometry_available:false,predictive_gate_passed:false,
+    reason_codes:['reference_risk_geometry_unavailable','reference_risk_boundary_breached','reference_predictive_gate_pending']},
+  reference_risk_plan:{status:'unavailable',reference_price:1237,prior_low20:1248.1,
+    atr14:18.442142857142876,atr_stop_price:1190.8946428571428,
+    diagnostic_stop_price:1248.1,diagnostic_stop_distance_fraction:-.00897332255,
+    stop_price:null,risk_position_cap_fraction:null,
+    reason_codes:['reference_risk_boundary_breached']},
+  agents:{ma:{status:'scored',probability_scored:true,risk_geometry_available:false,
+    predictive_gate_passed:false,p_up:.2854868173599243,p_down:.41692468523979187,p_neutral:.2975884974002838,
+    model_identity:{name:'2026Q3',research_reconstruction:true,
+      split:{test_start:'2026-07-01',test_end:'2026-09-30'},
+      predictive_gate:{passed:false,log_loss:1.1500904560089111,baseline_log_loss:1.1112407445907593,
+        brier:.6971314549446106,baseline_brier:.6769112944602966}},reason_codes:[]},
+    structure:{status:'scored'},wyckoff:{status:'scored'}},source_reference_points:[]};
+assert.equal(ui.trendProbabilities(row.agents.ma).available,true);
+const summary=ui.agentOverviewHtml(row),position=ui.positionHtml(row),details=ui.agentsHtml(row);
+for(const expected of ['上涨 28.55%','下跌 41.69%','中性 29.76%','方向概率已评分','风险计划不可用','预测基线未通过']) assert(summary.includes(expected),expected);
+for(const expected of ['1,248.1','1,190.89','边界距离 -0.9%','候选边界的诊断值','不增加参考目标']) assert(position.includes(expected),expected);
+assert(!summary.includes('缺兼容模型'));assert(!position.includes('缺失评分不视作下跌'));
+assert(details.includes('检查点：2026Q3'));assert(details.includes('历史留出覆盖：2026-07-01 至 2026-09-30'));
+assert(!details.includes('本日未提供模型身份'));
+assert(ui.historyHtml([row]).includes('上涨 28.55%'));
+assert.equal(row.action,'WAIT');assert.equal(row.position_reference.change_fraction,0);
+const archived={...row,position_reference:{schema:'trend_consensus'},agents:{...row.agents,
+  ma:{...row.agents.ma,status:'model_unavailable'}}};
+assert.equal(ui.trendProbabilities(archived.agents.ma).available,false);
+''')
+
+
+def test_unavailable_probability_states_never_expose_residual_numbers():
+    run_js(r'''
+const assert=require('node:assert/strict'),path=require('path');
+const ui=require(path.join(process.argv[1],'chart_evidence.js'));
+const base={kind:'trend_probability',p_up:.6,p_down:.1,p_neutral:.3};
+for(const status of ['model_unavailable','models_disabled','fixed_fold_unavailable','input_ineligible','probability_invalid','score_unavailable']) {
+  assert.equal(ui.trendProbabilities({...base,status,probability_scored:true}).available,false,status);
+}
+assert.equal(ui.trendProbabilities({...base,status:'scored',probability_scored:false}).available,false);
+for(const bad of [{p_up:NaN},{p_up:1.1},{p_neutral:.2}]) assert.equal(ui.trendProbabilities({...base,status:'scored',...bad}).available,false);
+const labels={models_disabled:'未启用模型',fixed_fold_unavailable:'固定检查点不覆盖该日',input_ineligible:'输入不合格',probability_invalid:'概率核验失败',model_unavailable:'缺当日可用模型'};
+for(const [status,label] of Object.entries(labels)) {
+  const row={position_reference:{schema:'reference_position_v1'},agents:{ma:{...base,status}}};
+  const html=ui.agentOverviewHtml(row);assert(html.includes(label),label);assert(!html.includes('上涨 60%'));
+}
+''')
+
+
+def test_missing_target_session_has_no_current_probability_or_risk_claim():
+    run_js(r'''
+const assert=require('node:assert/strict'),path=require('path');
+const ui=require(path.join(process.argv[1],'chart_evidence.js'));
+const row={date:'2026-10-14',analysis_mode:'reference',reference_close:null,
+  agents:{ma:{status:'input_ineligible',probability_scored:false,p_up:null,p_down:null,p_neutral:null,
+    model_identity:{},reason_codes:['missing_target_market_session']}},
+  reference_risk_plan:{status:'unavailable',reason_codes:['missing_target_market_session']},
+  position_reference:{schema:'reference_position_v1',date:'2026-10-14',status:'stale',stale:true,
+    target_position_fraction:.1,previous_reference_target:.1,change_fraction:0,
+    probability_scored:false,predictive_gate_passed:false,risk_geometry_available:false,
+    last_scored_date:'2026-10-13',reason_codes:['missing_target_market_session']}};
+const html=ui.positionHtml(row);assert(html.includes('缺当日行情'));assert(html.includes('不沿用前日评分冒充本日判断'));
+assert(html.includes('最近有效参考 2026-10-13'));assert(!html.includes('预测基线未通过'));
+assert(!ui.agentOverviewHtml(row).includes('方向概率已评分'));assert(html.includes('本日无新调整'));
+''')
+
+
+def test_current_reference_consensus_does_not_label_probabilities_as_rule_support():
+    run_js(r'''
+const assert=require('node:assert/strict'),path=require('path');
+const ui=require(path.join(process.argv[1],'chart_evidence.js'));
+const row={analysis_mode:'reference',reference_only:true,action:'WAIT',buy_base_score:.2854868173599243,
+  sell_base_score:.41692468523979187,agents:{ma:{status:'scored',probability_scored:true,
+    p_up:.2854868173599243,p_down:.41692468523979187,p_neutral:.2975884974002838}},
+  position_reference:{schema:'reference_position_v1',status:'stale',stale:true,
+    target_position_fraction:0,previous_reference_target:0,change_fraction:0,risk_geometry_available:false},
+  reason_codes:['reference_quote_ohlc_invalid']};
+const current=ui.consensusHtml(row);
+assert(current.includes('上涨 28.55%'));assert(current.includes('参考买卖点与每股仓位'));
+assert(current.includes('风险计划不可用'));assert(!current.includes('买方支持 28.55 分'));
+assert(!current.includes('规则支持分'));assert(!current.includes('方向支持不足'));
+const archived=ui.consensusHtml({...row,position_reference:{schema:'trend_consensus'}},null,'trend_consensus');
+assert(archived.includes('买方支持 28.55 分'));assert(archived.includes('规则支持分不代表盈利概率'));
+assert.equal(ui.opinionReasons(row),'当日 OHLC 价格不合法，无法核验风险失效');
+''')

@@ -30,6 +30,19 @@ class BuildPy(build_py):
             target = destination / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
+        kronos_root = APP / "vendor/kronos"
+        kronos_manifest = json.loads((kronos_root / "source_manifest.json").read_text(encoding="utf-8"))
+        for entry in kronos_manifest['files']:
+            source = kronos_root / entry['path']
+            if not source.resolve().is_relative_to(kronos_root.resolve()):
+                raise ValueError('Invalid Kronos resource path')
+            if hashlib.sha256(source.read_bytes()).hexdigest() != entry['sha256']:
+                raise ValueError(f"Frozen Kronos source mismatch: {entry['path']}")
+            target = destination / 'vendor/kronos' / entry['path']
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        (destination / 'vendor/kronos/source_manifest.json').write_text(
+            json.dumps(public_provenance(kronos_manifest),ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
         index = APP / "vendor/wheels/wheel-index.json"
         if index.is_file():
             target = destination / "vendor/wheels/wheel-index.json"
@@ -40,4 +53,4 @@ class BuildPy(build_py):
 
 requirements = [line for line in (APP / "requirements-czsc-runtime.lock").read_text(encoding="utf-8").splitlines()
                 if line.strip() and not line.lstrip().startswith("#")]
-setup(cmdclass={"build_py": BuildPy}, install_requires=[*requirements, "czsc==1.0.1", "torch==2.13.0"])
+setup(cmdclass={"build_py": BuildPy}, install_requires=[*requirements, "czsc==1.0.1", "torch==2.13.0", "einops==0.8.1", "safetensors==0.6.2"])

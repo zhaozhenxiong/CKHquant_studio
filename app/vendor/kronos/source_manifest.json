@@ -1,0 +1,35 @@
+{
+  "schema": "khquant_kronos_vendor_v1",
+  "source": "user-provided Kronos-master.zip",
+  "source_archive_sha256": "92fc55519ddc46f22e0c8ac10a37cde73d6346818f4b8aa10f0e54c9f8a620ff",
+  "upstream": "https://github.com/shiyu-coder/Kronos",
+  "license": "MIT",
+  "changes": [
+    "Relative package imports; remove online Hugging Face mixin and demo predictor wrapper",
+    "Preserve sample dimension; add per-step cancellation callback; model math unchanged"
+  ],
+  "files": [
+    {
+      "path": "module.py",
+      "upstream_archive_entry": "model/module.py",
+      "upstream_sha256": "a07edbadc0e96804c8158c021bbc6063bb7cc43b34d7fc470d5c8ff2005a409f",
+      "sha256": "a4df669998fa8115ac219b06687abaff2fac0fce9da762007dd142038949eee5"
+    },
+    {
+      "path": "kronos.py",
+      "upstream_archive_entry": "model/kronos.py",
+      "upstream_sha256": "0a5f90282e2039c2de0771473419715c845def154896dbd0f5747837e6241032",
+      "sha256": "2e45fb4d047f3c27c54ee5569e81f0407a4c949733e79e80ea91c9cd4572c465"
+    },
+    {
+      "path": "LICENSE",
+      "upstream_archive_entry": "LICENSE",
+      "upstream_sha256": "acb2d194d378204e5f2be4dcd24d39ecac437903620c790c3315a96dab388fdc",
+      "sha256": "acb2d194d378204e5f2be4dcd24d39ecac437903620c790c3315a96dab388fdc"
+    },
+    {
+      "path": "__init__.py",
+      "sha256": "18e9cad1ea4b46f6754674971082b59a4509912de4f7b0a729782244f1c059bd"
+    }
+  ]
+}

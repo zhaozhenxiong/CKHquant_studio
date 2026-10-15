@@ -43,6 +43,7 @@ def initialize_runtime_environment() -> None:
     for key, value in {
         "KHQUANT_DATA_ROOT": data,
         "KHQUANT_ARTIFACT_ROOT": state / "artifacts",
+        "KHQUANT_KRONOS_ROOT": state / "models" / "Kronos-base",
         "KHQUANT_METADATA_ROOT": data / "metadata",
         "KHQUANT_LOG_ROOT": data / "logs",
         "KHQUANT_RAW_DB": data / "raw" / "khquant_raw.db",

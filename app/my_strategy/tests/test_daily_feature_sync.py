@@ -101,6 +101,31 @@ def test_actual_qualified_date_and_complete_older_content_are_readonly(raw_db):
     assert changed['price_date'] == identity['price_date'] and changed['raw_content_sha256'] != identity['raw_content_sha256']
 
 
+@pytest.mark.parametrize('required_date', ['2026-10-13', '2026-10-14'])
+def test_unverified_or_unpriced_new_day_cannot_publish_older_qualified_date(environment, required_date):
+    e = environment
+    with pytest.raises(sync.SyncTargetDateUnavailable, match='differs from required target date'):
+        sync.sync_daily_features(**e.options, required_price_date=required_date)
+    assert not e.store.jobs and not e.calls['market'] and not e.calls['native'] and not e.calls['refresh']
+
+
+def test_exact_required_qualified_date_is_enforced_on_reuse_too(environment):
+    e = environment
+    result = sync.sync_daily_features(**e.options, required_price_date='2026-10-12')
+    assert result['status'] == 'completed'
+    with pytest.raises(sync.SyncTargetDateUnavailable):
+        sync.sync_daily_features(**e.options, sync_id=result['sync_id'], required_price_date='2026-10-13')
+    assert len(e.calls['market']) == 2 and len(e.calls['native']) == 1
+
+
+@pytest.mark.parametrize('required_date', ['20261012', '2026-10-12T15:00:00+08:00', 'not-a-date'])
+def test_required_price_date_must_use_canonical_iso_date_before_lease(environment, required_date):
+    e = environment
+    with pytest.raises(ValueError, match='ISO YYYY-MM-DD'):
+        sync.sync_daily_features(**e.options, required_price_date=required_date)
+    assert not e.store.jobs and not e.calls['market']
+
+
 def test_market_is_published_before_native_and_complete_reuse_ignores_worker_choices(environment):
     e = environment; progress = []
     result = sync.sync_daily_features(**e.options, progress=progress.append)
@@ -157,7 +182,7 @@ def test_native_failure_keeps_market_and_full_failure_reuses_completed_native(en
     assert second['status'] == 'completed' and len(e.calls['native']) == 1
 
 
-def test_cancel_preserves_native_ids_for_same_sync_retry(environment, monkeypatch):
+def test_cancel_preserves_native_ids_but_same_sync_cannot_resume(environment, monkeypatch):
     e = environment; flag = [False]
     def native(**kwargs):
         flag[0] = True
@@ -168,12 +193,11 @@ def test_cancel_preserves_native_ids_for_same_sync_retry(environment, monkeypatc
     checkpoint = e.store.get_sync(first['sync_id'])['checkpoint']
     assert checkpoint['resume_native_run_id'] == 'native-started'
     flag[0] = False
-    def retry(**kwargs):
-        assert kwargs['checkpoint']['raw_source_run_id'] == 'raw-started'
-        assert kwargs['checkpoint']['resume_native_run_id'] == 'native-started'
-        return {'status': 'ready', 'source_native_run_id': 'native-started', 'training_started': False}
-    monkeypatch.setattr(sync, '_run_native', retry)
-    assert sync.sync_daily_features(**e.options, sync_id=first['sync_id'])['status'] == 'completed'
+    monkeypatch.setattr(sync, 'qualified_raw_identity', lambda *a,**k:pytest.fail('cancelled sync performed full identity read'))
+    monkeypatch.setattr(sync, '_run_native', lambda *a,**k:pytest.fail('cancelled native resumed'))
+    with pytest.raises(ValueError,match='cancelled.*terminal'):
+        sync.sync_daily_features(**e.options, sync_id=first['sync_id'])
+    assert e.store.get_sync(first['sync_id'])['status']=='cancelled'
 
 
 def test_corrupted_completed_generation_fails_closed(environment):
@@ -258,25 +282,29 @@ def test_supervised_cancel_waits_for_owned_native_child_tree_exit(tmp_path, raw_
     except psutil.NoSuchProcess: pass
 
 
-def test_update_hook_defaults_to_sync_and_skip_is_explicit(tmp_path, monkeypatch):
+def test_update_hook_defaults_to_lightweight_and_skip_is_explicit(tmp_path, monkeypatch):
     from my_strategy.scripts import update_daily_data as update
+    from my_strategy.services import light_daily
     calls = []
-    monkeypatch.setattr(sync, 'sync_daily_features', lambda **kwargs: calls.append(kwargs) or {'status': 'partial', 'market_published': True})
+    monkeypatch.setattr(sync, 'sync_daily_features', lambda **kwargs:pytest.fail('default update started full market native'))
+    monkeypatch.setattr(light_daily, 'sync_light_daily', lambda **kwargs: calls.append(kwargs) or {'status': 'partial', 'mode':'lightweight'})
     monkeypatch.setattr(update, 'get_data_access', lambda: SimpleNamespace(settings=SimpleNamespace(raw_db=tmp_path / 'raw.db')))
     args = SimpleNamespace(skip_feature_sync=False, feature_kb_db=None, feature_fluent_db=None,
         feature_native_cache_db=None, feature_calendar_run_id=None, feature_sync_id=None,
         feature_cpu_workers=6, feature_stock_batch_size=360, feature_kb_budget=2000,
         feature_kb_min_interval=1.3, feature_source_root=None, feature_artifacts_root=tmp_path)
-    result = update._sync_after_update(args, {'update_id': 'actual-update'}, {})
-    assert result['status'] == 'partial' and calls[0]['parent_update_id'] == 'actual-update'
+    result = update._sync_after_update(args, {'update_id': 'actual-update', 'success': 1, 'end_date': '2026-10-12',
+        'total': 1, 'target_date_covered': 1}, {})
+    assert result['status'] == 'partial' and result['mode']=='lightweight'
     assert calls[0]['raw_db_path'] == tmp_path / 'raw.db' and 'end_date' not in calls[0]
+    assert calls[0]['required_price_date'] == '2026-10-12'
     args.skip_feature_sync = True
     assert update._sync_after_update(args, {}, {})['status'] == 'skipped' and len(calls) == 1
     args.skip_feature_sync = False
     assert update._sync_after_update(args, {}, {'has_errors': True})['status'] == 'blocked'
 
 
-def test_update_hook_sigint_reaches_supervisor_check_cancel(tmp_path, monkeypatch):
+def test_explicit_full_update_hook_sigint_reaches_supervisor_check_cancel(tmp_path, monkeypatch):
     from my_strategy.scripts import update_daily_data as update
     def work(**kwargs):
         signal.raise_signal(signal.SIGINT)
@@ -284,12 +312,13 @@ def test_update_hook_sigint_reaches_supervisor_check_cancel(tmp_path, monkeypatc
         raise sync.SyncCancelled('interrupt fixture')
     monkeypatch.setattr(sync, 'sync_daily_features', work)
     monkeypatch.setattr(update, 'get_data_access', lambda: SimpleNamespace(settings=SimpleNamespace(raw_db=tmp_path / 'raw.db')))
-    args = SimpleNamespace(skip_feature_sync=False, feature_kb_db=None, feature_fluent_db=None,
+    args = SimpleNamespace(skip_feature_sync=False, feature_mode='full',feature_kb_db=None, feature_fluent_db=None,
         feature_native_cache_db=None, feature_calendar_run_id=None, feature_sync_id=None,
         feature_cpu_workers=6, feature_stock_batch_size=360, feature_kb_budget=2000,
         feature_kb_min_interval=1.3, feature_source_root=None, feature_artifacts_root=tmp_path)
     before = signal.getsignal(signal.SIGINT)
-    assert update._sync_after_update(args, {'update_id': 'fixture'}, {})['status'] == 'cancelled'
+    assert update._sync_after_update(args, {'update_id': 'fixture', 'success': 1,
+        'total': 1, 'target_date_covered': 1}, {})['status'] == 'cancelled'
     assert signal.getsignal(signal.SIGINT) == before
 
 
@@ -298,8 +327,9 @@ def test_standalone_cli_partial_returns_success_and_restores_signal_handlers(mon
     calls = []
     monkeypatch.setattr(sync, 'sync_daily_features', lambda **kwargs: calls.append(kwargs) or {'status': 'partial', 'training_started': False})
     before = signal.getsignal(signal.SIGTERM)
-    assert cli.main(['--resume-sync-id', 'sync-fixture', '--kb-min-interval', '1.3']) == 0
+    assert cli.main(['--resume-sync-id', 'sync-fixture', '--kb-min-interval', '1.3', '--price-date', '2026-10-12']) == 0
     assert calls[0]['sync_id'] == 'sync-fixture' and signal.getsignal(signal.SIGTERM) == before
+    assert calls[0]['required_price_date'] == '2026-10-12'
 
 
 def test_actual_fluent_lease_market_and_full_publication_with_fake_native_producer(actual_market, tmp_path, monkeypatch):

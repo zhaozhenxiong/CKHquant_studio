@@ -66,13 +66,22 @@ def freshness_status(*,fluent_db_path=None,raw_db_path=None,kb_db_path=None,sour
     if market.get('fluent_contract')!=generation_contract():reasons.append('schema_policy_or_generating_code_changed')
     # Native producers are validated by the collector, never by the staged module.
     native_stale=False
-    if full is not None and source_root is not None:
+    market_native=market.get('native_identity') or {}
+    if market_native.get('format')=='incremental_native_summary_collection_v1':
+        from my_strategy.services.incremental_source import code_identity
+        try:native_stale=market_native.get('producer')!=code_identity()
+        except (OSError,ValueError,KeyError):native_stale=True
+    elif full is not None and source_root is not None:
         recorded=full.get('native_identity') or {}
         generation=recorded.get('generation_contract') or {}
         try:
-            from my_strategy.services.board_native_summary import native_generation_contract
-            native_stale=(native_generation_contract(source_root=source_root,config=native_config or generation.get('config'))!=generation or
-                          recorded.get('reader_code_sha256')!=_file_hash(inspect.getfile(native_generation_contract)))
+            if recorded.get('format')=='incremental_native_summary_collection_v1':
+                from my_strategy.services.incremental_source import code_identity
+                native_stale=recorded.get('producer')!=code_identity()
+            else:
+                from my_strategy.services.board_native_summary import native_generation_contract
+                native_stale=(native_generation_contract(source_root=source_root,config=native_config or generation.get('config'))!=generation or
+                              recorded.get('reader_code_sha256')!=_file_hash(inspect.getfile(native_generation_contract)))
         except (OSError,ValueError,KeyError):native_stale=True
         for relative,expected in generation.get('code_hashes',{}).items():
             path=Path(source_root)/'my_strategy'/relative
@@ -89,7 +98,7 @@ def build_board_fluent(*,kb_db_path=None,raw_db_path=None,fluent_db_path=None,ca
                       calendar_run_id=None,price_date=None,symbols=None,with_native=False,native_result=None,
                       native_cache_db_path=None,source_native_run_id=None,raw_source_run_id=None,
                       source_root=None,artifacts_root=None,native_config=None,sync_id=None,publish=True,migrate=True,progress=None,
-                      check_cancel=None):
+                      check_cancel=None,component_store=None):
     """Build latest-only rows; never fetch remote data or prepare/train native."""
     if check_cancel:check_cancel()
     started=time.perf_counter();store=BoardFluentStore(fluent_db_path)
@@ -168,7 +177,7 @@ def build_board_fluent(*,kb_db_path=None,raw_db_path=None,fluent_db_path=None,ca
     try:
         report('board_market',0,len(snapshots))
         market=mathematics.build_board_features(reader,raw_db_path=raw_db_path,calendar_dates=calendar_dates,
-                                              price_date=day,mode='current_reference',symbols=symbols)
+                                              price_date=day,mode='current_reference',symbols=symbols,component_store=component_store)
         validate_sources()
         if generation_contract()!=contract:raise ValueError('Fluent generating code changed during preparation')
         publication={'source_witness':witness,'snapshot_hashes':frozen_snapshots}
@@ -176,7 +185,9 @@ def build_board_fluent(*,kb_db_path=None,raw_db_path=None,fluent_db_path=None,ca
         existing_full=store.current_generation('full')
         full_market_compatible=(existing_full is not None and existing_full['cache_key']==market['cache_key'] and
             existing_full['fluent_contract']==contract and existing_full['publication_inputs'].get('source_witness')==witness)
-        generation_id=store.save_market(market,contract=contract,sync_id=sync_id,publish=publish and not full_market_compatible,
+        # A supplied local/native collection is already ready for attachment;
+        # expose its market and summary together after the transaction verifies.
+        generation_id=store.save_market(market,contract=contract,sync_id=sync_id,publish=publish and not full_market_compatible and native_result is None,
                                         migration=migration,publication_inputs=publication)
         if full_market_compatible and not with_native:generation_id=existing_full['generation_id']
         if migration is not None and store.load_market(market['cache_key'],contract)!=market:
@@ -232,19 +243,27 @@ def build_board_fluent(*,kb_db_path=None,raw_db_path=None,fluent_db_path=None,ca
                     raw_db_path=raw_db_path,config=native_config,progress=native_progress,check_cancel=check_cancel)
             validate_sources()
             if not reuse_full:native_diagnostics=native_result.get('diagnostics',{})
-            if not reuse_full and native_result.get('complete') is True:
+            incremental_partial=(not reuse_full and native_result['identity'].get('format')=='incremental_native_summary_collection_v1')
+            if not reuse_full and (native_result.get('complete') is True or incremental_partial):
                 if native_result['identity'].get('calendar_hash')!=calendar_prefix_hash:
                     raise ValueError('native component calendar prefix differs from current verified calendar')
-                publication={**publication,'native_identity_hash':digest(native_result['identity']),
-                             'native_cache_witness':_witness(native_cache_db_path or DATA_ROOT/'processed/czsc/native_structure.db')}
+                publication={**publication,'native_identity_hash':digest(native_result['identity'])}
+                if not incremental_partial:
+                    publication['native_cache_witness']=_witness(native_cache_db_path or DATA_ROOT/'processed/czsc/native_structure.db')
                 generation_id=store.save_market(market,contract=contract,sync_id=sync_id,publish=False,
                                                 migration=migration,publication_inputs=publication)
-                aggregates=[aggregate_board_native(value,native_result,min_members=market['policy']['min_members'],
+                processed=set(native_result.get('processed_symbols',[]))
+                aggregates=[aggregate_board_native(value,({**native_result,'complete':all(symbol in processed for symbol in value['members'])}
+                    if incremental_partial else native_result),min_members=market['policy']['min_members'],
                             min_coverage=market['policy']['min_coverage']) for value in snapshots]
-                store.attach_native(generation_id,native_result,aggregates,publish=False)
+                store.attach_native(generation_id,native_result,aggregates,publish=False,allow_partial=incremental_partial)
                 if generation_contract()!=contract:raise ValueError('Fluent generating code changed during native preparation')
                 if check_cancel:check_cancel()
-                if publish:store.publish_full(generation_id)
+                if native_result.get('complete') is True:
+                    if publish:store.publish_full(generation_id)
+                else:
+                    outcome='partial'
+                    if publish:store.publish(generation_id,'market')
             elif not reuse_full:
                 outcome='partial'
                 if check_cancel:check_cancel()

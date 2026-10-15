@@ -308,7 +308,9 @@ def _run_quality_check(
     """
     if report.empty or "code" not in report.columns:
         return {"skipped": True, "reason": "no stocks updated"}
-    stocks = report.loc[report["status"].astype(str).str.lower() == "success", "code"].astype(str).unique().tolist()
+    successful = report["status"].astype(str).str.lower() == "success"
+    covered = pd.to_datetime(report.get("last_date", pd.Series(index=report.index, dtype=str)), errors="coerce").ge(pd.Timestamp(end_date))
+    stocks = report.loc[successful | covered, "code"].astype(str).unique().tolist()
     if not stocks:
         return {"skipped": True, "reason": "no successful updates"}
     end = pd.to_datetime(end_date)
@@ -350,12 +352,26 @@ def _sync_after_update(args, summary, quality_summary):
         return {"status": "skipped", "reason": "explicit maintenance skip", "training_started": False}
     if summary.get("failed") or (quality_summary or {}).get("has_errors") or (quality_summary or {}).get("error"):
         return {"status": "blocked", "reason": "raw update or quality check did not pass", "training_started": False}
-    if summary.get("success") == 0:
-        return {"status": "skipped", "reason": "no successful market-data rows; no derived update started", "training_started": False}
+    # Downloading older new rows is a successful raw update, but does not prove
+    # the requested target day exists. Covered rows can retry an interrupted
+    # structure publication even when this request adds no further raw rows.
+    target_covered = summary.get("total", 0) > 0 and summary.get("target_date_covered", 0) > 0
+    if not target_covered:
+        return {"status": "skipped", "reason_code": "target_date_not_covered",
+            "reason": "no confirmed target-date market-data coverage; no derived update started", "training_started": False}
+    if getattr(args, 'feature_mode', 'lightweight') == 'lightweight':
+        from my_strategy.services.light_daily import sync_light_daily
+        try:
+            return sync_light_daily(raw_db_path=get_data_access().settings.raw_db,
+                required_price_date=summary.get('end_date'))
+        except (InterruptedError, KeyboardInterrupt) as exc:
+            return {'status':'cancelled','mode':'lightweight','error':str(exc),'training_started':False}
+        except Exception as exc:
+            return {'status':'failed','mode':'lightweight','error':str(exc),'training_started':False}
     _emit_stage("feature_sync", "行情与元数据更新完成，正在同步当前特征…")
     import signal
     import threading
-    from my_strategy.services.daily_feature_sync import sync_daily_features, SyncCancelled
+    from my_strategy.services.daily_feature_sync import sync_daily_features, SyncCancelled, SyncTargetDateUnavailable
     cancelled = threading.Event()
     def stop(_signal, _frame): cancelled.set()
     handlers = {number: signal.signal(number, stop) for number in (signal.SIGINT, signal.SIGTERM)}
@@ -368,16 +384,34 @@ def _sync_after_update(args, summary, quality_summary):
             kb_db_path=args.feature_kb_db, fluent_db_path=args.feature_fluent_db,
             native_cache_db_path=args.feature_native_cache_db, calendar_run_id=args.feature_calendar_run_id,
             sync_id=args.feature_sync_id, parent_update_id=summary["update_id"],
+            required_price_date=summary.get("end_date"),
             cpu_workers=args.feature_cpu_workers, stock_batch_size=args.feature_stock_batch_size,
             kb_request_budget=args.feature_kb_budget, kb_min_interval=args.feature_kb_min_interval,
             source_root=args.feature_source_root, artifacts_root=args.feature_artifacts_root,
             progress=emit, check_cancel=cancelled.is_set)
     except (SyncCancelled, KeyboardInterrupt) as exc:
         return {"status": "cancelled", "error": str(exc) or "daily feature sync interrupted", "training_started": False}
+    except SyncTargetDateUnavailable as exc:
+        return {"status": "blocked", "reason_code": "qualified_target_date_not_available",
+            "error": str(exc), "training_started": False}
     except Exception as exc:
         return {"status": "failed", "error": str(exc), "training_started": False}
     finally:
         for number, handler in handlers.items(): signal.signal(number, handler)
+
+
+def _set_completion_status(summary, quality_summary):
+    """Keep committed raw success distinct from incomplete derived publication."""
+    quality = quality_summary or {}
+    raw_status = ("failed" if summary["failed"] or quality.get("has_errors") or quality.get("error")
+        else "partial" if summary["not_updated"] else "no_updates" if not summary["total"] else "completed")
+    derived = summary.get("feature_sync") or {}
+    derived_status = derived.get("status")
+    summary["raw_status"] = raw_status
+    summary["status"] = ("failed" if raw_status == "failed" else "cancelled" if derived_status == "cancelled"
+        else "partial" if raw_status == "partial" or derived.get("reason_code") == "target_date_not_covered" or derived_status in {
+            "partial", "failed", "interrupted", "blocked", "busy", "queued", "running"}
+        else raw_status)
 
 
 def main() -> None:
@@ -397,6 +431,8 @@ def main() -> None:
     parser.add_argument("--no-progress-bar", action="store_true", help="Disable the interactive progress bar.")
     parser.add_argument("--skip-feature-sync", action="store_true", help="仅维护时显式跳过当前特征同步。")
     parser.add_argument("--feature-sync-id", help="恢复相同输入的未完成特征同步。")
+    parser.add_argument("--feature-mode", choices=("lightweight", "full"), default="lightweight",
+                        help="默认只更新关注/模拟池；full须显式选择全市场结构准备。")
     parser.add_argument("--feature-calendar-run-id")
     parser.add_argument("--feature-cpu-workers", type=int, default=6)
     parser.add_argument("--feature-stock-batch-size", type=int, default=360)
@@ -504,7 +540,7 @@ def main() -> None:
     )
     summary["metadata_refresh"] = metadata_summary
     summary["feature_sync"] = _sync_after_update(args, summary, quality_summary)
-    summary["status"] = "failed" if summary["failed"] or (quality_summary or {}).get("has_errors") or (quality_summary or {}).get("error") else "partial" if summary["not_updated"] else "no_updates" if not summary["total"] else "completed"
+    _set_completion_status(summary, quality_summary)
     exit_code = 130 if summary["feature_sync"].get("status") == "cancelled" else 2 if summary["status"] == "failed" else 0
     if args.json:
         output = {"summary": summary, "rows": report.to_dict("records")}

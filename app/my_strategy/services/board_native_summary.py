@@ -28,7 +28,7 @@ from my_strategy.core.run_context import stable_hash
 from my_strategy.adapters.czsc_adapter import normalize_symbol, raw_path
 from my_strategy.services.czsc_liquidity import RAW_IDENTITY_COLUMNS, daily_eligibility, liquidity_policy
 from my_strategy.services.czsc_native_cache import (_RAW_KEYS, _LIQUIDITY_KEYS, _OUTPUT_KEYS,
-    _validate_identity, make_native_cache_identity)
+    _validate_identity, make_native_cache_identity, read_native_payload)
 
 NATIVE_CODE_FILES = tuple('services/' + name for name in (
     'czsc_trend_source.py', 'czsc_native_cache.py', 'czsc_market_features.py', 'czsc_market_profiles.py',
@@ -127,13 +127,29 @@ def _derive_schema(root, config):
             profile=get_feature_profile('ma_trend')['schema_hash']))
 
 
-def native_generation_contract(*, source_root=None, config=None):
+def native_generation_contract(*, source_root=None, config=None, frozen_code_hashes=None):
     """Read actual current producer bytes and engine, without reading cache/price rows."""
     from my_strategy.services.czsc_trend_contracts import strategy_config
     root = _app_root(source_root); cfg = strategy_config(config)
     code = {name: _file_sha(root / 'my_strategy' / name) for name in NATIVE_CODE_FILES}
+    archived = {}
+    if frozen_code_hashes is not None:
+        if set(frozen_code_hashes) != set(code): raise ValueError('native frozen producer file set drift')
+        for name, expected in frozen_code_hashes.items():
+            if code[name] == expected: continue
+            # Storage plumbing can evolve independently. Historical sources
+            # retain their exact producer; numerical modules never use this.
+            if name not in ('services/czsc_native_cache.py', 'services/czsc_trend_source.py') or not re.fullmatch(r'[a-f0-9]{64}', expected):
+                raise ValueError('native producer current generating contract drift: code_hashes')
+            registry = root / 'my_strategy/data/metadata/producer_snapshots'
+            snapshot = registry / expected / name
+            if snapshot.is_symlink() or not snapshot.resolve().is_relative_to(registry.resolve()) or not snapshot.is_file() or _file_sha(snapshot) != expected:
+                raise ValueError('native historical storage producer snapshot missing or changed')
+            code[name] = expected
+            archived[name] = str(snapshot)
     result = dict(source_root=str(root), code_hashes=code, engine_contract=_engine_contract(root),
         **_derive_schema(root, cfg), config=cfg)
+    if archived: result['historical_storage_producer_paths'] = archived
     result['contract_hash'] = stable_hash(result)
     return result
 
@@ -174,7 +190,7 @@ def _load_contract(source_root, artifacts_root, native_id, raw_id, day, config):
         candidate = strategy_config(config)
         if _derive_schema(root, candidate) != _derive_schema(root, cfg) or candidate['feature_start'] != cfg['feature_start'] or candidate['liquidity_universe'] != cfg['liquidity_universe']:
             raise ValueError('native summary requested generating config differs from producer')
-    generation = native_generation_contract(source_root=root, config=cfg)
+    generation = native_generation_contract(source_root=root, config=cfg, frozen_code_hashes=identity['code_hashes'])
     for key in ('code_hashes', 'engine_contract', 'feature_schema_hashes', 'native_config_hash', 'native_schema_hash'):
         if generation[key] != identity[key]: raise ValueError('native producer current generating contract drift: ' + key)
     if stable_hash(cfg) != identity['config_hash']: raise ValueError('native source config hash drift')
@@ -304,7 +320,7 @@ def _read_cache_entry(connection, identity):
     if stored != identity or _sha(_json(stored).encode()) != key: raise ValueError('native cached generating identity drift')
     if _sha(row['metadata_json'].encode()) != row['metadata_sha256'] or _sha(row['producer_json'].encode()) != row['producer_sha256'] or set(producer) != {'raw_path', 'features_path', 'native_path'}:
         raise ValueError('native cached metadata/producer SHA drift')
-    features_blob, native_blob = bytes(row['features_blob']), bytes(row['native_blob'])
+    features_blob, native_blob, _, _ = read_native_payload(connection, key, row['features_blob'], row['native_blob'])
     if _sha(features_blob) != metadata['sha256'] or _sha(native_blob) != metadata['native_sha256']:
         raise ValueError('native cached dual physical SHA drift')
     frame = pd.read_parquet(io.BytesIO(features_blob)); parquet = pq.ParquetFile(io.BytesIO(features_blob))
@@ -410,7 +426,7 @@ def collect_native_summaries(*, price_date, symbols=None, cache_db_path=None, so
         with closing(sqlite3.connect(cache_path.as_uri()+'?mode=ro', uri=True, timeout=30)) as cache, closing(sqlite3.connect(warehouse.as_uri()+'?mode=ro', uri=True, timeout=30)) as raw:
             cache.row_factory = sqlite3.Row; cache.execute('PRAGMA query_only=ON'); raw.execute('PRAGMA query_only=ON')
             cache.execute('BEGIN'); raw.execute('BEGIN')
-            if cache.execute('PRAGMA user_version').fetchone()[0] != 1:
+            if cache.execute('PRAGMA user_version').fetchone()[0] not in (1, 2):
                 raise ValueError('native cache schema version drift')
             current_hashes=_verify_population_current(contract,raw,progress=progress,check_cancel=check_cancel)
             base_identity['raw_candidate_catalog_hash']=stable_hash(current_hashes)

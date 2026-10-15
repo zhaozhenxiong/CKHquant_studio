@@ -13,6 +13,8 @@ from my_strategy.runtime_env import configure_utf8_stdio
 
 
 DELEGATES = {
+    "verify-workspace": ["-m", "my_strategy.scripts.verify_workspace"],
+    "light-research": ["-m", "my_strategy.scripts.light_research"],
     "resume-training-fast": ["-m", "my_strategy.scripts.resume_training_fast"],
     "resume-trend-training": ["-m", "my_strategy.scripts.resume_training_legacy_cached"],
     "run-training-job": ["-m", "my_strategy.scripts.run_training_job"],

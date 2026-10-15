@@ -236,6 +236,13 @@ def stock_facts(symbol, dates, *, overlay=None, failure=None, sector=None, name=
                     item = _event(event); active[item["id"]] = item
         new = list(new_by_day.get(day, {}).values()) if available else []
         resolution = (row or {}).get("model_resolution") or {}
+        ma = agents.get("ma") or {}
+        probability_scored = bool(available and ma.get("probability_scored", ma.get("status") == "scored"))
+        risk_plan = (row or {}).get("reference_risk_plan") or {}
+        position = (row or {}).get("position_reference") or {}
+        risk_available = bool(available and reference and risk_plan.get("status") == "available")
+        increase_eligible = bool(probability_scored and risk_available
+            and ma.get("predictive_gate_passed", position.get("predictive_gate_passed")) is True)
         # The direction row and the validated account quality evaluation keep
         # different reasons. Preserve both without turning a quality veto into
         # an unexplained "no action" row or repeating the same saved code.
@@ -248,7 +255,8 @@ def stock_facts(symbol, dates, *, overlay=None, failure=None, sector=None, name=
             "account_scope": "none" if reference else "research_simulation",
             "sector": sector["name"], "price_available": available,
             "input_available": available and any((agents.get(source) or {}).get("status") == "scored" for source in ("ma", "structure", "wyckoff")),
-            "model_scored": available and (agents.get("ma") or {}).get("status") == "scored",
+            "model_scored": probability_scored, "probability_scored": probability_scored,
+            "risk_geometry_available": risk_available, "reference_increase_eligible": increase_eligible,
             "quality_status": quality_status, "high_return_probability": _number(quality.get("probability")) if available and quality_status in {"scored_passed", "scored_rejected"} else None,
             "direction": direction, "account_action": "UNAVAILABLE" if reference else action if account_row else "UNAVAILABLE",
             "holding_shares": shares, "account_available": False if reference else account_row is not None, "counts": counts, "support": support,
@@ -269,7 +277,8 @@ def _aggregate():
 
 
 def _add(target, fact):
-    for key in ("price_available", "input_available", "model_scored", "account_available"):
+    for key in ("price_available", "input_available", "model_scored", "probability_scored",
+                "risk_geometry_available", "reference_increase_eligible", "account_available"):
         target["coverage"][key] += int(fact[key])
     for key in ("failed", "missing_price"):
         target["coverage"][key] += int(fact["counts"][key])
@@ -291,7 +300,8 @@ def _add(target, fact):
 def _finish_day(date, value, universe_size):
     counts = {key: int(value["counts"][key]) for key in COUNT_KEYS}
     return {"date": date, "universe_size": universe_size,
-        "coverage": {key: int(value["coverage"][key]) for key in ("price_available", "input_available", "model_scored", "account_available", "failed", "missing_price")},
+        "coverage": {key: int(value["coverage"][key]) for key in ("price_available", "input_available", "model_scored",
+            "probability_scored", "risk_geometry_available", "reference_increase_eligible", "account_available", "failed", "missing_price")},
         "counts": counts, "hr_status": dict(value["hr_status"]),
         "events": {**{key: int(value["events"][key]) for key in ("new_buy", "new_sell", "new_total", "active_buy", "active_sell", "active_total", "invalidated")},
             "new_by_type": dict(value["new_by_type"]), "active_by_type": dict(value["active_by_type"])},

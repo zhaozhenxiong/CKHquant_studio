@@ -104,6 +104,22 @@ def test_default_discovery_current_completed_source_and_outside_population(proof
     assert missing['reason_codes']==['native_stock_outside_frozen_population']
 
 
+def test_historical_storage_producer_requires_exact_archived_bytes(proof):
+    name='services/czsc_native_cache.py'
+    live=proof['app']/'my_strategy'/name
+    old=live.read_bytes();digest=hashlib.sha256(old).hexdigest()
+    archived=proof['app']/'my_strategy/data/metadata/producer_snapshots'/digest/name
+    archived.parent.mkdir(parents=True);archived.write_bytes(old)
+    live.write_bytes(old+b'\n# storage-only deployment update\n')
+    value=summary.collect_native_summaries(**proof['kwargs'])
+    assert value['complete'],value['diagnostics']
+    assert value['identity']['generation_contract']['code_hashes'][name]==digest
+    assert value['identity']['generation_contract']['historical_storage_producer_paths'][name]==str(archived)
+    archived.write_bytes(b'wrong archived producer')
+    unavailable=summary.collect_native_summaries(**proof['kwargs'])
+    assert not unavailable['complete']
+
+
 @pytest.mark.parametrize('change',['blob','metadata','producer','identity','schema_version','missing_entry','frozen_raw','liquidity','warehouse_old_bar','native_report','checkpoint','code'])
 def test_expected_stock_integrity_drift_never_publishes_complete_or_zero(proof,change):
     if change in {'blob','metadata','producer','identity','schema_version','missing_entry'}:
@@ -112,7 +128,7 @@ def test_expected_stock_integrity_drift_never_publishes_complete_or_zero(proof,c
             elif change=='metadata':con.execute("UPDATE native_structure_entries SET metadata_json='{}'")
             elif change=='producer':con.execute("UPDATE native_structure_entries SET producer_json='{}'")
             elif change=='identity':con.execute("UPDATE native_structure_entries SET identity_json='{}'")
-            elif change=='schema_version':con.execute('PRAGMA user_version=2')
+            elif change=='schema_version':con.execute('PRAGMA user_version=3')
             else:con.execute('DELETE FROM native_structure_entries')
     elif change=='frozen_raw':Path(proof['record']['raw_path']).write_bytes(b'wrong')
     elif change=='liquidity':Path(proof['record']['liquidity_path']).write_bytes(b'wrong')

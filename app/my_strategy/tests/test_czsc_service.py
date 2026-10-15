@@ -121,7 +121,7 @@ def test_reference_scan_worker_never_substitutes_stale_or_future_quote(monkeypat
         trend_strategy._stock_worker(("000001.SZ","2026-09-28",["2026-09-25","2026-09-28","2026-09-29"],{"analysis_mode":"reference"},"2026-09-29"))
 
 
-def test_interactive_analysis_saves_a_reproducible_run(manager, monkeypatch):
+def test_explicitly_saved_analysis_retains_a_reproducible_run(manager, monkeypatch):
     from my_strategy.core import paths
     from my_strategy.services import czsc_analysis
     monkeypatch.setattr(paths, "ARTIFACT_RUNS_ROOT", manager.results.runs_root)
@@ -133,13 +133,35 @@ def test_interactive_analysis_saves_a_reproducible_run(manager, monkeypatch):
     from my_strategy.web_dashboard import trend_strategy
     monkeypatch.setattr(trend_strategy, "analyze_trend_consensus", calculate)
     with TestClient(create_app(manager)) as client:
-        response = client.post("/api/analysis", json={"research": False, "symbol": "000001.SZ", "start": "2025-01-01", "as_of": "2025-09-30"})
+        response = client.post("/api/analysis", json={"research": False, "save": True, "symbol": "000001.SZ", "start": "2025-01-01", "as_of": "2025-09-30"})
         assert response.status_code == 200
         result = response.json()
         assert result["request"]["as_of"] == "2025-09-30"
         assert result["run_context"]["data_version"] == "test-input"
         assert client.get("/api/runs/" + result["run_id"]).json() == result
         assert client.get("/api/runs").json()["runs"][0]["kind"] == "analysis"
+
+
+def test_default_interactive_analysis_reuses_preview_without_permanent_run(manager, monkeypatch):
+    from my_strategy.web_dashboard import api, trend_strategy
+    calls=[]
+    monkeypatch.setattr(api,'_structure_preview_identity',lambda spec,settings:
+        {'fixture':str(manager.results.db_path),'as_of':spec.as_of,'input_sha':'fixed-input'})
+    def calculate(**kwargs):
+        calls.append(kwargs)
+        return {'symbol':kwargs['symbol'],'data_end':'2025-09-30','data_version':'fixed-input',
+                'as_of':kwargs['as_of'],'frequencies':{},'events':[]}
+    monkeypatch.setattr(trend_strategy,'analyze_trend_consensus',calculate)
+    with TestClient(create_app(manager)) as client:
+        body={'research':False,'symbol':'000001.SZ','start':'2025-01-01','as_of':'2025-09-30'}
+        first=client.post('/api/analysis',json=body)
+        assert first.status_code==200,first.text
+        first=first.json();second=client.post('/api/analysis',json=body).json()
+        assert first['preview'] is True and first['saved'] is False and first['reused'] is False
+        assert first['preview_id']==second['preview_id'] and second['reused'] is True
+        assert 'run_id' not in first and 'run_context' not in first
+        assert len(calls)==1
+        assert client.get('/api/runs').json()['runs']==[]
 
 
 def test_default_dates_device_and_batch_http_contract(manager, monkeypatch):

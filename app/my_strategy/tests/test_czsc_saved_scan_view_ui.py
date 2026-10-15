@@ -44,7 +44,7 @@ const calls=[];global.fetch=async(url)=>{calls.push(url);return response(scan);}
 await workbench.openRun('saved/final','scan');
 assert.equal(calls[0],'/api/runs/saved%2Ffinal?view=scan');
 assert.equal(element('scan-count').textContent,'2');
-assert(element('scan-rows').innerHTML.includes('共S · 最终卖方参考'));
+assert(element('scan-rows').innerHTML.includes('S · 参考减仓'));
 element('scan-search').value='东诚';workbench.renderScan();
 assert(element('scan-rows').innerHTML.includes('002675.SZ'));
 assert(!element('scan-rows').innerHTML.includes('000016.SZ'));
@@ -90,7 +90,7 @@ const calls=[];global.fetch=async(url)=>{calls.push(url);
  throw new Error('unexpected full result request: '+url);};
 await workbench.refreshTasks();await settle();
 assert.equal(workbench.state.scan.run_id,'final-scan');
-assert(element('scan-rows').innerHTML.includes('共S · 最终卖方参考'));
+assert(element('scan-rows').innerHTML.includes('S · 参考减仓'));
 assert.equal(calls.filter(url=>url.includes('?view=scan')).length,1);
 await workbench.refreshTasks();await settle();
 assert.equal(calls.filter(url=>url.includes('?view=scan')).length,1,'completed job must not redeliver a large result');

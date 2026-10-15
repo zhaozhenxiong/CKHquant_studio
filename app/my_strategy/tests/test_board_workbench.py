@@ -59,7 +59,8 @@ def test_board_partial_result_survives_restart_and_retry_has_own_identity(dashbo
         return {'status':'partial','sync_id':'persisted-sync','market_published':True,'full_published':False,
                 'price_date':'2026-10-12','error':'native incomplete','training_started':False}
     monkeypatch.setattr(daily_feature_sync, 'sync_daily_features', sync)
-    launched = client.post('/api/boards/sync', json={})
+    assert client.post('/api/boards/sync', json={}).status_code == 409
+    launched = client.post('/api/boards/sync', json={'scope':'full'})
     assert launched.status_code == 202
     identifier = launched.json()['job_id']
     deadline = time.monotonic() + 5

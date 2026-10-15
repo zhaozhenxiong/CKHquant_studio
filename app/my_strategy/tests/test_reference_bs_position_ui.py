@@ -81,10 +81,10 @@ assert(html.includes('风险参考不可用'));assert(!html.includes('风险仓�
 
 def test_reference_shell_removed_account_and_backtest_handlers_and_keeps_binding_targets():
     from my_strategy.web_dashboard.scripts.validate_czsc_workbench import validate
-    assert set(validate()['routes']) == {'analysis','scan','watchlist','training','parameters','data'}
+    assert set(validate()['routes']) == {'analysis','scan','watchlist','training','parameters','data','simulation'}
     html=(STATIC.parent/'index.html').read_text()
     js=(STATIC/'workbench.js').read_text()
-    for removed in ['view-backtest','view-holdings','send-backtest','trade-rows','equity-chart','backtest-form','holdings-form']:
+    for removed in ['view-backtest','view-holdings','send-backtest','id="trade-rows"','id="equity-chart"','backtest-form','holdings-form']:
         assert removed not in html and removed not in js
     run_js(r'''
 const assert=require('node:assert/strict'),fs=require('fs'),vm=require('vm'),p=require('path');

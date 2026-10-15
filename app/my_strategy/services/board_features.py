@@ -175,7 +175,7 @@ def _member_board_index(snapshots):
 
 
 def build_board_features(store, *, raw_db_path=None, calendar_dates, price_date, mode='causal',
-                         policy=None, symbols=None, use_cache=True):
+                         policy=None, symbols=None, use_cache=True, component_store=None, component_stats=None):
     """Read current/causal membership and raw prices; never mutate the price DB."""
     if mode not in {'causal','current_reference'}:raise ValueError('unknown board feature mode')
     day=pd.Timestamp(price_date).date().isoformat();calendar=_calendar(calendar_dates,day)
@@ -248,8 +248,40 @@ def build_board_features(store, *, raw_db_path=None, calendar_dates, price_date,
         result['metrics']['market_share']=amount/denominator if amount is not None and denominator is not None and denominator>0 else None
         return result
 
-    for date,rows in by_date.items():
-        for board,snapshot in rows.items():daily[(board,date)]=daily_row(snapshot,date)
+    # A current-board component depends only on its members' observations.
+    # Global market totals and rankings remain cheap derived values. Changes in
+    # another board must not invalidate this board's member sums/counts.
+    if component_store is not None and mode=='current_reference':
+        for snapshot in current:
+            members=snapshot['members'];board=snapshot['board_id']
+            local_identity={'format':'board_member_sums_v1','snapshot_hash':snapshot['snapshot_hash'],
+                'policy':cfg,'code':code,'dates':output_dates,
+                'observations':[[date,[[symbol,*[observation(field,date,symbol) for field in
+                    ('close','return','advance','above_ma20','breakout20','amount')]] for symbol in members]] for date in output_dates]}
+            component_key={'content_hash':stable_hash(local_identity)}
+            cached=component_store.get(component_key,namespace='board_member_components') if use_cache else None
+            if cached is not None and cached.get('identity')!=local_identity:raise ValueError('board component identity drift')
+            if component_stats is not None:
+                name='reused' if cached is not None else 'rebuilt';component_stats[name]=component_stats.get(name,0)+1
+            payload=[]
+            for date in output_dates:
+                if cached is None:
+                    row=daily_row(snapshot,date)
+                    slim={key:row[key] for key in ('date','snapshot_hash','expected_count','members','metric_counts','metric_coverage',
+                        'metric_sums','effective_members','coverage')}
+                    slim['metrics']={key:value for key,value in row['metrics'].items() if key!='market_share'}
+                    payload.append(slim)
+                else:
+                    slim=next(item for item in cached['rows'] if item['date']==date)
+                    row={**slim,'metrics':dict(slim['metrics']),'snapshot':snapshot,'member_set':set(members)}
+                    amount=row['metrics']['amount'];denominator=market.get(date)
+                    row['metrics']['market_share']=amount/denominator if amount is not None and denominator is not None and denominator>0 else None
+                daily[(board,date)]=row
+            if cached is None and use_cache:
+                component_store.put(component_key,{'identity':local_identity,'rows':payload},namespace='board_member_components')
+    else:
+        for date,rows in by_date.items():
+            for board,snapshot in rows.items():daily[(board,date)]=daily_row(snapshot,date)
 
     def window(board,field,count,exclude=None,previous=False):
         end=len(output_dates)-(1 if previous else 0);selected=output_dates[max(0,end-count):end]
@@ -300,8 +332,45 @@ def build_board_features(store, *, raw_db_path=None, calendar_dates, price_date,
     board_rows=[]
     for snapshot in sorted(current,key=lambda row:row['board_id']):
         values,row=board_values(snapshot['board_id'])
+        # Display-only history is built in this explicit preparation job, not
+        # reconstructed by GET. Current members never gain historical eligibility.
+        capital_visualization=None
+        if mode=='current_reference':
+            history=[]
+            for date in output_dates:
+                point=daily[(snapshot['board_id'],date)]
+                history.append({'date':date,'amount':point['metrics']['amount'],
+                    'market_amount':market.get(date),'market_share':point['metrics']['market_share'],
+                    'return_1':point['metrics']['return'],'coverage':point['metric_coverage']['amount'],
+                    'effective_members':point['metric_counts']['amount'],'expected_members':point['expected_count']})
+            comparable=[]
+            if len(output_dates)>1:
+                previous=output_dates[-2]
+                comparable=[(observation('amount',day,symbol),observation('amount',previous,symbol))
+                    for symbol in snapshot['members']]
+                comparable=[pair for pair in comparable if all(value is not None for value in pair)]
+            coverage=len(comparable)/snapshot['expected_count'] if snapshot['expected_count'] else 0.
+            usable=(snapshot['usable_membership'] and len(comparable)>=cfg['min_members']
+                and coverage>=cfg['min_coverage'] and history[-1]['amount'] is not None
+                and len(history)>1 and history[-2]['amount'] is not None)
+            current_amount=sum(pair[0] for pair in comparable) if usable else None
+            previous_amount=sum(pair[1] for pair in comparable) if usable else None
+            change=current_amount-previous_amount if usable else None
+            relative=values['board_relative_amount20']
+            capital_visualization={'version':'current_member_capital_visualization_v1',
+                'mode':'current_reference','training_eligible':False,'capital_basis':'turnover_amount_proxy',
+                'membership_basis':'fixed_current_snapshot_historical_price_comparison',
+                'snapshot_hash':snapshot['snapshot_hash'],'history':history,
+                'amount_change_1':change,
+                'amount_change_ratio_1':change/previous_amount if usable and previous_amount>0 else None,
+                'comparable_current_amount':current_amount,'comparable_previous_amount':previous_amount,
+                'comparable_members':len(comparable),'comparable_coverage':coverage,
+                'previous_date':output_dates[-2] if len(output_dates)>1 else None,
+                'prior20_mean_amount':values['board_amount']/relative if relative is not None and relative>0 else None,
+                'reason_codes':[] if usable else ['comparable_amount_population_unavailable']}
         eligible=mode=='causal' and all(value is not None for value in values.values())
         board_rows.append({**values,'board_id':snapshot['board_id'],'kind':snapshot['kind'],'name':snapshot['name'],
+            **({'capital_visualization':capital_visualization} if capital_visualization is not None else {}),
             'effective_members':row['effective_members'],'expected_members':row['expected_count'],'coverage':row['coverage'],
             'membership_scope':snapshot.get('membership_scope','source_full'),
             'source_member_count':snapshot.get('source_member_count',snapshot['expected_count']),

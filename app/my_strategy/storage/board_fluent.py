@@ -213,15 +213,16 @@ class BoardFluentStore:
             row=conn.execute('SELECT generation_id FROM feature_generations WHERE price_date=? AND full_ready=1 ORDER BY created_at DESC LIMIT 1',(price_date,)).fetchone()
             return self._generation(conn,row[0]) if row else None
 
-    def get_native_component(self,generation_id):
+    def get_native_component(self,generation_id,*,allow_partial=False):
         """Read verified indexed summaries and refs; never decode producer blobs."""
-        generation=self.verify_generation(generation_id,level='full')
+        generation=self.verify_generation(generation_id,level='market' if allow_partial else 'full')
         with self._read() as conn:
+            if allow_partial:self._verify_full_population(conn,generation_id,generation['native_identity'])
             summaries={row['symbol']:self._row(row) for row in conn.execute('SELECT * FROM native_stock_summaries WHERE generation_id=? ORDER BY symbol',(generation_id,))}
             refs=[_verified(row['payload_json'],row['payload_sha']) for row in conn.execute("SELECT payload_json,payload_sha FROM feature_input_refs WHERE generation_id=? AND ref_type='native_stock' ORDER BY entity_id",(generation_id,))]
             coverage=conn.execute("SELECT payload_json,payload_sha FROM feature_input_refs WHERE generation_id=? AND ref_type='native' AND entity_id='native_coverage'",(generation_id,)).fetchone()
             diagnostics=_verified(coverage['payload_json'],coverage['payload_sha']) if coverage else {}
-            return {'identity':generation['native_identity'],'summaries':summaries,'input_refs':refs,'complete':True,'diagnostics':diagnostics}
+            return {'identity':generation['native_identity'],'summaries':summaries,'input_refs':refs,'complete':generation['full_ready'],'diagnostics':diagnostics}
 
     def save_market(self,bundle,*,contract=None,sync_id=None,publish=True,migration=None,publication_inputs=None):
         if bundle.get('mode')!='current_reference' or bundle.get('training_eligible') is not False or bundle.get('qualification')!='pending':
@@ -359,7 +360,7 @@ class BoardFluentStore:
         native_boards={row[0] for row in conn.execute('SELECT board_id FROM board_structure_features WHERE generation_id=?',(generation_id,))}
         if native_boards!=market_boards:raise ValueError('native board component omitted required entities')
         if not isinstance(identity,dict):raise ValueError('native component identity missing')
-        if identity.get('format')=='native_summary_collection_v1':
+        if identity.get('format') in {'native_summary_collection_v1','incremental_native_summary_collection_v1'}:
             required=identity.get('required_symbols')
             if not isinstance(required,list) or any(not isinstance(symbol,str) for symbol in required) or required!=sorted(set(required)):
                 raise ValueError('native required symbol population identity invalid')
@@ -388,7 +389,8 @@ class BoardFluentStore:
             value={**self._row(row,board=True),'generation_id':generation_id,'activity_score':row['activity_score'],'capital_basis':'turnover_amount_proxy'}
             if include_structure:
                 structure=conn.execute('SELECT * FROM board_structure_features WHERE generation_id=? AND board_id=? ORDER BY structure_basis',(generation_id,board_id)).fetchall()
-                value['native_structure']=[self._row(item) for item in structure] if generation['full_ready'] else None
+                value['native_structure']=[self._row(item) for item in structure] if structure else None
+                value['native_component_complete']=generation['full_ready']
             return value
 
     def stock(self,symbol,generation_id=None):
@@ -405,6 +407,20 @@ class BoardFluentStore:
             value['native_summary']=self._row(native) if native else None
             return value
 
+    def boards(self,kind,generation_id=None):
+        """Read SHA-verified published market rows for visual comparisons."""
+        if kind not in {'industry','concept'}:raise ValueError('unknown board kind')
+        with self._read() as conn:
+            if conn is None:return []
+            generation_id=self._selected(conn,generation_id)
+            if generation_id is None:return []
+            generation=self._generation(conn,generation_id)
+            if not generation or not generation['market_ready']:return []
+            return [{**self._row(row,board=True),'generation_id':generation_id,
+                'activity_score':row['activity_score']} for row in conn.execute(
+                    'SELECT * FROM board_daily_features WHERE generation_id=? AND kind=? ORDER BY board_id',
+                    (generation_id,kind))]
+
     def rankings(self,kind,ranking_type='activity',limit=30,generation_id=None):
         if kind not in {'industry','concept'} or ranking_type not in {'activity','capital'}:raise ValueError('unknown board ranking')
         with self._read() as conn:
@@ -420,11 +436,13 @@ class BoardFluentStore:
                 result.append({**self._row(board,board=True),**ranking,'generation_id':generation_id,'activity_score':board['activity_score']})
             return result
 
-    def attach_native(self,generation_id,native_result,board_rows,*,publish=True):
+    def attach_native(self,generation_id,native_result,board_rows,*,publish=True,allow_partial=False):
         generation=self.get_generation(generation_id)
         if generation is None or not generation['market_ready']:raise ValueError('market generation is not ready')
         identity=native_result['identity']
-        if (identity.get('price_date')!=generation['price_date'] or native_result.get('complete',identity.get('complete')) is not True or
+        complete=native_result.get('complete',identity.get('complete')) is True
+        partial_allowed=allow_partial and identity.get('format')=='incremental_native_summary_collection_v1'
+        if (identity.get('price_date')!=generation['price_date'] or (not complete and not partial_allowed) or
             identity.get('mode')!='current_reference' or identity.get('training_eligible') is not False):
             raise ValueError('native component is incomplete or has a different price date')
         summaries=native_result.get('summaries',native_result.get('by_symbol',{}))
@@ -457,9 +475,10 @@ class BoardFluentStore:
                 self._put(conn,'feature_input_refs',('generation_id','ref_type','entity_id','payload_json','payload_sha'),
                     (generation_id,'native_stock',value['entity_id'],canonical(value),digest(value)))
             self._verify_full_population(conn,generation_id,identity)
-            conn.execute('UPDATE feature_generations SET native_identity_json=?,native_identity_sha=?,full_ready=1 WHERE generation_id=?',
-                         (canonical(identity),digest(identity),generation_id))
+            conn.execute('UPDATE feature_generations SET native_identity_json=?,native_identity_sha=?,full_ready=? WHERE generation_id=?',
+                         (canonical(identity),digest(identity),int(complete),generation_id))
             if publish:
+                if not complete:raise ValueError('partial native component cannot publish full')
                 current=conn.execute('SELECT generation_id FROM feature_generations WHERE market_active=1').fetchone()
                 if not current or current[0]!=generation_id:raise ValueError('cannot publish full component for a different market generation')
                 self._publish(conn,generation_id,'full')
@@ -502,6 +521,10 @@ class BoardFluentStore:
                              ('failed',canonical(blocker),digest(blocker),blocker['sync_id']))
             if value is not None:
                 if value['fingerprint']!=fingerprint or value['input_identity']!=input_identity:raise ValueError('resume sync frozen input mismatch')
+                if value['status']=='cancelled':
+                    if sync_id is not None:raise ValueError('cancelled sync is terminal; create a new explicit plan')
+                    value=None
+            if value is not None:
                 if value['status']=='completed':
                     if reuse_completed:return {**value,'reused':True,'owned':False}
                     if sync_id is not None:raise ValueError('completed sync cannot be overwritten')

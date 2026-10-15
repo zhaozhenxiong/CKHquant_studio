@@ -129,4 +129,10 @@ def decorate_analysis(result, *, raw, overlay, start=None):
         "reference_position_schema": overlay.get("position_reference", {}).get("schema"),
         "historical_reconstruction": any(r.get("historical_reconstruction") for r in rows)}
     out["research"].pop("high_return_target", None)
+    # Replay caches retain verified physical assets and the actual runtime.
+    for key in ("model_asset_identity", "model_asset_identities", "reference_context_hash",
+                "runtime_code_hash", "runtime_identity"):
+        if key in overlay:
+            out[key] = copy.deepcopy(overlay[key])
+            out["research"][key] = copy.deepcopy(overlay[key])
     return out

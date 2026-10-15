@@ -205,7 +205,7 @@ def test_code_only_default_carries_installation_and_current_source_without_priva
     repo = source_repo(tmp_path)
     runs, _model = current_state(repo)
     write_json(repo / "runtime-manifest.json", {"schema": "fixture"})
-    for name in ("setup.py", "pyproject.toml", "MANIFEST.in"):
+    for name in ("setup.py", "pyproject.toml", "MANIFEST.in", "RUNBOOK.md"):
         (repo / name).write_text("fixture", encoding="utf-8")
     for relative in (".github/workflows/portable.yml", "app/my_strategy/services/new_business.py",
                      "app/my_strategy/configs/new_business.json", "app/my_strategy/knowledge_base_system/prompts/private.md",
@@ -221,6 +221,7 @@ def test_code_only_default_carries_installation_and_current_source_without_priva
     assert list((target / "app/my_strategy/artifacts/runs").iterdir()) == []
     assert (target / "runtime-manifest.json").exists()
     assert (target / "setup.py").exists()
+    assert (target / "RUNBOOK.md").read_bytes() == (repo / "RUNBOOK.md").read_bytes()
     assert (target / ".github/workflows/portable.yml").exists()
     assert (target / "app/my_strategy/services/new_business.py").exists()
     assert (target / "app/my_strategy/configs/new_business.json").exists()
@@ -229,6 +230,31 @@ def test_code_only_default_carries_installation_and_current_source_without_priva
                      "app/build", "app/dist", "app/my_strategy/khquant.egg-info"):
         assert not (target / relative).exists()
     assert (runs / "training/models/production/trend_direction/model.joblib").exists()
+
+
+def test_code_package_excludes_local_kronos_assets_but_keeps_vendor_source(tmp_path):
+    repo = source_repo(tmp_path)
+    originals = {}
+    for relative in ('app/my_strategy/kronos_model/model.safetensors',
+                     'app/my_strategy/kronos_model/config.json',
+                     'app/my_strategy/kronos_model/tokenizer/model.safetensors',
+                     'app/my_strategy/kronos_model/tokenizer/config.json',
+                     'app/kronos_model/model.safetensors'):
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'synthetic local model asset, not for public code export')
+        originals[path] = path.read_bytes()
+    vendor = repo / 'app/vendor/kronos/model/kronos.py'
+    vendor.parent.mkdir(parents=True)
+    vendor.write_text('# frozen public source fixture', encoding='utf-8')
+    target = tmp_path / 'public-code'
+    manifest = build_package(source=repo, target=target)
+    assert verify_package(target) == []
+    assert manifest['include_data'] is False and manifest['include_artifacts'] == 'none'
+    assert not (target / 'app/my_strategy/kronos_model').exists()
+    assert not (target / 'app/kronos_model').exists()
+    assert (target / 'app/vendor/kronos/model/kronos.py').read_bytes() == vendor.read_bytes()
+    assert all(path.read_bytes() == raw for path, raw in originals.items())
 
 
 @pytest.mark.parametrize("missing", ["install.py", "app/AGENTS.md"])

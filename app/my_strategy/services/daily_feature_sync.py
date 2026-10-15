@@ -23,6 +23,106 @@ from my_strategy.core.tz import local_now
 class SyncCancelled(RuntimeError): pass
 
 
+class SyncTargetDateUnavailable(ValueError): pass
+
+
+class _NativeResourceBusy(RuntimeError):
+    def __init__(self, details):
+        self.details = details
+        super().__init__(details['error'])
+
+
+def _native_resource_busy(*, raw_db_path, source_root, artifacts_root, check_cancel=None):
+    """A live producer's open run lock blocks new work, not input qualification.
+
+    Native CLI jobs do not own a Fluent lease. Bind their actual process and
+    resources here; a stale status or recycled PID alone must never block work.
+    """
+    from datetime import datetime
+
+    def application(value):
+        root = Path(value).expanduser().resolve()
+        return root / 'app' if (root / 'app/my_strategy').is_dir() else root
+
+    def option(command, name):
+        for index, value in enumerate(command):
+            if value == name and index + 1 < len(command):
+                return command[index + 1]
+            if value.startswith(name + '='):
+                return value[len(name) + 1:]
+        return None
+
+    def resolved(value, cwd):
+        path = Path(value).expanduser()
+        return (path if path.is_absolute() else cwd / path).resolve()
+
+    _cancel(check_cancel)
+    producer = application(source_root or PROJECT_ROOT)
+    artifacts = Path(artifacts_root).expanduser().resolve()
+    warehouse = Path(raw_db_path).expanduser().resolve()
+    runs = artifacts / 'runs'
+    for path in sorted(runs.glob('*/reports/native_prepare_status.json')):
+        _cancel(check_cancel)
+        try:
+            folder = path.parent.parent
+            if not folder.resolve().is_relative_to(runs.resolve()) or folder.is_symlink():
+                continue
+            status = json.loads(path.read_text())
+            if status.get('status') != 'running' or status.get('run_id') != folder.name:
+                continue
+            pid = status.get('owner_pid')
+            if (type(pid) is not int or pid <= 0 or
+                    not isinstance(status.get('attempt_id'), str) or not status['attempt_id']):
+                continue
+            started = datetime.fromisoformat(status['started_at'])
+            if started.tzinfo is None or started.timestamp() > time.time() + 5:
+                continue
+            owner = psutil.Process(pid)
+            birth = owner.create_time()
+            if (not math.isfinite(birth) or birth <= 0 or birth > started.timestamp() or
+                    not owner.is_running() or owner.status() in {'zombie', 'dead'}):
+                continue
+            command, cwd, environment = owner.cmdline(), Path(owner.cwd()).resolve(), owner.environ()
+            worker = '--_worker' in command and any(
+                value == 'my_strategy.scripts.refresh_native_cache' or Path(value).name == 'refresh_native_cache.py'
+                for value in command)
+            if not worker or cwd != producer:
+                continue
+            declared_root = option(command, '--source-root') or environment.get('KHQUANT_PROJECT_ROOT')
+            declared_raw = option(command, '--raw-db') or environment.get('KHQUANT_RAW_DB')
+            declared_artifacts = option(command, '--artifacts-root') or environment.get('KHQUANT_ARTIFACT_ROOT')
+            if not all((declared_root, declared_raw, declared_artifacts)):
+                continue
+            if (application(resolved(declared_root, cwd)) != producer or
+                    resolved(declared_raw, cwd) != warehouse or resolved(declared_artifacts, cwd) != artifacts):
+                continue
+            lock = (path.parent / 'native_preparation.lock').resolve()
+            if not any(Path(item.path).resolve() == lock for item in owner.open_files()):
+                continue
+            header = json.loads((path.parent / 'native_checkpoint.json').read_text())
+            if (header.get('format') != 'native_source_checkpoint' or header.get('run_id') != folder.name or
+                    header.get('checkpoint_hash') != stable_hash({k:v for k,v in header.items() if k != 'checkpoint_hash'})):
+                continue
+            raw_id = header['identity']['raw_source_run_id']
+            if not isinstance(raw_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,179}', raw_id):
+                continue
+            # Recheck ownership after reading metadata; never hold or acquire
+            # the producer's lock, cancel its process, or write its files.
+            latest = json.loads(path.read_text())
+            if (any(latest.get(key) != status.get(key) for key in ('status','owner_pid','attempt_id','started_at','run_id')) or
+                    not owner.is_running() or owner.create_time() != birth):
+                continue
+            return dict(resource_busy=True, compatibility_verified=False,
+                reason_code='native_preparation_resource_busy',
+                blocking_source_native_run_id=folder.name, blocking_raw_source_run_id=raw_id,
+                blocking_native_owner_pid=pid, blocking_native_owner_started=birth,
+                error='已有原生结构准备正在使用本地来源，请待该批次完成后重试。')
+        except (OSError, ValueError, KeyError, TypeError, psutil.Error):
+            # Unknown, expired and dead ownership is not a permanent lease.
+            continue
+    return None
+
+
 def _cancel(check_cancel):
     try:
         requested = check_cancel and check_cancel()
@@ -268,7 +368,8 @@ def _run_native(*, run_dir, price_date, raw_db_path, native_cache_db_path, calen
 
 def sync_daily_features(*, raw_db_path=None, kb_db_path=None, fluent_db_path=None,
                        calendar_run_id=None, sync_id=None, parent_update_id=None,
-                       native_cache_db_path=None, cpu_workers=6, stock_batch_size=360,
+                       required_price_date=None,
+                       native_cache_db_path=None, cpu_workers=1, stock_batch_size=360,
                        kb_request_budget=2000, kb_min_interval=1.3, progress=None,
                        check_cancel=None, source_root=None, artifacts_root=None, config=None,
                        source_native_run_id=None, raw_source_run_id=None):
@@ -279,9 +380,31 @@ def sync_daily_features(*, raw_db_path=None, kb_db_path=None, fluent_db_path=Non
     if type(kb_request_budget) is not int or kb_request_budget < 1: raise ValueError('invalid board request budget')
     if isinstance(kb_min_interval, bool) or not isinstance(kb_min_interval, (int, float)) or not math.isfinite(kb_min_interval) or kb_min_interval < 0:
         raise ValueError('invalid board request interval')
+    if sync_id:
+        prior = _store(fluent_db_path).get_sync(sync_id)
+        if prior and prior['status'] == 'cancelled':
+            raise ValueError('cancelled daily sync is terminal; create a new explicit gap plan')
     path = raw_path(raw_db_path)
     output_root = Path(artifacts_root or ARTIFACT_ROOT).resolve()
+    resource_busy = _native_resource_busy(raw_db_path=path, source_root=source_root,
+        artifacts_root=output_root, check_cancel=check_cancel)
+    if resource_busy:
+        result = dict(status='busy', stage='native_prepare', market_published=False,
+            full_published=False, training_started=False, **resource_busy)
+        if progress: progress({'event': 'feature_sync', **result})
+        return result
     raw = qualified_raw_identity(path, progress=progress, check_cancel=check_cancel)
+    if required_price_date is not None:
+        from datetime import date
+        try:
+            canonical = date.fromisoformat(required_price_date).isoformat()
+        except (TypeError, ValueError) as exc:
+            raise ValueError('required price date must be an ISO YYYY-MM-DD date') from exc
+        if canonical != required_price_date:
+            raise ValueError('required price date must be an ISO YYYY-MM-DD date')
+        if raw['price_date'] != required_price_date:
+            raise SyncTargetDateUnavailable('qualified local price date ' + raw['price_date'] +
+                ' differs from required target date ' + required_price_date)
     dates, calendar_id = _calendar(calendar_run_id)
     if raw['price_date'] not in dates: raise ValueError('actual qualified price date is absent from verified calendar')
     dates = [day for day in dates if day <= raw['price_date']]
@@ -297,6 +420,7 @@ def sync_daily_features(*, raw_db_path=None, kb_db_path=None, fluent_db_path=Non
     if sync_id:
         previous = store.get_sync(sync_id)
         if previous is None: raise ValueError('daily sync checkpoint was not found')
+        if previous['status'] == 'cancelled': raise ValueError('cancelled daily sync is terminal')
         frozen = dict(previous['input_identity'])
         for key in ('kb_snapshot_hash', 'republish_generation'): frozen.pop(key, None)
         if not (source_native_run_id or raw_source_run_id) and frozen.get('prepared_source'):
@@ -390,6 +514,9 @@ def sync_daily_features(*, raw_db_path=None, kb_db_path=None, fluent_db_path=Non
             native = checkpoint.get('native_result')
             stage('native_prepare')
             if not native:
+                resource_busy = _native_resource_busy(raw_db_path=path, source_root=source_root,
+                    artifacts_root=output_root, check_cancel=check_cancel)
+                if resource_busy: raise _NativeResourceBusy(resource_busy)
                 native = _run_native(run_dir=run_dir, price_date=raw['price_date'], raw_db_path=path,
                     native_cache_db_path=native_cache_db_path, calendar_run_id=calendar_id,
                     cpu_workers=cpu_workers, stock_batch_size=stock_batch_size,
@@ -416,6 +543,9 @@ def sync_daily_features(*, raw_db_path=None, kb_db_path=None, fluent_db_path=Non
     except (SyncCancelled, KeyboardInterrupt) as exc:
         summary.update(status='cancelled', error=str(exc) or 'daily sync interrupted')
         store.finish_sync(sync_id, status='cancelled', result=summary, error=summary['error'])
+    except _NativeResourceBusy as exc:
+        summary.update(status='partial', **exc.details)
+        store.finish_sync(sync_id, status='partial', result=summary, error=summary['error'])
     except Exception as exc:
         summary.update(status='partial' if summary['market_published'] else 'failed', error=str(exc))
         store.finish_sync(sync_id, status=summary['status'], result=summary, error=str(exc))

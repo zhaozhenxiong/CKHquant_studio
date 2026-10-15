@@ -19,11 +19,12 @@ from my_strategy.services.czsc_artifact_integrity import model_hash
 
 
 ROOT_FILES = (".env.example", ".env.native.example", ".gitignore", "README.md", "INSTALL_NATIVE.md", "RELEASE_NOTES.md",
-              "RELEASE_VALIDATION.md", ".gitattributes", "pyproject.toml", "setup.py", "MANIFEST.in", "runtime-manifest.json",
+              "RELEASE_VALIDATION.md", "RUNBOOK.md", ".gitattributes", "pyproject.toml", "setup.py", "MANIFEST.in", "runtime-manifest.json",
               "LICENSE", "install.py", "install.bat", "install.command", "khquant-native.bat", "khquant-native.sh", "khquant.sh")
 EXCLUDED_NAMES = {".git", ".scratch", ".venv", ".venv-win", "venv", "__pycache__", ".pytest_cache",
                   ".ruff_cache", ".mypy_cache", ".claude", ".codex", ".serena", "node_modules", ".env",
                   "target", "build", "dist", ".runtime-build", ".runtime-wheels", "AI_CHANGELOG.md",
+                  "kronos_model",
                   ".DS_Store", "Thumbs.db"}
 
 
@@ -413,13 +414,14 @@ def _contents(source: Path, target: Path, include_data: bool, include_artifacts:
                 connection.commit()
     for run in selected_runs:
         copy_path_consistently(run, target / "app/my_strategy/artifacts/runs" / run.name, ignore=_ignore)
-    (target / "RUNBOOK.md").write_text(
-        "# KHQuant CZSC portable package\n\nRun `python install.py` from this directory. "
-        "Use `python -m my_strategy.cli package --verify .` from this directory to verify the payload. "
-        "Runtime paths resolve from `app`; the raw market database is an input. "
-        "Code-only is the default. Data and model/report/calendar state are optional; "
-        "saved watchlist records require the separate --include-personal export option. "
-        "Run `python install.py --device auto` to select available CPU, CUDA or Apple MPS support.\n", encoding="utf-8")
+    if not (target / "RUNBOOK.md").is_file():
+        (target / "RUNBOOK.md").write_text(
+            "# KHQuant CZSC portable package\n\nRun `python install.py` from this directory. "
+            "Use `python -m my_strategy.cli package --verify .` from this directory to verify the payload. "
+            "Runtime paths resolve from `app`; the raw market database is an input. "
+            "Code-only is the default. Data and model/report/calendar state are optional; "
+            "saved watchlist/holdings require the separate --include-personal export option. "
+            "Run `python install.py --device auto` to select available CPU, CUDA or Apple MPS support.\n", encoding="utf-8")
     return write_integrity_manifest(target, source_project_root=app, filename="image-manifest.json",
                                     reject_external_symlinks=True, metadata={"architecture": "czsc",
                                     "include_data": include_data, "include_artifacts": include_artifacts,

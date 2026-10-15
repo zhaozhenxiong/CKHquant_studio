@@ -193,6 +193,34 @@ process.stdout.write(evidence.agentOverviewHtml(row));
     assert "权重" not in html and "实际贡献" not in html and "高收益" not in html
 
 
+def test_reference_target_change_explains_probability_levels_and_zero_target_source_sell():
+    source = Path(__file__).parents[1] / "web_dashboard/static/js/chart_evidence.js"
+    script = r"""
+const ui = require(process.argv[1]), assert = require('node:assert/strict');
+const plan={schema:'reference_position_v1',status:'reduce_exposure',target_position_fraction:.1,
+  previous_reference_target:.2,change_fraction:-.1,probability_edge:.2,
+  continuous_target_fraction:.1,risk_cap_level_fraction:.2,position_change_threshold_fraction:.0175,
+  position_step_fraction:.025,reason_codes:['reference_probability_target_decreased']};
+const row={position_reference:plan,source_reference_points:[],agents:{ma:{status:'scored',p_up:.45,p_down:.25,p_neutral:.3}}};
+const changed=ui.positionHtml(row);
+for(const text of ['参考目标由 20% 至 10%','变化 -10 个百分点','方向优势（涨−跌）20 个百分点',
+  '连续目标 10%','风险上限档位 20%','冻结调整阈值 1.75 个百分点','仓位档位步长 2.5 个百分点',
+  '方向概率优势对应的目标档位下降']) assert(changed.includes(text),text);
+row.position_reference={...plan,status:'scored',target_position_fraction:0,previous_reference_target:0,
+  change_fraction:0,reason_codes:['reference_target_already_zero','reference_source_sell_without_target_to_reduce']};
+row.source_reference_points=[{source:'structure',side:'SELL'}];
+const zero=ui.positionHtml(row);assert(zero.includes('来源 S 独立保留'));
+assert(zero.includes('无目标可继续减少，不重复生成参考减仓 S'));assert(!zero.includes('S · 减少参考仓位'));
+row.position_reference={...plan,status:'stale',stale:true,target_position_fraction:.075,
+  previous_reference_target:.075,change_fraction:0,retained_target_exceeds_risk_cap:true,
+  reason_codes:['reference_input_or_model_unavailable']};
+const retained=ui.positionSummaryHtml(row);assert(retained.includes('陈旧参考目标已超过当日可用风险上限'));
+assert(retained.includes('本日无新调整'));assert(!retained.includes('S ·'));
+"""
+    result = subprocess.run(["node", "-e", script, str(source)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
 def test_reference_factory_position_defaults_match_training_and_auto_inherits_model():
     from my_strategy.services.reference_runtime import DEFAULT_POSITION_POLICY
     from my_strategy.services.reference_training import DEFAULTS

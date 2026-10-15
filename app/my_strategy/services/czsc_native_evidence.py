@@ -262,11 +262,18 @@ def _zone_snapshot(zone: Any, available: str, seen: dict[str, dict], finished_ke
 
 def _structure_evidence(bars: pd.DataFrame, raw_quality: np.ndarray, metrics: pd.DataFrame,
                         settings: dict, czsc_config: dict | None,
-                        calendar: _VerifiedCalendar) -> tuple[list, list, list, list]:
-    session = CzscSession(str(bars.iloc[0].symbol), strategy_config(czsc_config), len(bars),
-                          collect_confirmations=False, create_position=False)
+                        calendar: _VerifiedCalendar, *, resume_state=None, state_sink=None) -> tuple[list, list, list, list]:
+    from my_strategy.services.czsc_incremental_state import dump_session, restore_session
+    session = restore_session(resume_state['session']) if resume_state else CzscSession(
+        str(bars.iloc[0].symbol), strategy_config(czsc_config), len(bars),
+        collect_confirmations=False, create_position=False)
     facts: list[dict] = []; evaluations: list[dict] = []; daily_events: list[list] = []; auxiliary: list[dict] = []
     seen: dict[str, dict] = {}; zone_seen: dict[str, dict] = {}; active: dict[str, dict] = {}; invalidated: dict[str, dict] = {}
+    start_index=0
+    if resume_state:
+        start_index=resume_state['rows']
+        if not 0 < start_index < len(bars): raise ValueError('native continuation must append observed bars')
+        seen,zone_seen,active,invalidated=[copy.deepcopy(resume_state[key]) for key in ('seen','zone_seen','active','invalidated')]
     source_bad = ~bars["source"].fillna("").astype(str).isin(VERIFIED_SOURCES).to_numpy() if "source" in bars else np.ones(len(bars), bool)
     trade_bad = ~pd.to_numeric(bars["has_trade_price"], errors="coerce").eq(1).to_numpy() if "has_trade_price" in bars else np.ones(len(bars), bool)
     quantity = bars[["volume", "amount"]].to_numpy(dtype=float)
@@ -276,6 +283,7 @@ def _structure_evidence(bars: pd.DataFrame, raw_quality: np.ndarray, metrics: pd
     for key in ("volume", "amount"):
         engine[key] = engine[key].where(np.isfinite(engine[key]) & (engine[key] >= 0), 0.)
     for i, row in enumerate(engine.itertuples(index=False)):
+        if i < start_index: continue
         date, close = _day(row.date), float(row.close); available = date + "T15:00:00+08:00"
         session.advance_structure(row)
         analysis = session.kas["日线"]; finished = analysis.finished_bis
@@ -408,6 +416,9 @@ def _structure_evidence(bars: pd.DataFrame, raw_quality: np.ndarray, metrics: pd
             "invalidated_event_ids": list(invalidated), "invalidations_at_day": invalidations,
             "reason_codes": [] if eligible else ["native_structure_input_ineligible", *([] if current_span["dependency_calendar_complete"] else ["native_structure_dependency_calendar_incomplete"])]})
         daily_events.append(copy.deepcopy(new))
+    if state_sink is not None:
+        state_sink.update(rows=len(bars), session=dump_session(session), seen=seen,
+            zone_seen=zone_seen, active=active, invalidated=invalidated)
     return facts, evaluations, daily_events, auxiliary
 
 
@@ -594,7 +605,8 @@ def can_reuse_native_wyckoff(prepared: PreparedNativeWyckoff, config: dict | Non
 
 def build_native_evidence(frame: pd.DataFrame, config: dict | None = None, *,
                              market_dates: list[str] | None = None,
-                             prepared_wyckoff: PreparedNativeWyckoff | None = None) -> dict:
+                             prepared_wyckoff: PreparedNativeWyckoff | None = None,
+                             incremental_state: dict | None = None, capture_state: bool = False) -> dict:
     """Enrich a complete single-stock causal prefix; never mutate its old columns.
 
     Optional ``config['native_evidence']`` changes obtain a distinct schema.
@@ -657,9 +669,29 @@ def build_native_evidence(frame: pd.DataFrame, config: dict | None = None, *,
     metrics = _prior_metrics(bars)
     raw_quality = legacy["wyckoff_input_eligible"].to_numpy(dtype=bool)
     scores = _continuous_scores(bars, metrics, raw_quality)
+    structure_state={} if capture_state else None
+    prefix_rows=0
+    if incremental_state:
+        if (incremental_state.get('format')!='native_evidence_state_v1' or
+            incremental_state.get('state_sha256')!=stable_hash({k:v for k,v in incremental_state.items() if k!='state_sha256'})):
+            raise ValueError('native continuation state SHA or schema mismatch')
+        prefix_rows=incremental_state['structure']['rows']
+        if type(prefix_rows) is not int or not 0<prefix_rows<len(bars):
+            raise ValueError('native continuation requires a nonempty strict observed prefix')
+        prefix=bars.iloc[:prefix_rows]
+        actual=stable_hash(_json(prefix.to_dict('records')))
+        prefix_dates=[d for d in (market_dates or []) if d<=_day(prefix.iloc[-1].date)]
+        if (incremental_state.get('schema_hash')!=schema_hash or incremental_state.get('config_hash')!=config_hash or
+            incremental_state.get('raw_prefix_hash')!=actual or incremental_state.get('calendar_prefix_hash')!=stable_hash(prefix_dates)):
+            raise ValueError('native continuation input prefix or contract changed')
     structural, structure_eval, structure_daily, auxiliary = _structure_evidence(bars, raw_quality, metrics,
-        settings, czsc_settings, calendar)
+        settings, czsc_settings, calendar, resume_state=incremental_state['structure'] if incremental_state else None,
+        state_sink=structure_state)
     wyckoff, w_eval, w_daily = _wyckoff_evidence(bars, legacy, metrics, scores, settings, (config or {}).get("wyckoff"))
+    if prefix_rows:
+        frame=frame.iloc[prefix_rows:]; scores=scores.iloc[prefix_rows:]
+        w_eval=w_eval[prefix_rows:];w_daily=w_daily[prefix_rows:]
+        wyckoff=[item for item in wyckoff if item['date']>=_day(frame.iloc[0].date)]
     for item in structure_eval + w_eval:
         item["evidence_schema_hash"] = schema_hash
         item["evidence_config_hash"] = config_hash
@@ -696,9 +728,17 @@ def build_native_evidence(frame: pd.DataFrame, config: dict | None = None, *,
         result[key] = pd.to_numeric(result[key], errors="coerce").astype(float)
     result.attrs.update(native_version=NATIVE_EVIDENCE_VERSION, native_schema_hash=schema_hash,
                         native_semantics=semantics, native_config_hash=config_hash)
-    return {"frame": result, "events": sorted(structural + wyckoff, key=lambda item: (item["date"], item["source"], item["event_id"])),
+    output={"frame": result, "events": sorted(structural + wyckoff, key=lambda item: (item["date"], item["source"], item["event_id"])),
             "evaluations": [{"date": s["date"], "available_at": s["available_at"], "structure": s, "wyckoff": w}
                             for s, w in zip(structure_eval, w_eval)],
             "wyckoff_events": copy.deepcopy(wyckoff), "version": NATIVE_EVIDENCE_VERSION,
             "auxiliary_evaluations": auxiliary, "calendar_provenance": calendar.provenance,
             "config_hash": config_hash, "schema_hash": schema_hash, "semantics": semantics}
+    if capture_state:
+        output['incremental_state']={'format':'native_evidence_state_v1','structure':structure_state,
+            'schema_hash':schema_hash,'config_hash':config_hash,'raw_prefix_hash':stable_hash(_json(bars.to_dict('records'))),
+            'calendar_prefix_hash':stable_hash([d for d in (market_dates or []) if d<=_day(bars.iloc[-1].date)])}
+        output['incremental_state']['state_sha256']=stable_hash(output['incremental_state'])
+        output['incremental']={'native_rows_appended':len(bars)-prefix_rows,'native_prefix_reused':prefix_rows,
+            'wyckoff_mode':'single_stock_vector_replay','wyckoff_rows_replayed':len(bars)}
+    return output

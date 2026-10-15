@@ -14,8 +14,6 @@ SKILL_ROOT = APP_ROOT / "my_strategy" / "skills" / "khquant-ai-agent"
 
 
 def load_module(name: str, path: Path):
-    if not path.is_file():
-        pytest.skip("Optional AI skill tools are excluded from the portable application")
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

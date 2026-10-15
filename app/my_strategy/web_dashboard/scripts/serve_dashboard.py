@@ -8,6 +8,7 @@ import argparse
 import uvicorn
 
 from my_strategy.web_dashboard.config import DEFAULT_HOST, DEFAULT_PORT
+from my_strategy.core.log_retention import dashboard_logging_config
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,6 +29,7 @@ def main(argv: list[str] | None = None) -> int:
         port=args.port,
         factory=True,
         reload=args.reload,
+        log_config=dashboard_logging_config(),
     )
     return 0
 

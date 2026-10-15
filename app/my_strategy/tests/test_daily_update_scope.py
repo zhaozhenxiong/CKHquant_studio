@@ -122,7 +122,7 @@ def test_quality_checks_only_successful_rows_and_never_future_days(monkeypatch):
 
 def test_no_success_does_not_launch_derived_update():
     result = script._sync_after_update(SimpleNamespace(skip_feature_sync=False), {'success': 0}, {})
-    assert result['status'] == 'skipped' and 'no successful' in result['reason']
+    assert result['status'] == 'skipped' and 'no confirmed target-date' in result['reason']
 
 
 def test_failure_summary_survives_trailing_log_and_names_true_quality_error():

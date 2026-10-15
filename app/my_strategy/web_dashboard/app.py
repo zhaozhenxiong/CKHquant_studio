@@ -5,6 +5,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import hmac
 import os
+import threading
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
@@ -24,12 +25,18 @@ def create_app(task_manager: TaskManager | None = None, personal_store: Personal
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         yield
+        await asyncio.to_thread(app.state.light.close)
         await asyncio.to_thread(manager.close)
 
     app = FastAPI(title="KHQuant CZSC 结构研究", version="1.0.1", lifespan=lifespan)
     app.state.tasks = manager
+    app.state.compute_submit_lock = threading.Lock()
     app.state.training = manager.training
     app.state.personal = personal_store or PersonalStore(manager.db_path.parent / "personal_portfolio.db")
+    from my_strategy.services.light_research import LightResearch
+    from my_strategy.web_dashboard.light_api import router as light_router
+    app.state.light = LightResearch(root=manager.db_path.parent / 'light_research')
+    app.include_router(light_router)
 
     @app.middleware("http")
     async def security(request: Request, call_next):
@@ -77,6 +84,7 @@ def create_app(task_manager: TaskManager | None = None, personal_store: Personal
     @app.get("/watchlist")
     @app.get("/training")
     @app.get("/parameters")
+    @app.get("/simulation")
     def shell():
         return FileResponse(STATIC_ROOT / "index.html", headers={"Cache-Control": "no-store"})
 

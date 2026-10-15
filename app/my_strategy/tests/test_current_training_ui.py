@@ -110,7 +110,8 @@ def test_current_shell_has_one_model_and_separate_training_defaults_views():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     shell = Shell()
     shell.feed(html)
-    assert {"training", "parameters"}.issubset(shell.routes)
+    assert set(shell.routes) == {"analysis", "scan", "watchlist", "simulation", "data"}
+    assert 'id="view-training"' in html and 'id="view-parameters"' in html
     for prefix in ("analysis", "scan"):
         assert shell.options[f"{prefix}-model-family"] == ["current"]
         assert f"{prefix}-entry-policy" not in shell.options

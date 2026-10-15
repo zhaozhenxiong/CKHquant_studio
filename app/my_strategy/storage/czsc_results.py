@@ -27,9 +27,16 @@ class ResultStore:
         if not re.fullmatch(r"[\w.-]+", run_id) or run_id in {".", ".."}:
             raise ValueError("Invalid run identity")
         target = self.runs_root / run_id / "reports" / "czsc.json"
+        # Services may have already committed this exact result. The task layer
+        # only needs its reference; avoid rewriting an identical full report.
+        encoded = json.dumps(result, ensure_ascii=False, allow_nan=False)
+        if target.is_file() and target.read_text(encoding='utf-8') == encoded:
+            with closing(sqlite3.connect(self.db_path)) as conn:
+                if conn.execute('SELECT 1 FROM czsc_runs WHERE run_id=?', (run_id,)).fetchone():
+                    return result
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_suffix(f".{uuid.uuid4().hex}.tmp")
-        temporary.write_text(json.dumps(result, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+        temporary.write_text(encoded, encoding="utf-8")
         temporary.replace(target)
         summary = {key: result[key] for key in ("metrics", "coverage", "data_range", "strategy_version", "model_gate", "model_run_id", "category_counts") if key in result}
         with closing(sqlite3.connect(self.db_path)) as conn:

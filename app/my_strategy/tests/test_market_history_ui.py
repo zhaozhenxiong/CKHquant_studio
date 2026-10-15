@@ -59,6 +59,9 @@ assert(html.includes('未知板块'));assert(html.includes('50%')); // Industry 
 assert(html.includes('缺模型不是零分'));assert(html.includes('B/S 与量价评分用于分析参考。'));
 assert(html.includes('当前分类快照映射到历史'));assert(html.includes('需 未评估 · 供 未评估'));
 assert(html.includes('灰色纹理表示无当日行情覆盖'));assert(!html.includes('NaN'));
+const enriched=ui.normalize({...summary,daily:summary.daily.map(day=>({...day,coverage:{...day.coverage,probability_scored:3,risk_geometry_available:2,reference_increase_eligible:1}}))});
+const coverageHtml=ui.viewHtml(enriched,state);
+assert(coverageHtml.includes('方向概率已评分'));assert(coverageHtml.includes('风险计划可用'));assert(coverageHtml.includes('参考增仓资格通过'));
 assert.equal(JSON.stringify(summary),original);
 assert.equal(ui.normalize({...summary,dates:['2026-10-09','2026-10-08']}),null);
 assert.equal(ui.normalize({...summary,daily:[summary.daily[0],summary.daily[0]]}),null);

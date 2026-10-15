@@ -4,17 +4,19 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 from pathlib import Path
+import math
 import re
 import threading
 from typing import Literal
 import uuid
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Request, Query
+from pydantic import BaseModel, Field, ConfigDict
 
 from my_strategy.storage.board_knowledge import BoardKnowledgeStore, _instant
 from my_strategy.core.paths import PROJECT_ROOT
+from my_strategy.web_dashboard.api import compute_submission, submit_compute
 
 router = APIRouter(prefix='/api/boards', tags=['board-knowledge'])
 
@@ -85,6 +87,11 @@ def _compatible_feature(row, store, cutoff=None):
 
 
 def _start_job(request, kind, work, summarize):
+    with compute_submission(request):
+        return _start_job_guarded(request, kind, work, summarize)
+
+
+def _start_job_guarded(request, kind, work, summarize):
     lock = request.app.state.board_job_lock
     if not lock.acquire(blocking=False):
         raise HTTPException(409, '板块更新或特征计算正在运行')
@@ -217,7 +224,7 @@ async def refresh(spec: RefreshSpec, request: Request):
     if not spec.kinds or len(set(spec.kinds)) != len(spec.kinds) or any(kind not in ('industry', 'concept') for kind in spec.kinds):
         raise HTTPException(422, '请选择唯一的行业或概念类型')
     if getattr(request.app.state, 'board_integrated', False):
-        return request.app.state.tasks.submit('board_knowledge', spec.model_dump())
+        return submit_compute(request, 'legacy', 'board_knowledge', spec.model_dump())
     def work(progress):
         from my_strategy.scripts.refresh_board_knowledge import refresh_knowledge
         return refresh_knowledge(db_path=getattr(request.app.state, 'board_db_path', None),
@@ -237,7 +244,7 @@ class FeatureBuildSpec(BaseModel):
 async def build_features(spec: FeatureBuildSpec, request: Request):
     if getattr(request.app.state, 'board_integrated', False):
         if spec.symbols: raise HTTPException(422, '板块发布须完整股票池，不能限定个股')
-        return request.app.state.tasks.submit('board_features', spec.model_dump(exclude={'symbols'}))
+        return submit_compute(request, 'legacy', 'board_features', spec.model_dump(exclude={'symbols'}))
     def work(progress):
         from my_strategy.adapters.czsc_adapter import _connection
         from my_strategy.services.czsc_trend_support import _calendar, VERIFIED_SOURCES
@@ -274,6 +281,8 @@ def job(job_id: str, request: Request):
 def configure_board_routes(app, *, db_path=None, raw_db_path=None, fluent_db_path=None, integrated=False):
     from my_strategy.core.paths import BASIC_FLUENT_DB_PATH
     app.state.board_integrated = integrated
+    if not hasattr(app.state, 'compute_submit_lock'):
+        app.state.compute_submit_lock = threading.Lock()
     app.state.board_fluent_db_path = Path(fluent_db_path) if fluent_db_path else BASIC_FLUENT_DB_PATH
     app.state.board_db_path = Path(db_path) if db_path else None
     app.state.board_raw_db_path = Path(raw_db_path) if raw_db_path else None
@@ -296,6 +305,47 @@ def rankings(request: Request, kind: Literal['industry', 'concept'] = 'industry'
         'capital_basis': 'turnover_amount_proxy'}
 
 
+@router.get('/capital-visualization')
+def capital_visualization(request: Request, kind: Literal['industry', 'concept'] = 'industry',
+                          sort_by: Literal['amount', 'change', 'relative'] = 'amount',
+                          limit: int = Query(default=30, ge=5, le=60), generation_id: str | None = None):
+    """Visualize stored rows only; no price reads, rebuilds or network fetches."""
+    from my_strategy.storage.board_fluent import BoardFluentStore
+    store=BoardFluentStore(request.app.state.board_fluent_db_path,readonly=True)
+    generation=store.get_generation(generation_id) if generation_id else store.current_generation()
+    population=store.boards(kind,generation['generation_id']) if generation else []
+    def finite(value):
+        return isinstance(value,(int,float)) and not isinstance(value,bool) and math.isfinite(value)
+    fields=('board_id','name','kind','board_amount','board_return_1','board_market_amount_share',
+        'board_relative_amount20','coverage','expected_members','effective_members','price_date',
+        'membership_date','snapshot_hash','generation_id','capital_visualization')
+    available=[row for row in population if finite(row.get('board_amount')) and row['board_amount']>=0]
+    def change(row):return (row.get('capital_visualization') or {}).get('amount_change_1')
+    def rank_value(row):
+        if sort_by=='change':return abs(change(row)) if finite(change(row)) else None
+        return row.get('board_relative_amount20') if sort_by=='relative' else row.get('board_amount')
+    ranked=[row for row in available if finite(rank_value(row))]
+    ranked=sorted(ranked,key=lambda row:(-rank_value(row),row['board_id']))[:limit]
+    increases=sorted([row for row in available if finite(change(row)) and change(row)>0],
+        key=lambda row:(-change(row),row['board_id']))[:8]
+    decreases=sorted([row for row in available if finite(change(row)) and change(row)<0],
+        key=lambda row:(change(row),row['board_id']))[:8]
+    def public(row):return {key:row.get(key) for key in fields}
+    prepared=sum(bool((row.get('capital_visualization') or {}).get('history')) for row in available)
+    market_amount=next((row['capital_visualization']['history'][-1].get('market_amount')
+        for row in available if (row.get('capital_visualization') or {}).get('history')),None)
+    return {'rows':[public(row) for row in ranked],
+        'increases':[public(row) for row in increases],'decreases':[public(row) for row in decreases],
+        'generation_id':(generation or {}).get('generation_id'),'price_date':(generation or {}).get('price_date'),
+        'membership_date':(generation or {}).get('membership_date'),'kind':kind,'sort_by':sort_by,
+        'board_count':len(population),'available_board_count':len(available),'prepared_board_count':prepared,
+        'market_amount':market_amount,'needs_rebuild':bool(available and prepared<len(available)),
+        'capital_basis':'turnover_amount_proxy','training_eligible':False,
+        'membership_basis':'fixed_current_snapshot_historical_price_comparison',
+        'comparison_basis':'same_verified_members_on_both_days',
+        'overlapping_boards':True}
+
+
 @router.get('/detail/{board_id}')
 def detail(board_id: str, request: Request, generation_id: str | None = None):
     from my_strategy.storage.board_fluent import BoardFluentStore
@@ -312,15 +362,64 @@ def detail(board_id: str, request: Request, generation_id: str | None = None):
 
 
 class SyncSpec(BaseModel):
+    scope: Literal['full'] | None = None
     resume_sync_id: str | None = None
-    cpu_workers: int = Field(default=6, ge=1, le=16)
+    cpu_workers: int = Field(default=1, ge=1, le=2)
     stock_batch_size: int = Field(default=360, ge=1, le=2000)
 
 
 @router.post('/sync', status_code=202)
 def sync(spec: SyncSpec, request: Request):
     if not getattr(request.app.state, 'board_integrated', False): raise HTTPException(409, '请从主站发起同步')
-    return request.app.state.tasks.submit('board_sync', spec.model_dump())
+    if spec.scope!='full':raise HTTPException(409,'请先预览“补齐结构与特征”差异计划；完整范围必须显式选择 full')
+    return submit_compute(request, 'legacy', 'board_sync', spec.model_dump(exclude={'scope'}))
+
+
+class IncrementalPlanSpec(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    scope: Literal['current_board','selected','watch','held','full']='watch'
+    board_id: str | None = None
+    symbols: list[str] | None = Field(default=None,max_length=50)
+    price_date: str | None = None
+    max_symbols: int = Field(default=20,ge=1,le=100)
+    budget_seconds: int = Field(default=300,ge=1,le=1800)
+
+
+class IncrementalExecutionSpec(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    plan_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+
+
+@router.post('/incremental/plan')
+def incremental_plan(spec:IncrementalPlanSpec,request:Request):
+    from my_strategy.services.incremental_sync import create_plan
+    if not hasattr(request.app.state,'light'):raise HTTPException(409,'请从主站预览补齐计划')
+    try:
+        return create_plan(store=request.app.state.light.store,raw_db_path=request.app.state.board_raw_db_path,
+            kb_db_path=request.app.state.board_db_path,fluent_db_path=request.app.state.board_fluent_db_path,
+            **spec.model_dump())
+    except (ValueError,KeyError,OSError) as exc:raise HTTPException(409,str(exc)) from exc
+
+
+@router.get('/incremental/plans/{plan_id}')
+def incremental_plan_status(plan_id:str,request:Request):
+    from my_strategy.services.incremental_sync import get_plan
+    if not hasattr(request.app.state,'light'):raise HTTPException(409,'请从主站查看补齐计划')
+    try:return get_plan(store=request.app.state.light.store,plan_id=plan_id)
+    except KeyError as exc:raise HTTPException(404,str(exc)) from exc
+
+
+@router.post('/incremental/execute',status_code=202)
+def incremental_execute(spec:IncrementalExecutionSpec,request:Request):
+    from my_strategy.services.incremental_sync import get_plan
+    if not hasattr(request.app.state,'light'):raise HTTPException(409,'请从主站执行补齐计划')
+    try:
+        plan=get_plan(store=request.app.state.light.store,plan_id=spec.plan_id)
+        if plan['status']=='cancelled':raise ValueError('取消的计划不可恢复，请重新预览缺口')
+    except (KeyError,ValueError) as exc:raise HTTPException(409,str(exc)) from exc
+    return submit_compute(request,'light','incremental',{'plan_id':spec.plan_id,
+        'kb_db_path':str(request.app.state.board_db_path) if request.app.state.board_db_path else None,
+        'fluent_db_path':str(request.app.state.board_fluent_db_path)})
 
 
 @router.get('/jobs')

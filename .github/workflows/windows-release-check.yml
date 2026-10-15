@@ -70,19 +70,19 @@ jobs:
           from pathlib import Path
           from zipfile import ZipFile
           assets = Path('.scratch/portable-release')
-          name = 'khquant-0.1.7-py3-none-any.whl'
+          name = 'khquant-1.0.0-py3-none-any.whl'
           wheel = assets / name
           expected = os.environ['APPLICATION_WHEEL_SHA256']
           assert hashlib.sha256(wheel.read_bytes()).hexdigest() == expected, 'Selected application wheel SHA-256 mismatch'
           checksums = dict(line.split('  ', 1)[::-1] for line in (assets / 'SHA256SUMS.txt').read_text(encoding='utf-8').splitlines())
-          archive = assets / 'KHQuant-0.1.7.zip'
+          archive = assets / 'KHQuant-1.0.0.zip'
           assert checksums[name] == expected
           assert hashlib.sha256(archive.read_bytes()).hexdigest() == checksums[archive.name], 'Portable source ZIP SHA-256 mismatch'
-          source_root = assets / 'extracted/KHQuant-0.1.7'
+          source_root = assets / 'extracted/KHQuant-1.0.0'
           with ZipFile(archive) as zipped:
               for member in zipped.infolist():
                   path = Path(member.filename)
-                  assert not path.is_absolute() and path.parts[0] == 'KHQuant-0.1.7'
+                  assert not path.is_absolute() and path.parts[0] == 'KHQuant-1.0.0'
                   assert '..' not in path.parts and '\\' not in member.filename and ':' not in member.filename
                   assert not stat.S_ISLNK(member.external_attr >> 16), 'Release ZIP must not contain symbolic links'
               zipped.extractall(source_root.parent)
@@ -101,7 +101,7 @@ jobs:
                           str((source_root / 'app/vendor/wheels').resolve()), '--device', 'cpu'], check=True)
       - if: ${{ inputs.portable_run_id == '' }}
         run: .venv-release/Scripts/python.exe -m pip wheel . --no-deps --no-build-isolation --wheel-dir .scratch/release-wheels
-      - run: .venv-release/Scripts/python.exe -m pip install --no-deps --force-reinstall .scratch/release-wheels/khquant-0.1.7-py3-none-any.whl
+      - run: .venv-release/Scripts/python.exe -m pip install --no-deps --force-reinstall .scratch/release-wheels/khquant-1.0.0-py3-none-any.whl
       - env:
           PORTABLE_RUN_ID: ${{ inputs.portable_run_id }}
         run: |
@@ -112,8 +112,8 @@ jobs:
           import my_strategy
           path = Path(my_strategy.__file__).resolve()
           assert path.is_relative_to(Path(sys.prefix).resolve()) and 'site-packages' in path.parts
-          assert importlib.metadata.version('khquant') == '0.1.7'
-          wheel = Path('.scratch/release-wheels/khquant-0.1.7-py3-none-any.whl')
+          assert importlib.metadata.version('khquant') == '1.0.0'
+          wheel = Path('.scratch/release-wheels/khquant-1.0.0-py3-none-any.whl')
           wheel_sha = hashlib.sha256(wheel.read_bytes()).hexdigest()
           direct = json.loads(importlib.metadata.distribution('khquant').read_text('direct_url.json'))
           assert direct['archive_info']['hashes']['sha256'] == wheel_sha
@@ -122,7 +122,7 @@ jobs:
           expected_native = next(entry for entry in index['wheels'] if entry['filename'].endswith('win_amd64.whl'))
           native_direct = json.loads(importlib.metadata.distribution('czsc').read_text('direct_url.json'))
           assert native_direct['archive_info']['hashes']['sha256'] == expected_native['sha256']
-          identity = {'version': '0.1.7', 'package_path': str(path), 'prefix': sys.prefix,
+          identity = {'version': '1.0.0', 'package_path': str(path), 'prefix': sys.prefix,
                       'application_wheel_sha256': wheel_sha,
                       'native_wheel_sha256': expected_native['sha256'],
                       'portable_run_id': os.environ['PORTABLE_RUN_ID'] or None,
@@ -130,7 +130,7 @@ jobs:
                       'application_import': 'installed wheel site-packages'}
           Path('installation-windows-identity.json').write_text(json.dumps(identity, indent=2), encoding='utf-8')
           '@ | .venv-release/Scripts/python.exe -I -
-      - run: .venv-release/Scripts/python.exe app/verify_installation.py --device cpu --output installation-windows.json
+      - run: .venv-release/Scripts/python.exe -I app/verify_installation.py --device cpu --output installation-windows.json
       - uses: actions/upload-artifact@v4
         with:
           name: Windows-bundled-release-verification
@@ -139,4 +139,4 @@ jobs:
           path: |
             installation-windows.json
             installation-windows-identity.json
-            .scratch/release-wheels/khquant-0.1.7-py3-none-any.whl
+            .scratch/release-wheels/khquant-1.0.0-py3-none-any.whl

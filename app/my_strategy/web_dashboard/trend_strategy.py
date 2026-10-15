@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 from collections import Counter
+import inspect
 import multiprocessing
 
 from my_strategy.core.run_context import create_run_context, stable_hash
@@ -129,6 +130,9 @@ def analyze_trend_consensus(*, symbol, start="2026-01-01", end=None, as_of=None,
     out["usage_mode"] = usage_mode
     out["analysis_mode"] = "reference"
     out["structure_only"] = bool(structure_only)
+    if structure_only:
+        from my_strategy.web_dashboard.structure_projection import structure_projection
+        out = structure_projection(out)
     return _json(out)
 
 
@@ -155,6 +159,27 @@ def _stock_worker(payload):
     return symbol, item, overlay
 
 
+def _scan_progress_reporter(progress):
+    """Add failure counts where supported, retaining three-argument callbacks."""
+    if not progress:
+        return None
+    try:
+        signature = inspect.signature(progress)
+    except (TypeError, ValueError):
+        # Opaque callables keep the existing three-positional-argument contract.
+        return lambda stage, current, total, failed: progress(stage, current, total)
+    try:
+        signature.bind("scan", 0, 0, failed=0)
+    except TypeError:
+        parameter = signature.parameters.get("failed")
+        if parameter is not None and parameter.kind == inspect.Parameter.POSITIONAL_ONLY:
+            signature.bind("scan", 0, 0, 0)
+            return lambda stage, current, total, failed: progress(stage, current, total, failed)
+        signature.bind("scan", 0, 0)
+        return lambda stage, current, total, failed: progress(stage, current, total)
+    return lambda stage, current, total, failed: progress(stage, current, total, failed=failed)
+
+
 def _batch(symbols, end, dates, params, workers, *, progress=None, check_cancel=None):
     from my_strategy.adapters.czsc_adapter import latest_market_date
     vintage_end = latest_market_date()
@@ -168,7 +193,8 @@ def _batch(symbols, end, dates, params, workers, *, progress=None, check_cancel=
         overlay = reference_overlay(item["features"], dates, as_of=end,
             source_context_hash=source_context, prepared_native=pack, **values)
         return symbol, item, overlay
-    done = 0
+    report_progress = _scan_progress_reporter(progress)
+    done = failed = 0
     if int(workers or 1) <= 1:
         for payload in payloads:
             if check_cancel:
@@ -176,10 +202,11 @@ def _batch(symbols, end, dates, params, workers, *, progress=None, check_cancel=
             try:
                 yield infer(_stock_worker(payload)), None
             except Exception as exc:
+                failed += 1
                 yield None, {"symbol": payload[0], "error": f"{type(exc).__name__}: {exc}"}
             done += 1
-            if progress:
-                progress("多源参考分析", done, len(payloads))
+            if report_progress:
+                report_progress("多源参考分析", done, len(payloads), failed)
         return
     pool = ProcessPoolExecutor(max_workers=int(workers), mp_context=multiprocessing.get_context("spawn"))
     queued = iter(payloads)
@@ -202,12 +229,13 @@ def _batch(symbols, end, dates, params, workers, *, progress=None, check_cancel=
                 try:
                     value = infer(future.result())
                 except Exception as exc:
+                    failed += 1
                     yield None, {"symbol": symbol, "error": f"{type(exc).__name__}: {exc}"}
                 else:
                     yield value, None
                 done += 1
-                if progress:
-                    progress("多源参考分析", done, len(payloads))
+                if report_progress:
+                    report_progress("多源参考分析", done, len(payloads), failed)
                 if check_cancel:
                     check_cancel()
                 submit_next()
@@ -300,5 +328,6 @@ def scan_trend_consensus(*, symbols=None, start="2026-01-01", end=None, model_ru
     out["calendar_run_id"] = calendar_id
     out["market_history"] = history.finish()
     history_store.finish(context.run_id, out["market_history"])
-    _save(context.subdir("reports") / "trend_scan.json", out)
+    # One canonical result, indexed once. Historical trend_scan.json remains
+    # readable in old runs, but new scans do not duplicate the full payload.
     return result_store.save("scan", out)

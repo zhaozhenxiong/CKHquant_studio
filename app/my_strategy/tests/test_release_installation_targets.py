@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import runpy
+from copy import deepcopy
 from urllib.error import HTTPError
 
 import pytest
@@ -20,7 +21,7 @@ def no_model_installation_probe(monkeypatch):
         "reference_delta": 0., "change_basis": "previous_reference_target_for_same_symbol",
         "risk_budget_fraction": .01, "stale": True, "predictive_gate_passed": False, "action": "WAIT"}
     result = {"strategy_version": "reference_position_v1", "research": {"model_run_id": None, "account_simulated": False},
-              "run_id": "installation-analysis", "publication_allowed": False,
+              "preview": True, "saved": False, "preview_id": "a"*64, "reused": False, "publication_allowed": False,
               "analysis_mode": "reference", "account_scope": "none", "account_actions": None,
               "source_reference_points": [], "reference_points": [],
               "chart_evidence": {"statistics": {"visible_window": {"broker_fills": 0}}, "rows": [{
@@ -34,7 +35,14 @@ def no_model_installation_probe(monkeypatch):
         calls.append((base, path, method, body))
         if path == "/api/training/status":
             return status
+        if path == '/api/runs?kind=analysis&limit=200':return {'runs': []}
         assert path == "/api/analysis" and method == "POST"
+        if body.get('research') is False:
+            count=sum(call[1]=='/api/analysis' and call[3].get('research') is False for call in calls)
+            return {'preview':True,'saved':False,'preview_id':'b'*64,'reused':count>1,
+                'projection_version':'structure_sources_v1','capabilities':{'source_evidence':True,
+                    'direction_model':False,'reference_position':False,'simulated_account':False},
+                'reference_points':[],'direction_points':[],'request':deepcopy(body)}
         return result
 
     monkeypatch.setattr(verify_installation, "request", request)
@@ -49,8 +57,38 @@ def test_installation_verifier_accepts_only_current_untrained_default(no_model_i
     assert result["publication_allowed"] is False and result["analysis_rows"] == 1
     assert result["account_simulated"] is False and result["unqualified_allocation_blocked"] is True
     assert result["target_position_fraction"] == result["change_fraction"] == 0. and result["stale"]
-    assert calls[1][3] == {"symbol": "000001.SZ", "start": "2024-01-01", "end": "2024-12-30",
+    assert result['preview'] and not result['saved'] and result['run_id'] is None
+    assert result['permanent_analysis_runs_unchanged'] and result['source_preview_cache']['same_request_cache_reused']
+    assert calls[2][3] == {"symbol": "000001.SZ", "start": "2024-01-01", "end": "2024-12-30",
                     "model_family": "current", "calendar_run_id": "fixture-calendar", "device": "cpu"}
+
+
+@pytest.mark.parametrize('change',[
+    lambda r:r.pop('preview_id'),
+    lambda r:r.update(preview_id='not-a-cache-identity'),
+    lambda r:r.update(run_id='unexpected-permanent-run'),
+    lambda r:r.update(run_context={}),
+    lambda r:r.update(saved=True),
+])
+def test_installation_reference_requires_a_real_unsaved_preview(no_model_installation_probe,change):
+    verify,_,result,_=no_model_installation_probe
+    change(result)
+    with pytest.raises(RuntimeError,match='preview identity'):
+        verify('http://isolated','fixture-calendar','2024-12-30')
+
+
+def test_installation_preview_cannot_create_an_unreported_permanent_run(no_model_installation_probe,monkeypatch):
+    import verify_installation
+    verify,_,_,_=no_model_installation_probe
+    original=verify_installation.request;reads=[]
+    def request(base,path,method='GET',body=None):
+        if path=='/api/runs?kind=analysis&limit=200':
+            reads.append(path)
+            if len(reads)>1:return {'runs':[{'run_id':'hidden-run','kind':'analysis'}]}
+        return original(base,path,method,body)
+    monkeypatch.setattr(verify_installation,'request',request)
+    with pytest.raises(RuntimeError,match='permanent analysis run'):
+        verify('http://isolated','fixture-calendar','2024-12-30')
 
 
 @pytest.mark.parametrize("key,value", [

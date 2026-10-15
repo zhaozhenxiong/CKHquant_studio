@@ -4,6 +4,8 @@ from __future__ import annotations
 import copy
 from collections import Counter, defaultdict
 from functools import lru_cache
+import hashlib
+import json
 import math
 from pathlib import Path
 
@@ -30,6 +32,12 @@ def finite(value):
         return number if math.isfinite(number) else None
     except (ValueError, TypeError):
         return None
+
+
+def _valid_ohlc(bar):
+    opening, high, low, close = (finite(bar.get(field)) for field in ("open", "high", "low", "close"))
+    return bool(all(value is not None and value > 0 for value in (opening, high, low, close))
+        and high >= max(opening, close, low) and low <= min(opening, close, high))
 
 
 def validate_position_policy(config=None):
@@ -76,12 +84,17 @@ class ReferencePositionPath:
         if current_position_fraction is not None and (current is None or not 0 <= current <= 1):
             raise ValueError("当前仓位比较输入必须为0到1之间的有限数")
         reasons = list(reason_codes)
-        usable = bool(scored and up is not None and down is not None and 0 <= up <= 1
-            and 0 <= down <= 1 and up + down <= 1 + 1e-6 and cap is not None and 0 <= cap <= 1)
+        probability_scored = bool(scored and up is not None and down is not None
+            and 0 <= up <= 1 and 0 <= down <= 1 and up + down <= 1 + 1e-6)
+        risk_available = cap is not None and 0 <= cap <= 1
+        usable = probability_scored and risk_available
+        cap_level = (math.floor((min(cap, policy["max_stock_weight"]) + 1e-12)
+            / policy["position_step"]) * policy["position_step"] if risk_available else None)
+        threshold = policy["position_step"] / 2 + policy["hysteresis"]
         edge, score, continuous = None, None, None
         target = previous
         if not usable:
-            reasons.append("reference_input_or_model_unavailable")
+            reasons.append("reference_position_inputs_unavailable")
             status = "stale"
             # An observed breach of an already frozen boundary is a separate
             # risk fact. Missing probabilities alone can never manufacture it.
@@ -95,7 +108,6 @@ class ReferencePositionPath:
             cap = min(cap, policy["max_stock_weight"])
             # The ceiling may drift every day. Quantize it down before any
             # allocation so all target changes remain whole reference levels.
-            cap_level = math.floor((cap + 1e-12) / policy["position_step"]) * policy["position_step"]
             continuous = cap * score
             if hard_invalidation:
                 target = 0.0
@@ -110,7 +122,6 @@ class ReferencePositionPath:
                 reasons.append("reference_wait_band")
             else:
                 step = policy["position_step"]
-                threshold = step / 2 + policy["hysteresis"]
                 if abs(continuous - previous) + 1e-12 >= threshold:
                     target = min(cap_level, max(0.0, math.floor(continuous / step + .5) * step))
                 target = min(target, cap_level)
@@ -124,9 +135,19 @@ class ReferencePositionPath:
             self.stop_price = None
         if usable and target < previous and abs(target - cap_level) < 1e-10:
             reasons.append("reference_risk_cap_tightened")
+        retained_above_cap = bool(not usable and risk_available and target > min(cap, policy["max_stock_weight"]) + 1e-10)
+        if retained_above_cap:
+            reasons.append("reference_stale_target_exceeds_risk_cap")
         self.target = target
         delta = round(target - previous, 10)
         action = "BUY" if delta > 1e-10 else "SELL" if delta < -1e-10 else "WAIT"
+        if action == "BUY":
+            reasons.append("reference_probability_target_increased")
+        elif action == "SELL" and not hard_invalidation and "reference_risk_cap_tightened" not in reasons:
+            reasons.append("reference_probability_target_decreased")
+        elif action == "WAIT" and usable and predictive_passed and abs(edge) > policy["wait_band"]:
+            reasons.append("reference_target_already_zero" if target == 0 and score == 0 else
+                "reference_hysteresis_hold" if abs(continuous - previous) > 1e-12 else "reference_target_unchanged")
         if action == "BUY" and not predictive_passed:
             raise AssertionError("unqualified reference cannot increase exposure")
         self.steps += 1
@@ -142,6 +163,10 @@ class ReferencePositionPath:
             "invalidation_price": prior_stop if hard_invalidation else self.stop_price,
             "previous_frozen_stop_price": prior_stop, "probability_edge": edge,
             "allocation_score": score, "stale": not usable or not predictive_passed,
+            "probability_scored": probability_scored, "risk_geometry_available": risk_available,
+            "position_usable": bool(usable), "retained_target_exceeds_risk_cap": retained_above_cap,
+            "risk_cap_level_fraction": cap_level, "position_step_fraction": policy["position_step"],
+            "position_change_threshold_fraction": threshold,
             "score_status": status, "last_scored_date": self.last_scored_date,
             "initialization": "zero_reference_target" if self.steps == 1 else None,
             "change_basis": "previous_reference_target_for_same_symbol",
@@ -163,14 +188,35 @@ def risk_geometry(frame, policy=None):
     low = pd.to_numeric(frame.low, errors="coerce").astype(float)
     tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
     atr = tr.shift().rolling(14, min_periods=14).mean()
-    boundary = pd.concat([low.shift().rolling(20, min_periods=20).min(),
-                          close - cfg["atr_stop_multiple"] * atr], axis=1).max(axis=1, skipna=False)
+    prior_low = low.shift().rolling(20, min_periods=20).min()
+    atr_boundary = close - cfg["atr_stop_multiple"] * atr
+    boundary = pd.concat([prior_low, atr_boundary], axis=1).max(axis=1, skipna=False)
     distance = (close - boundary) / close
     eligible = ((close > 0) & (boundary > 0) & (atr > 0)
         & distance.between(cfg["min_stop_distance"], cfg["max_stop_distance"]))
     cap = (cfg["risk_budget"] / distance).clip(upper=cfg["max_stock_weight"]).where(eligible)
+    reasons = []
+    for price, prior_atr, prior_floor, stop, gap in zip(close, atr, prior_low, boundary, distance):
+        codes = []
+        if finite(price) is None or price <= 0:
+            codes.append("reference_risk_close_unavailable")
+        if finite(prior_atr) is None or prior_atr <= 0:
+            codes.append("reference_risk_atr_unavailable")
+        if finite(prior_floor) is None or prior_floor <= 0:
+            codes.append("reference_risk_prior_low_unavailable")
+        if finite(stop) is None or stop <= 0:
+            codes.append("reference_risk_boundary_unavailable")
+        elif finite(price) is not None and price > 0 and stop >= price:
+            codes.append("reference_risk_boundary_breached")
+        elif finite(gap) is not None and gap < cfg["min_stop_distance"]:
+            codes.append("reference_risk_distance_below_minimum")
+        elif finite(gap) is not None and gap > cfg["max_stop_distance"]:
+            codes.append("reference_risk_distance_above_maximum")
+        reasons.append(codes)
     return pd.DataFrame({"atr": atr, "stop": boundary.where(eligible), "distance": distance.where(eligible),
-                         "cap": cap, "eligible": eligible}, index=frame.index)
+        "cap": cap, "eligible": eligible, "prior_low20": prior_low, "atr_stop_price": atr_boundary,
+        "diagnostic_stop_price": boundary, "diagnostic_stop_distance_fraction": distance,
+        "reason_codes": reasons}, index=frame.index)
 
 
 def _source_reference_events(pack, symbol, cutoff):
@@ -204,6 +250,38 @@ def _gate_passed(value):
     return value is True or isinstance(value, dict) and value.get("passed") is True
 
 
+def _file_sha256(path):
+    with Path(path).open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def _runtime_identity():
+    """Fingerprint inference code independently of frozen training identity."""
+    root = Path(__file__).resolve().parent.parent
+    files = ("services/reference_runtime.py", "services/reference_model.py", "services/czsc_native_evidence.py",
+        "services/czsc_market_features.py", "services/czsc_market_profiles.py", "services/czsc_price_volume_features.py",
+        "services/czsc_liquidity.py", "services/czsc_trend_support.py", "services/czsc_trend_consensus.py",
+        "services/czsc_analysis.py", "adapters/czsc_adapter.py")
+    hashes = {name: _file_sha256(root / name) for name in files}
+    return {"version": "reference_inference_identity_v1", "code_sha256": stable_hash(hashes), "files": hashes}
+
+
+def _model_asset_identity(session, manifest_path, *, run_id, report_sha256, feature_schema_hash):
+    """Use the loaded, verified session's weight identity once per model batch.
+
+    Test doubles without a manifest can identify their real manifest file, but
+    cannot claim that any model weights were verified.
+    """
+    manifest = getattr(session, "manifest", None)
+    if isinstance(manifest, dict) and manifest != json.loads(Path(manifest_path).read_text(encoding="utf-8")):
+        raise ValueError("reference loaded session and manifest identity mismatch")
+    return {"run_id": run_id, "report_sha256": report_sha256,
+        "manifest_sha256": _file_sha256(manifest_path),
+        "weights_sha256": manifest.get("weights_sha256") if isinstance(manifest, dict) else None,
+        "feature_schema_hash": manifest.get("schema_hash", feature_schema_hash)
+            if isinstance(manifest, dict) else feature_schema_hash}
+
+
 def reference_overlay(features, calendar, *, model_run_id=None, model_fold=None,
                       model_mode="historical", as_of=None, device="auto", source_context_hash=None,
                       consensus_config=None, use_models=True, model_selection_frozen=False,
@@ -234,6 +312,8 @@ def reference_overlay(features, calendar, *, model_run_id=None, model_fold=None,
     if use_models and selected_run is None and not model_selection_frozen:
         selected_run = active_reference_run_id()
     root, report = load_reference_run(selected_run) if use_models and selected_run else (None, None)
+    report_path = Path(root) / "reports" / "reference_training.json" if root else None
+    report_sha256 = _file_sha256(report_path) if report_path and report_path.is_file() else None
     cfg = validate_position_policy({**(report or {}).get("config", {}).get("position", {}),
                                     **(consensus_config or {})})
     if prepared_native is None:
@@ -249,30 +329,57 @@ def reference_overlay(features, calendar, *, model_run_id=None, model_fold=None,
         frame[column] = inputs[column].to_numpy(copy=False)
     frame.attrs.update(inputs.attrs)
     frame["date"] = pd.to_datetime(frame.date).dt.strftime("%Y-%m-%d")
+    valid_quotes = np.array([_valid_ohlc(bar) for bar in frame.to_dict("records")], dtype=bool)
+    frame["input_eligible"] = frame.input_eligible.to_numpy(bool) & valid_quotes
     probs = np.full((len(frame), 3), np.nan, dtype=np.float32)
     resolutions = [None] * len(frame)
+    model_statuses = ["models_disabled" if not use_models else "model_unavailable"] * len(frame)
     groups = defaultdict(list)
     for index, day in enumerate(frame.date):
         selected = model_for_date(report, day, mode=model_mode) if report and use_models else None
         if model_fold and selected and selected.get("name") != model_fold:
+            model_statuses[index] = "fixed_fold_unavailable"
             selected = None
         if selected:
             resolutions[index] = selected
+            model_statuses[index] = "selected"
             if bool(frame.iloc[index].get("input_eligible", False)):
                 groups[str(selected["model_path"])].append(index)
     actual_device = get_default_device(device or "auto")
+    assets_by_path = {}
     inferred = 0
     for path, indices in groups.items():
         manifest = Path(path)
         if manifest.is_dir():
             manifest = manifest / "manifest.json"
         session = _model_session(str(manifest), manifest.stat().st_mtime_ns, actual_device)
+        assets_by_path[path] = _model_asset_identity(session, manifest,
+            run_id=root.name if root else selected_run, report_sha256=report_sha256,
+            feature_schema_hash=frame.attrs.get("schema_hash"))
         prediction = np.asarray(session.predict(frame.iloc[indices]), dtype=np.float32)
         if prediction.shape != (len(indices), 3):
             raise ValueError("参考模型三分类输出维度错误")
         probs[indices] = prediction
         inferred += len(indices)
     risk_values = risk_geometry(frame, cfg)
+    risk_values.loc[~valid_quotes, "eligible"] = False
+    risk_values.loc[~valid_quotes, ["stop", "distance", "cap"]] = np.nan
+    for index in np.flatnonzero(~valid_quotes):
+        risk_values.iloc[index].reason_codes.append("reference_quote_ohlc_invalid")
+    # Independent cap research needs a verified 20-session price prefix, not
+    # merely a finite cap from sparse/unverified historical observations.
+    risk_quotes = frame.source.isin(VERIFIED_SOURCES).to_numpy() & frame.has_trade_price.eq(1).to_numpy()
+    risk_quotes &= valid_quotes
+    for field in ("open", "high", "low", "close"):
+        values = pd.to_numeric(frame[field], errors="coerce").to_numpy(dtype=np.float64)
+        risk_quotes &= np.isfinite(values) & (values > 0)
+    for index, bar in enumerate(frame.to_dict("records")):
+        risk_quotes[index] &= (not bool(bar.get("wyckoff_corporate_action_suspected", False))
+            and observable(bar.get("available_at"), str(bar["date"])[:10] + "T15:00:00+08:00"))
+    session_positions = pd.Index([str(day)[:10] for day in calendar]).get_indexer(frame.date)
+    prior_positions = np.r_[np.full(20, -1000), session_positions[:-20]][:len(frame)]
+    risk_history_reliable = (pd.Series(risk_quotes).rolling(21, min_periods=21).min().eq(1).to_numpy()
+        & (session_positions >= 0) & (session_positions - prior_positions == 20))
     native_days = {str(item["date"])[:10]: item for item in pack.get("evaluations", [])}
     source_by_day = defaultdict(list)
     for event in _source_reference_events(pack, str(frame.iloc[0].symbol), cutoff):
@@ -284,39 +391,69 @@ def reference_overlay(features, calendar, *, model_run_id=None, model_fold=None,
     symbol = str(frame.iloc[0].symbol)
     for index, bar in enumerate(frame.to_dict("records")):
         day, selected = str(bar["date"])[:10], resolutions[index]
+        asset_identity = assets_by_path.get(str(selected["model_path"]), {}) if selected else {}
         quote, risk = finite(bar.get("close")), risk_values.iloc[index]
         eligible = bool(bar.get("input_eligible", False))
-        scored = bool(selected and eligible and np.isfinite(probs[index]).all() and risk.eligible)
         gate = _gate_passed((selected or {}).get("predictive_gate"))
         up, down, neutral = [finite(value) for value in probs[index]]
-        reasons = []
-        if selected is None:
-            reasons.append("no_effective_reference_model")
-        if not eligible:
-            reasons.append("reference_feature_input_ineligible")
+        valid_probabilities = all(value is not None and 0 <= value <= 1 for value in (up, down, neutral))
+        valid_probabilities = valid_probabilities and abs(up + down + neutral - 1) <= 1e-6
+        probability_scored = bool(selected and eligible and valid_probabilities)
+        probability_reasons = []
+        model_status = model_statuses[index]
+        if model_status == "models_disabled":
+            probability_reasons.append("models_disabled_for_reference")
+        elif model_status == "fixed_fold_unavailable":
+            probability_reasons.append("reference_fixed_fold_unavailable")
+        elif selected is None:
+            probability_reasons.append("no_effective_reference_model")
+        elif not eligible:
+            model_status = "input_ineligible"
+            probability_reasons.append("reference_feature_input_ineligible")
+            if not valid_quotes[index]:
+                probability_reasons.append("reference_quote_ohlc_invalid")
+            probability_reasons.extend(bar.get("reason_codes") or [])
+        elif not valid_probabilities:
+            model_status = "probability_invalid"
+            probability_reasons.append("reference_probability_output_invalid")
+        else:
+            model_status = "scored"
+        if not probability_scored:
+            up, down, neutral = None, None, None
+        reasons = list(dict.fromkeys(probability_reasons))
         if not risk.eligible:
             reasons.append("reference_risk_geometry_unavailable")
-        quote_reliable = (quote is not None and bar.get("source") in VERIFIED_SOURCES
+            reasons.extend(risk.reason_codes)
+        if selected is not None and not gate:
+            reasons.append("reference_predictive_gate_pending")
+        quote_reliable = (valid_quotes[index] and bar.get("source") in VERIFIED_SOURCES
             and bar.get("has_trade_price") == 1 and not bool(bar.get("wyckoff_corporate_action_suspected", False))
             and observable(bar.get("available_at"), day + "T15:00:00+08:00"))
         invalid = quote_reliable and path.stop_price is not None and quote <= path.stop_price
         position = path.advance(day=day, p_up=up, p_down=down, risk_cap=risk.cap,
-            stop_price=risk.stop, scored=scored, predictive_passed=gate,
+            stop_price=risk.stop, scored=probability_scored, predictive_passed=gate,
             hard_invalidation=invalid, current_position_fraction=current_position_fraction,
             reason_codes=reasons)
         risk_plan = {"status": "available" if risk.eligible else "unavailable", "date": day,
             "reference_price": quote, "reference_price_date": day, "reference_price_source": "signal_day_close",
             "stop_price": finite(risk.stop), "invalidation_price": finite(risk.stop),
             "stop_distance_fraction": finite(risk.distance), "atr14": finite(risk.atr),
+            "prior_low20": finite(risk.prior_low20), "atr_stop_price": finite(risk.atr_stop_price),
+            "diagnostic_stop_price": finite(risk.diagnostic_stop_price),
+            "diagnostic_stop_distance_fraction": finite(risk.diagnostic_stop_distance_fraction),
             "risk_position_cap_fraction": finite(risk.cap), "max_position_fraction": cfg["max_stock_weight"],
             "risk_budget_fraction": cfg["risk_budget"], "source_event_ids": [],
             "reference_price_band": {"low": None, "high": None, "reference_only": True},
-            "reason_codes": [] if risk.eligible else ["reference_risk_geometry_unavailable"],
+            "reason_codes": [] if risk.eligible else ["reference_risk_geometry_unavailable", *risk.reason_codes],
+            "risk_cap_evidence_reliable": bool(risk.eligible and risk_history_reliable[index]),
             "basis": "严格先验ATR与20日低价形成的风险上限；不是积极目标。"}
         position.update(reference_price=quote, reference_price_date=day,
+                        risk_cap_evidence_reliable=risk_plan["risk_cap_evidence_reliable"],
                         reference_price_band=copy.deepcopy(risk_plan["reference_price_band"]))
         action = position["action"]
         source_events = source_by_day.get(day, [])
+        if any(event.get("side") == "SELL" for event in source_events) and position["target_position_fraction"] == 0 and action == "WAIT":
+            position["reason_codes"].append("reference_source_sell_without_target_to_reduce")
         for event in source_events:
             event.update(reference_layer="source", reference_only=True, analysis_mode="reference",
                 account_scope="none", date=day, signal_date=day, direction_eligible=True,
@@ -324,10 +461,14 @@ def reference_overlay(features, calendar, *, model_run_id=None, model_fold=None,
                 source_label={"structure": "结构", "wyckoff": "量价"}.get(event["source"], event["source"]))
         source_points.extend(source_events)
         native = native_days.get(day, {})
-        agents = {"ma": {"label": "联合方向模型", "status": "scored" if scored else "model_unavailable",
-            "p_up": up, "p_down": down, "p_neutral": neutral, "in_scope": scored,
+        agents = {"ma": {"label": "联合方向模型", "status": model_status,
+            "p_up": up, "p_down": down, "p_neutral": neutral, "in_scope": probability_scored,
+            "probability_scored": probability_scored, "risk_geometry_available": bool(risk.eligible),
+            "predictive_gate_passed": gate, "position_usable": position["position_usable"],
             "buy_contribution": None, "sell_contribution": None,
-            "model_identity": copy.deepcopy(selected or {}), "reason_codes": reasons}}
+            "model_asset_identity": copy.deepcopy(asset_identity),
+            "model_identity": {**copy.deepcopy(selected or {}), "model_asset_identity": copy.deepcopy(asset_identity)}
+                if selected else {}, "reason_codes": list(dict.fromkeys(probability_reasons))}}
         for source in ("structure", "wyckoff"):
             evidence = native.get(source, {})
             state = evidence.get("current_state", {})
@@ -356,6 +497,9 @@ def reference_overlay(features, calendar, *, model_run_id=None, model_fold=None,
             "reason_codes": position["reason_codes"], "model_resolution": {**(selected or {}),
                 "model_family": REFERENCE_FAMILY, "schema_family": REFERENCE_FAMILY, "display_name": DISPLAY_NAME,
                 "direction_probabilities": {"p_up": up, "p_down": down, "p_neutral": neutral},
+                "probability_scored": probability_scored, "status": model_status,
+                "predictive_gate_passed": gate, "reason_codes": list(dict.fromkeys(probability_reasons)),
+                "model_asset_identity": copy.deepcopy(asset_identity),
                 "publication_allowed": False, "probability": None},
             "historical_reconstruction": bool((selected or {}).get("research_reconstruction"))}
         if action != "WAIT":
@@ -381,19 +525,50 @@ def reference_overlay(features, calendar, *, model_run_id=None, model_fold=None,
         latest.update(date=cutoff, available_at=cutoff + "T15:00:00+08:00", action="WAIT", direction="UNAVAILABLE",
             reference_action="WAIT", emitted=False, reference_price=None, reference_close=None,
             reference_price_date=cutoff, position_reference=position, events=[], source_reference_points=[],
-            reason_codes=position["reason_codes"], model_resolution={})
+            reason_codes=position["reason_codes"], model_resolution={}, historical_reconstruction=False,
+            buy_base_score=None, sell_base_score=None, high_return_probability=None, exit_probability=None,
+            agents={source: {"label": "联合方向模型" if source == "ma" else "结构" if source == "structure" else "量价",
+                "status": "input_ineligible", "in_scope": False, "probability_scored": False,
+                "risk_geometry_available": False, "predictive_gate_passed": False, "position_usable": False,
+                "p_up": None, "p_down": None, "p_neutral": None, "model_identity": {},
+                "model_asset_identity": {},
+                "buy_contribution": None, "sell_contribution": None,
+                "reason_codes": ["missing_target_market_session"]} for source in ("ma", "structure", "wyckoff")})
+        latest.pop("event_id", None)
         latest["reference_recommendation"] = {"action": "WAIT", "reference_only": True,
-            "analysis_mode": "reference", "reference_price": None, "position_reference": copy.deepcopy(position),
+            "analysis_mode": "reference", "date": cutoff, "signal_date": cutoff,
+            "available_at": cutoff + "T15:00:00+08:00", "reference_price": None,
+            "reference_price_date": cutoff, "position_reference": copy.deepcopy(position),
             "basis": "请求日缺少行情；上一参考目标仅作为陈旧记录保留。"}
-        latest["reference_risk_plan"] = {"status": "unavailable", "reference_price": None,
+        latest["reference_risk_plan"] = {"status": "unavailable", "date": cutoff, "reference_price": None,
             "reference_price_date": cutoff, "risk_position_cap_fraction": None,
+            "stop_price": None, "invalidation_price": None, "stop_distance_fraction": None, "atr14": None,
+            "prior_low20": None, "atr_stop_price": None, "diagnostic_stop_price": None,
+            "diagnostic_stop_distance_fraction": None, "risk_cap_evidence_reliable": False,
             "reason_codes": ["missing_target_market_session"]}
+        latest["reference_recommendation"]["reference_risk_plan"] = copy.deepcopy(latest["reference_risk_plan"])
     latest.update(model_family=REFERENCE_FAMILY, schema_family=REFERENCE_FAMILY, display_name=DISPLAY_NAME,
-        model_policy="pinned" if model_fold else "auto" if use_models else "disabled", model_fold=model_fold)
+        model_policy="disabled" if not use_models else "pinned" if model_fold else "auto",
+        model_fold=model_fold if use_models else None)
     prepared = {"version": REFERENCE_FAMILY, "config": cfg, "config_hash": stable_hash(cfg),
         "rows": copy.deepcopy(rows), "events": points, "direction_points": points,
         "mode": "reference", "reference_only": True, "analysis_mode": "reference",
         "candidate_policy": "causal_per_symbol_target_changes"}
+    runtime_identity = _runtime_identity()
+    asset_identities = list({stable_hash(identity): identity for _, identity in sorted(assets_by_path.items())}.values())
+    source_identity = source_context_hash or frame.attrs.get("data_version")
+    if not source_identity:
+        raw_fields = [field for field in ("symbol", "date", "open", "high", "low", "close", "volume", "amount",
+            "source", "has_trade_price", "available_at") if field in frame]
+        source_identity = hashlib.sha256(frame[raw_fields].to_csv(index=False, float_format="%.17g").encode()).hexdigest()
+    reference_context_hash = stable_hash({"symbol": str(frame.iloc[0].symbol), "model_assets": asset_identities,
+        "model_run_id": root.name if root else None,
+        "model_report_sha256": report_sha256, "models_enabled": bool(use_models), "model_fold": model_fold if use_models else None,
+        "usage_mode": model_mode, "output_schema": REFERENCE_FAMILY, "feature_schema_hash": frame.attrs.get("schema_hash"),
+        "calendar_hash": stable_hash([str(day)[:10] for day in calendar]), "source_identity": source_identity,
+        "policy_hash": stable_hash(cfg), "runtime_code_hash": runtime_identity["code_sha256"],
+        "inference_device": actual_device if inferred else "cpu", "numeric_dtype": "float32", "price_geometry_dtype": "float64",
+        "manual_comparison_fraction": current_position_fraction})
     return {"strategy_version": REFERENCE_FAMILY, "display_name": DISPLAY_NAME,
         "analysis_mode": "reference", "reference_only": True, "account_scope": "none",
         "models_enabled": bool(use_models), "structure_only": not use_models,
@@ -403,7 +578,11 @@ def reference_overlay(features, calendar, *, model_run_id=None, model_fold=None,
         "reference_recommendation": copy.deepcopy(latest["reference_recommendation"]),
         "account_actions": None, "latest_decision": latest, "features": frame, "native_pack": pack,
         "wyckoff_events": pack.get("wyckoff_events", []), "usage_mode": model_mode,
-        "model_run_id": root.name if root else None, "model_gate": (report or {}).get("predictive_gate", {"passed": False}),
+        "model_run_id": root.name if root else None,
+        "model_asset_identity": copy.deepcopy((latest.get("agents", {}).get("ma") or {}).get("model_asset_identity", {})),
+        "model_asset_identities": asset_identities, "reference_context_hash": reference_context_hash,
+        "runtime_identity": runtime_identity, "runtime_code_hash": runtime_identity["code_sha256"],
+        "model_gate": copy.deepcopy(latest.get("model_resolution", {}).get("predictive_gate") or {"passed": False}),
         "publication_allowed": False, "source_context_hash": source_context_hash,
         "pricing_assumptions": {"reference_price": "last_observed_signal_day_close", "reference_is_fill": False,
             "scope": "analysis_reference", "account_simulated": False},
