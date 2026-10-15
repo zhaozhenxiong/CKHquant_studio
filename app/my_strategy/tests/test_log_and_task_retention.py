@@ -47,6 +47,32 @@ def test_seven_day_expiry_only_removes_owned_numbered_backups(tmp_path):
     assert dashboard_logging_config(tmp_path)['handlers']['retained']['backupCount'] == 3
 
 
+def test_dashboard_log_bounds_match_bytes_with_windows_newline_default(tmp_path):
+    path = tmp_path / 'web.log'
+    handler = RetainedRotatingFileHandler(path, maxBytes=100, backupCount=3)
+    newlines = []
+
+    def windows_open(filename, mode, **kwargs):
+        # Emulate Windows on every platform; explicit LF must survive rollover.
+        newline = kwargs.pop('newline', '\r\n')
+        newlines.append(newline)
+        return open(filename, mode, newline=newline, **kwargs)
+
+    handler._builtin_open = windows_open
+    try:
+        for _ in range(5):
+            handler.emit(logging.LogRecord('test', logging.INFO, '', 0, '详细信息\n' * 100, (), None))
+    finally:
+        handler.close()
+    files = list(tmp_path.glob('web.log*'))
+    assert len(files) == 4 and len(newlines) == 5
+    assert all(newline == '\n' for newline in newlines)
+    for file in files:
+        payload = file.read_bytes()
+        assert len(payload) <= 100 and payload.endswith(b'\n') and b'\r\n' not in payload
+        assert 'truncated' in payload.decode('utf-8')
+
+
 def test_low_volume_logs_roll_daily_even_while_file_mtime_is_fresh(tmp_path):
     path = tmp_path / 'web.log'
     handler = RetainedRotatingFileHandler(path)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import datetime as dt
 from html.parser import HTMLParser
 import json
@@ -180,7 +181,8 @@ def fixture_database(path: Path) -> list[str]:
             rows.append(("000001.SZ", date.isoformat(), price, price + 0.2, price - 0.2,
                          price + 0.03, 1000000.0, price * 1000000, 1, "synthetic_installation_fixture"))
         date += dt.timedelta(days=1)
-    with sqlite3.connect(path) as connection:
+    # Close after committing so Windows can remove the isolated fixture directory.
+    with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute("CREATE TABLE stock_daily_normalized(stock TEXT,date TEXT,open REAL,high REAL,low REAL,close REAL,volume REAL,amount REAL,has_trade_price INTEGER,source TEXT)")
         connection.execute("CREATE TABLE securities(stock TEXT,name TEXT,first_date TEXT,last_date TEXT,raw_rows INTEGER)")
         connection.executemany("INSERT INTO stock_daily_normalized VALUES (?,?,?,?,?,?,?,?,?,?)", rows)

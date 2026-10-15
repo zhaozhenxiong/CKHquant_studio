@@ -130,7 +130,26 @@ jobs:
                       'application_import': 'installed wheel site-packages'}
           Path('installation-windows-identity.json').write_text(json.dumps(identity, indent=2), encoding='utf-8')
           '@ | .venv-release/Scripts/python.exe -I -
-      - run: .venv-release/Scripts/python.exe -I app/verify_installation.py --device cpu --output installation-windows.json
+      - name: Verify the selected installed release with its matching probe
+        shell: python
+        env:
+          PORTABLE_RUN_ID: ${{ inputs.portable_run_id }}
+          APPLICATION_WHEEL_SHA256: ${{ inputs.application_wheel_sha256 }}
+        run: |
+          import hashlib, os, subprocess
+          from pathlib import Path
+          wheel = Path('.scratch/release-wheels/khquant-1.0.0-py3-none-any.whl')
+          digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+          source = Path('.')
+          if os.environ['PORTABLE_RUN_ID']:
+              assert digest == os.environ['APPLICATION_WHEEL_SHA256'], 'Final application wheel changed'
+              source = Path('.scratch/portable-release/extracted/KHQuant-1.0.0')
+          verifier = source / 'app/verify_installation.py'
+          assert verifier.is_file(), 'Selected release installation probe is missing'
+          executable = str(Path('.venv-release/Scripts/python.exe').absolute())
+          subprocess.run([executable, '-I', str(verifier), '--device', 'cpu',
+                          '--expected-version', '1.0.0', '--expected-wheel-sha256', digest,
+                          '--output', 'installation-windows.json'], check=True)
       - uses: actions/upload-artifact@v4
         with:
           name: Windows-bundled-release-verification

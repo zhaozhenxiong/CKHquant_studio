@@ -90,6 +90,24 @@ def test_asset_hash_rechecked_when_bytes_change_and_no_implicit_download(tmp_pat
         assets.prepare_assets(tmp_path)
 
 
+def test_invalid_asset_rejects_prediction_before_reusing_an_already_loaded_model(tmp_path, monkeypatch):
+    raw = b'{"value": 1}'
+    path = tmp_path / 'config.json'
+    path.write_bytes(raw)
+    monkeypatch.setattr(assets, 'PINNED_ASSETS', ({'path': 'config.json', 'size': len(raw),
+        'sha256': hashlib.sha256(raw).hexdigest(), 'repo': 'test', 'revision': 'frozen'},))
+    assert assets.asset_status(tmp_path)['ready']
+    monkeypatch.setattr(assets, '_stat_identity', lambda _: ('same file metadata',))
+    path.write_bytes(b'{"value": 2}')
+    monkeypatch.setattr(forecasting, '_SINGLETON', {'key': 'previously-loaded', 'model': object()})
+    monkeypatch.setattr(forecasting, '_load_model', lambda *_: pytest.fail('Invalid asset reused the loaded predictor'))
+    frame = bars()
+    future = pd.bdate_range(frame.date.iloc[-1] + pd.Timedelta(days=1), periods=5)
+    with pytest.raises(FileNotFoundError, match='Kronos local assets unavailable'):
+        forecasting.predict(frame, future, symbol='000001.SZ', as_of=str(frame.date.iloc[-1].date()),
+                            lookback=16, device='cpu', asset_root=tmp_path)
+
+
 def test_predict_preserves_samples_and_has_no_production_qualification(monkeypatch, tmp_path):
     frame = bars()
     as_of = str(frame.date.iloc[-1].date())

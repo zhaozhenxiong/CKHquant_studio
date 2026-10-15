@@ -1,13 +1,15 @@
 """Verified native structure outputs, keyed by complete causal inputs.
 
 The coordinator alone reads/writes this SQLite cache. New entries reference
-immutable files once; legacy BLOB entries remain readable. Run paths are hard
-links to the same verified content, never separate full copies.
+immutable files once per filesystem; legacy BLOB entries remain readable. Run
+paths share verified hard links where possible and use verified copies across
+filesystem boundaries.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+import errno
 import gzip
 import hashlib
 import io
@@ -81,8 +83,77 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
+def _cross_device(error):
+    return error.errno == errno.EXDEV or getattr(error, 'winerror', None) == 17
+
+
+def _unlink_native_file(path, *, retained=None):
+    """Remove an owned alias without leaving a retained hard link writable."""
+    path = Path(path)
+    try:
+        path.unlink()
+    except PermissionError as exc:
+        # Windows denies deleting a readonly directory entry. Do not retry a
+        # sharing violation (32), ACL failure on a writable file or other I/O.
+        mode = stat.S_IMODE(path.stat().st_mode)
+        if getattr(exc, 'winerror', None) != 5 or mode & stat.S_IWUSR:
+            raise
+        retained = Path(retained) if retained is not None else None
+        retained_mode = stat.S_IMODE(retained.stat().st_mode) if retained is not None else None
+        path.chmod(mode | stat.S_IWUSR)
+        try:
+            path.unlink()
+        finally:
+            if path.exists(): path.chmod(mode)
+            if retained is not None and retained.exists(): retained.chmod(retained_mode)
+
+
+def remove_native_alias(source, retained, digest):
+    """Delete an explicitly selected run alias, preserving its verified object."""
+    source, retained = Path(source), Path(retained)
+    if (not _sha(digest) or source.is_symlink() or retained.is_symlink()
+            or source.resolve() == retained.resolve()
+            or file_sha256(source) != digest or file_sha256(retained) != digest):
+        raise ValueError('native alias removal SHA/path mismatch')
+    _unlink_native_file(source, retained=retained)
+    if file_sha256(retained) != digest:
+        raise ValueError('native content object changed during alias removal')
+
+
+def _link_verified_file(source, target, digest):
+    """Publish without overwrite; cross-volume copies are verified before linking."""
+    source, target = Path(source), Path(target)
+    if source.is_symlink() or file_sha256(source) != digest:
+        raise ValueError('native content source SHA drift')
+    try:
+        os.link(source, target)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        if not _cross_device(exc): raise
+        # The staging file is on the destination filesystem. A same-filesystem
+        # hard link publishes it atomically without replacing a concurrent file.
+        fd, name = tempfile.mkstemp(prefix='.native-copy-', dir=target.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(fd, 'wb') as output, source.open('rb') as stream:
+                shutil.copyfileobj(stream, output, length=4 * 1024 * 1024)
+                output.flush(); os.fsync(output.fileno())
+            if file_sha256(temporary) != digest:
+                raise ValueError('native cross-volume copy SHA mismatch')
+            try:
+                os.link(temporary, target)
+            except FileExistsError:
+                pass
+        finally:
+            if temporary.exists(): _unlink_native_file(temporary, retained=target if target.exists() else None)
+    if target.is_symlink() or file_sha256(target) != digest:
+        raise ValueError('native content object publication race drift')
+    target.chmod(stat.S_IMODE(target.stat().st_mode) & ~0o222)
+
+
 def retain_file_object(source, root, digest, *, expected_bytes=None):
-    """Keep one immutable physical file, retaining original run paths as links."""
+    """Keep immutable content, sharing run paths only on the same filesystem."""
     source, root = Path(source), Path(root).resolve()
     if not _sha(digest) or source.is_symlink() or not source.is_file():
         raise ValueError('native file object source invalid')
@@ -94,14 +165,12 @@ def retain_file_object(source, root, digest, *, expected_bytes=None):
     if target.exists():
         if file_sha256(target) != digest: raise ValueError('native content object SHA drift')
     else:
-        try:
-            os.link(source, target)
-        except FileExistsError:
-            if file_sha256(target) != digest: raise ValueError('native content object publication race drift')
+        _link_verified_file(source, target, digest)
     if expected_bytes is not None and target.stat().st_size != expected_bytes:
         raise ValueError('native content object byte count mismatch')
     if source.name in ('features.parquet', 'native.json.gz') and not os.path.samefile(source, target):
         share_native_file(source, target, digest)
+    source.chmod(stat.S_IMODE(source.stat().st_mode) & ~0o222)
     target.chmod(stat.S_IMODE(target.stat().st_mode) & ~0o222)
     return target
 
@@ -114,12 +183,20 @@ def share_native_file(source, target, digest):
     if os.path.samefile(source, target): return False
     fd, alias = tempfile.mkstemp(prefix='.native-link-', dir=source.parent)
     os.close(fd); os.unlink(alias)
+    original_mode = stat.S_IMODE(source.stat().st_mode)
     try:
-        os.link(target, alias)
+        try:
+            os.link(target, alias)
+        except OSError as exc:
+            if _cross_device(exc): return False
+            raise
         if os.name == 'nt': source.chmod(source.stat().st_mode | 0o200)
         os.replace(alias, source)
     finally:
-        if os.path.exists(alias): os.unlink(alias)
+        if os.path.exists(alias):
+            _unlink_native_file(alias, retained=target)
+            source.chmod(original_mode)
+        target.chmod(stat.S_IMODE(target.stat().st_mode) & ~0o222)
     return True
 
 
@@ -321,14 +398,18 @@ class NativeCacheEntry:
                 source = self.features_path if filename == 'features.parquet' else self.native_path
                 if source:
                     if file_sha256(source) != _hash(blob): raise ValueError('native content object changed before materialization')
-                    os.link(source, temporary / filename)
+                    _link_verified_file(source, temporary / filename, _hash(blob))
                 else:
                     # Legacy compatibility only. All new writes are file indexes.
                     with (temporary / filename).open('wb') as output:
                         output.write(blob); output.flush(); os.fsync(output.fileno())
             temporary.replace(target)
         finally:
-            if temporary.exists(): shutil.rmtree(temporary)
+            if temporary.exists():
+                for filename, source in [('features.parquet', self.features_path), ('native.json.gz', self.native_path)]:
+                    alias = temporary / filename
+                    if alias.exists(): _unlink_native_file(alias, retained=source or None)
+                temporary.rmdir()
         return {**raw_record, 'path': str(target / 'features.parquet'), 'sha256': observed['sha256'],
                 'native_path': str(target / 'native.json.gz'), 'native_sha256': observed['native_sha256'],
                 'native_encoding': 'gzip_json', 'native_config_hash': observed['native_config_hash'],

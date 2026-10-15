@@ -18,35 +18,72 @@ PINNED_ASSETS = (
 )
 _LOCK = threading.RLock()
 _VERIFIED: dict[tuple, dict] = {}
+# Configuration bytes are cheap and must never rely on timestamp precision.
+# Only large pinned weights may reuse a full SHA, within this process, for the
+# same file/version and pin contract. No handles or model bytes are retained.
+_MEMO_MIN_BYTES = 1024 * 1024
+_MEMO_LIMIT = 8
+_WINDOWS = os.name == 'nt'
 
 
 def asset_root(path: str | Path | None = None) -> Path:
     return Path(path or os.environ.get("KHQUANT_KRONOS_ROOT") or MY_STRATEGY_ROOT / "kronos_model").expanduser().resolve()
 
 
+def _stat_identity(info) -> tuple:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _memo_version(info) -> tuple | None:
+    # Windows st_ctime is creation time; a same-size edit may also retain the
+    # observed write timestamp. Read the entire pinned weight on each check
+    # instead of treating that tuple as proof that its contents are unchanged.
+    return None if _WINDOWS else _stat_identity(info)
+
+
 def _verify(path: Path, entry: dict) -> dict:
-    stat = path.stat()
-    key = (str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-    with _LOCK:
-        if key in _VERIFIED:
-            return dict(_VERIFIED[key])
-        if stat.st_size != entry["size"]:
+    # Bind every cached success to the expected official contract as well as to
+    # the physical file. A changed pin cannot inherit an earlier verification.
+    contract = json.dumps(entry, sort_keys=True, separators=(',', ':'), allow_nan=False)
+    memo_weight = (entry['path'].endswith('.safetensors') and 'sha256' in entry
+                   and 'git_blob' not in entry and entry['size'] >= _MEMO_MIN_BYTES)
+    with _LOCK, path.open('rb') as handle:
+        before = os.fstat(handle.fileno())
+        if before.st_size != entry['size']:
             raise ValueError(f"Kronos asset size mismatch: {entry['path']}")
-        with path.open("rb") as handle:
-            sha = hashlib.file_digest(handle, "sha256").hexdigest()
-        if "sha256" in entry and sha != entry["sha256"]:
-            raise ValueError(f"Kronos asset SHA mismatch: {entry['path']}")
-        if "git_blob" in entry:
-            raw = path.read_bytes()
-            blob = hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest()
-            if blob != entry["git_blob"]:
-                raise ValueError(f"Kronos configuration identity mismatch: {entry['path']}")
-            json.loads(raw)
-        after = path.stat()
-        if (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns):
-            raise ValueError("Kronos asset changed during verification")
-        result = {"path": entry["path"], "sha256": sha, "size": stat.st_size, "repo": entry["repo"], "revision": entry["revision"]}
-        _VERIFIED[key] = result
+        version = _memo_version(before) if memo_weight else None
+        key = (str(path), contract, version) if version is not None else None
+        cached = _VERIFIED.get(key) if key is not None else None
+        raw = None
+        if cached is None:
+            if not memo_weight:
+                raw = handle.read()
+                sha = hashlib.sha256(raw).hexdigest()
+            else:
+                sha = hashlib.file_digest(handle, 'sha256').hexdigest()
+            if 'sha256' in entry and sha != entry['sha256']:
+                raise ValueError(f"Kronos asset SHA mismatch: {entry['path']}")
+            if 'git_blob' in entry:
+                blob = hashlib.sha1(f'blob {len(raw)}\0'.encode() + raw).hexdigest()
+                if blob != entry['git_blob']:
+                    raise ValueError(f"Kronos configuration identity mismatch: {entry['path']}")
+                json.loads(raw)
+            result = {'path': entry['path'], 'sha256': sha, 'size': before.st_size,
+                      'repo': entry['repo'], 'revision': entry['revision']}
+        else:
+            result = cached
+        after = os.fstat(handle.fileno())
+        if (_stat_identity(after) != _stat_identity(before)
+                or _stat_identity(path.stat()) != _stat_identity(after)
+                or (version is not None and _memo_version(after) != version)
+                or (raw is not None and path.read_bytes() != raw)):
+            raise ValueError('Kronos asset changed during verification')
+        if key is not None and cached is None:
+            for old in [item for item in _VERIFIED if item[0] == str(path)]:
+                del _VERIFIED[old]
+            while len(_VERIFIED) >= _MEMO_LIMIT:
+                del _VERIFIED[next(iter(_VERIFIED))]
+            _VERIFIED[key] = result
         return dict(result)
 
 

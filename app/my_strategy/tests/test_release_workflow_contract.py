@@ -203,3 +203,29 @@ def test_embedded_python_and_isolated_probes_compile():
                     if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
                             and any(isinstance(target, ast.Name) and target.id == 'probe' for target in node.targets)):
                         compile(node.value.value, name + '-isolated-probe', 'exec')
+
+
+@pytest.mark.parametrize('portable', [False, True])
+def test_windows_final_probe_uses_selected_source_and_exact_installed_bytes(tmp_path, monkeypatch, portable):
+    script = next(item['run'] for item in steps('windows-release-check.yml', 'windows')
+                  if item.get('name') == 'Verify the selected installed release with its matching probe')
+    wheel = tmp_path / '.scratch/release-wheels/khquant-1.0.0-py3-none-any.whl'
+    wheel.parent.mkdir(parents=True)
+    wheel.write_bytes(b'verified final wheel')
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    source = tmp_path / '.scratch/portable-release/extracted/KHQuant-1.0.0' if portable else tmp_path
+    verifier = source / 'app/verify_installation.py'
+    verifier.parent.mkdir(parents=True)
+    verifier.write_text('# frozen verifier', encoding='utf-8')
+    monkeypatch.setenv('PORTABLE_RUN_ID', '123' if portable else '')
+    monkeypatch.setenv('APPLICATION_WHEEL_SHA256', digest if portable else '')
+    commands = []
+    monkeypatch.setattr(subprocess, 'run', lambda command, **kwargs: commands.append((command, kwargs)))
+    monkeypatch.chdir(tmp_path)
+    exec(compile(script, 'windows-selected-probe', 'exec'), {})
+    assert len(commands) == 1
+    command, options = commands[0]
+    assert command[1] == '-I' and Path(command[2]).resolve() == verifier
+    assert command[command.index('--expected-wheel-sha256') + 1] == digest
+    assert command[command.index('--expected-version') + 1] == application_version()
+    assert options['check'] is True

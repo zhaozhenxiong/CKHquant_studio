@@ -32,6 +32,12 @@ class RetainedRotatingFileHandler(logging.handlers.RotatingFileHandler):
         self._rollover_at = self._next_midnight(path.stat().st_mtime if path.is_file() else time.time())
         self._expire_backups()
 
+    def _open(self):
+        # Byte accounting below includes LF. Disable platform newline translation
+        # so Windows does not add unbudgeted CR bytes, including within messages.
+        return self._builtin_open(self.baseFilename, self.mode, encoding=self.encoding,
+                                  errors=self.errors, newline="\n")
+
     @staticmethod
     def _next_midnight(timestamp):
         day = datetime.fromtimestamp(timestamp).replace(hour=0, minute=0, second=0, microsecond=0)

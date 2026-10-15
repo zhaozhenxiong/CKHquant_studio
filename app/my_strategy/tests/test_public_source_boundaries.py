@@ -16,9 +16,29 @@ def test_gitignore_covers_kronos_config_tokenizer_and_weights():
              'app/my_strategy/kronos_model/tokenizer/config.json',
              'app/my_strategy/kronos_model/tokenizer/model.safetensors',
              'app/kronos_model/config.json']
-    result = subprocess.run(['git', 'check-ignore', '--no-index', '--stdin'], cwd=ROOT,
-                            input='\n'.join(paths)+'\n', capture_output=True, text=True, timeout=15, check=True)
-    assert set(result.stdout.splitlines()) == set(paths)
+    # Git's stdin protocol is byte-oriented. Text-mode CRLF translation on
+    # Windows would append a literal carriage return to every tested filename.
+    result = subprocess.run(['git', 'check-ignore', '--no-index', '-z', '--stdin'], cwd=ROOT,
+                            input=('\0'.join(paths)+'\0').encode('utf-8'),
+                            capture_output=True, timeout=15, check=True)
+    assert set(filter(None, result.stdout.decode('utf-8').split('\0'))) == set(paths)
+
+
+def test_frozen_vendor_files_disable_checkout_newline_conversion():
+    if not (ROOT / '.git').exists():
+        pytest.skip('Git attributes check requires an actual source checkout')
+    import json
+
+    vendor = ROOT / 'app/vendor/kronos'
+    manifest = json.loads((vendor / 'source_manifest.json').read_text(encoding='utf-8'))
+    paths = ['app/vendor/kronos/' + item['path'] for item in manifest['files']]
+    result = subprocess.run(['git', 'check-attr', '-z', '--stdin', 'text'], cwd=ROOT,
+                            input=('\0'.join(paths)+'\0').encode('utf-8'),
+                            capture_output=True, timeout=15, check=True)
+    fields = result.stdout.decode('utf-8').split('\0')[:-1]
+    assert list(zip(fields[::3], fields[1::3], fields[2::3])) == [
+        (path, 'text', 'unset') for path in paths
+    ]
 
 
 def test_git_source_index_excludes_private_business_and_session_state():

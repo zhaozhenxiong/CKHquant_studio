@@ -7,6 +7,7 @@ removed before returning; only the caller's requested verification report persis
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import json
 import math
 from pathlib import Path
@@ -84,7 +85,8 @@ def incremental_probe(root):
     close = 20 * np.exp(np.cumsum(rng.normal(.0006, .025, count)))
     volume = rng.uniform(600_000, 2_000_000, count)
     raw = root / 'synthetic-prices.db'
-    with sqlite3.connect(raw) as con:
+    # The SQLite transaction context commits but does not release its file handle.
+    with closing(sqlite3.connect(raw)) as con, con:
         con.execute('CREATE TABLE stock_daily_normalized(stock TEXT,date TEXT,open REAL,high REAL,low REAL,close REAL,volume REAL,amount REAL,has_trade_price INTEGER,source TEXT)')
         con.execute('CREATE TABLE securities(stock TEXT,name TEXT,first_date TEXT,last_date TEXT,raw_rows INTEGER)')
         con.executemany('INSERT INTO stock_daily_normalized VALUES (?,?,?,?,?,?,?,?,?,?)', [

@@ -6,6 +6,7 @@ services/macos/*.plist text eol=lf
 
 # Frozen attachment files must retain the bytes recorded in the source manifest.
 app/vendor/czsc/** -text -whitespace
+app/vendor/kronos/** -text -whitespace
 app/my_strategy/web_dashboard/static/vendor/** -text -whitespace
 app/vendor/wheels/*.whl binary
 
