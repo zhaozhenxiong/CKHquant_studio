@@ -10,19 +10,27 @@ from my_strategy.services.light_research import DeadlineStop
 from my_strategy.tests.test_method_scan_acceleration import environment,_children
 
 
-def test_actual_account_spawn_sources_equal_original_with_full_history_and_identity(environment):
+@pytest.mark.parametrize('logical_cpus,expected_workers',[(3,1),(4,2)])
+def test_actual_account_spawn_sources_equal_original_with_full_history_and_identity(environment,monkeypatch,
+        logical_cpus,expected_workers):
+    from my_strategy.services import method_compute
+    monkeypatch.setattr(method_compute.os,'cpu_count',lambda:logical_cpus)
     make,spec,symbols=environment
     serial,_=make('account-serial');parallel,_=make('account-parallel')
     before=_children();stop=DeadlineStop(None,time.monotonic()+120)
     expected=[(s,serial.source(s,spec['end'],stop=stop)) for s in symbols]
-    progress=[]
+    progress=[];stats={}
     actual=list(preparation.prepare_account_sources(parallel,symbols,spec['end'],stop=stop,
-        progress=lambda **v:progress.append(v)))
+        progress=lambda **v:progress.append(v),stats=stats))
     for (symbol,left),(other,right) in zip(expected,actual):
         assert symbol==other
         for index in (0,1):pd.testing.assert_frame_equal(left[index],right[index])
         assert left[2:]==right[2:]
-    assert all(value['cpu_workers']==2 for value in progress)
+    assert progress
+    assert all(value['cpu_workers']==expected_workers for value in progress)
+    assert stats['cpu_workers']==expected_workers
+    assert stats['scheduling']==('spawn_fixed_population' if expected_workers>1 else 'original_serial')
+    assert stats['source_tasks_submitted']==stats['source_tasks_received']==len(symbols)
     assert _children()<=before
 
 
