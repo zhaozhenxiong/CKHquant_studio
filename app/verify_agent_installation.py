@@ -349,6 +349,109 @@ def task_maintenance_probe(root):
         exact_fixture_cleanup=True, production_state_touched=False)
 
 
+def task_lifecycle_probe(root):
+    """Exercise installed task writes with the real, dynamically created index."""
+    import threading
+    import time
+    from types import SimpleNamespace
+    from my_strategy.services.task_maintenance import TaskMaintenance
+    from my_strategy.storage.czsc_results import ResultStore
+    from my_strategy.storage.research_store import ResearchStore
+    from my_strategy.web_dashboard.tasks import TaskManager
+
+    directory = root / 'task-lifecycle'
+    results = ResultStore(directory / 'results.db', directory / 'runs')
+    entered, release = threading.Event(), threading.Event()
+    managers, executed, terminal_jobs, worker_threads = [], [], {}, []
+
+    def projection(manager, service, job_id, expected):
+        with closing(sqlite3.connect(manager.db_path)) as conn:
+            task = conn.execute('SELECT status,payload FROM czsc_tasks WHERE job_id=?', (job_id,)).fetchone()
+            display = conn.execute('SELECT status,payload FROM task_display WHERE job_id=?', (job_id,)).fetchone()
+        require(task and display and task[0] == display[0] == expected,
+            'Installed task/history status mismatch: '+expected)
+        public = {key: value for key, value in json.loads(task[1]).items()
+            if key not in {'result', 'fingerprint', 'owner_pid', 'owner_started'}}
+        require(json.loads(display[1]) == public, 'Installed task/history payload mismatch')
+        items = {row['job_id']: row for row in service.list(backend='legacy')['items']}
+        require(job_id in items and all(items[job_id].get(key) == value for key, value in public.items()),
+            'Installed history API projection differs from persisted task')
+
+    def terminal(manager, job_id):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            value = manager.get(job_id)
+            if value['status'] not in {'queued', 'running', 'cancelling'}:
+                return value
+            time.sleep(.01)
+        raise RuntimeError('Installed synthetic task did not persist its terminal state')
+
+    with ResearchStore(directory / 'research') as store:
+        light = SimpleNamespace(store=store, jobs={}, stops={}, lock=threading.RLock())
+        try:
+            manager = TaskManager(directory / 'metadata/tasks.db', results, workers=1)
+            managers.append(manager)
+            # The application creates these triggers when history is first read.
+            service = TaskMaintenance(manager, light)
+            with closing(sqlite3.connect(manager.db_path)) as conn:
+                triggers = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
+            require({'task_display_insert', 'task_display_update', 'task_display_delete'} <= triggers,
+                'Installed task history triggers are missing')
+
+            def synthetic_run(job_id, kind, spec):
+                executed.append(job_id)
+                manager._patch(job_id, progress=40, progress_detail={'stage': 'synthetic', 'current': 1, 'total': 2, 'failed': 0})
+                entered.set()
+                require(release.wait(10), 'Installed synthetic task release timed out')
+                manager._check(job_id)
+                return {'run_id': 'synthetic-task-'+job_id, 'status': 'completed', 'fixture': True}
+
+            # Stub only business computation; queue, persistence and cancellation stay real.
+            manager._run = synthetic_run
+            for outcome in ('succeeded', 'cancelled'):
+                entered.clear(); release.clear()
+                job = manager.submit('board_features', {'fixture': outcome})
+                require(job['status'] == 'queued', 'Installed task was not accepted as queued')
+                require(entered.wait(5), 'Installed synthetic task did not enter running')
+                projection(manager, service, job['job_id'], 'running')
+                require(manager.get(job['job_id'])['progress'] == 40, 'Installed task progress was not persisted')
+                if outcome == 'cancelled':
+                    require(manager.cancel(job['job_id'])['status'] == 'cancelling', 'Installed task cancellation was not accepted')
+                    projection(manager, service, job['job_id'], 'cancelling')
+                release.set()
+                finished = terminal(manager, job['job_id'])
+                require(finished['status'] == outcome, 'Installed task reached the wrong terminal state')
+                projection(manager, service, job['job_id'], outcome)
+                if outcome == 'succeeded':
+                    require(finished['result']['fixture'] is True, 'Installed task result was not reloaded')
+                else:
+                    require(finished['result'] is None and finished['run_id'] is None,
+                        'Installed cancelled task published a result')
+                terminal_jobs[job['job_id']] = finished
+            manager.close()
+            worker_threads.extend(manager._executor._threads)
+            require(len(executed) == 2, 'Installed task executed an unexpected number of times')
+            reopened = TaskManager(manager.db_path, results, workers=1)
+            managers.append(reopened)
+            reopened_service = TaskMaintenance(reopened, light)
+            for job_id, before in terminal_jobs.items():
+                require(reopened.get(job_id) == before, 'Installed task terminal receipt changed after reopen')
+                projection(reopened, reopened_service, job_id, before['status'])
+            require(not reopened._cancel and not reopened._executor._threads,
+                'Installed task reopen resumed terminal work')
+        finally:
+            release.set()
+            for instance in managers:
+                instance.close()
+                worker_threads.extend(instance._executor._threads)
+    require(worker_threads and not any(thread.is_alive() for thread in worker_threads),
+        'Installed task probe left workers running')
+    return dict(status='passed', real_task_manager=True, maintenance_triggers=True,
+        running_progress=True, success_persisted=True, cancellation_persisted=True,
+        history_projection_consistent=True, restart_terminal_preserved=True, workers_joined=True,
+        synthetic_business_only=True, production_state_touched=False)
+
+
 def spawn_probe(root):
     """Real native work in real spawn children; prediction is a synthetic stub."""
     import hashlib
@@ -448,7 +551,8 @@ def run_probe(device='cpu'):
             result = dict(status='passed', family='agent_mlp_sim_v1', fixture='synthetic_installation_only', device=device,
                           mlp=mlp_probe(device), incremental_source=incremental_probe(root), simulation_ledger=ledger_probe(),
                           v101=dict(ma_profile=ma_profile_probe(device), board_scope=board_scope_probe(root),
-                              task_maintenance=task_maintenance_probe(root), spawn=spawn_probe(root)),
+                              task_maintenance=task_maintenance_probe(root),
+                              task_lifecycle=task_lifecycle_probe(root), spawn=spawn_probe(root)),
                           absent_kronos=dict(status='passed', ready=False, downloads_started=False),
                           publication_allowed=False, market_effectiveness_certified=False, business_models_loaded=False)
     result['scratch_removed'] = not root.exists()

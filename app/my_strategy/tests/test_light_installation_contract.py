@@ -19,6 +19,10 @@ def v101_evidence():
         'task_maintenance': dict(status='passed', pagination=True, active_delete_rejected=True,
             terminal_record_deleted=True, preview_non_destructive=True, wrong_plan_hash_rejected=True,
             exact_fixture_cleanup=True, production_state_touched=False),
+        'task_lifecycle': dict(status='passed', real_task_manager=True, maintenance_triggers=True,
+            running_progress=True, success_persisted=True, cancellation_persisted=True,
+            history_projection_consistent=True, restart_terminal_preserved=True, workers_joined=True,
+            synthetic_business_only=True, production_state_touched=False),
         'spawn': dict(status='passed', start_method='spawn', stocks=2, prediction='synthetic_stub_no_weights',
             adapter_sha256='a'*64, worker_pids=[101, 102], parent_pid=100, real_native_preparation=True,
             rows_and_frozen_identity_identical=True, cancelled_preserves_pending=True, expired_budget_rejected=True,
@@ -126,11 +130,24 @@ def test_v101_probe_gate_rejects_missing_or_contradictory_evidence(section,key,v
         installation.verify_lightweight_probe(report,'mps')
 
 
-@pytest.mark.parametrize('section', ['ma_profile','board_scope','task_maintenance','spawn'])
+@pytest.mark.parametrize('section', ['ma_profile','board_scope','task_maintenance','task_lifecycle','spawn'])
 def test_v101_probe_gate_cannot_reuse_v100_receipt(section):
     report=valid_probe();report['v101'].pop(section)
     with pytest.raises(RuntimeError,match='v1.0.1'):
         installation.verify_lightweight_probe(report,'mps')
+
+
+@pytest.mark.parametrize('key', list(v101_evidence()['task_lifecycle']))
+@pytest.mark.parametrize('mutation', ['missing', 'contradictory'])
+def test_task_lifecycle_installation_evidence_is_required(key, mutation):
+    report = valid_probe()
+    lifecycle = report['v101']['task_lifecycle']
+    if mutation == 'missing':
+        lifecycle.pop(key)
+    else:
+        lifecycle[key] = 'failed' if key == 'status' else not lifecycle[key]
+    with pytest.raises(RuntimeError, match='v1.0.1'):
+        installation.verify_lightweight_probe(report, 'mps')
 
 
 @pytest.fixture

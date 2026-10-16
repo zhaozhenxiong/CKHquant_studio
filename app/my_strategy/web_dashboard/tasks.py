@@ -107,7 +107,16 @@ class TaskManager:
     def _write(self, job: dict[str, Any]) -> None:
         with closing(sqlite3.connect(self.db_path, timeout=30)) as conn:
             payload = {key: value for key, value in job.items() if key != "result"}
-            conn.execute("INSERT INTO czsc_tasks VALUES (?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET status=excluded.status,payload=excluded.payload", (job["job_id"], stable_hash({"kind": job["kind"], "spec": job["spec"]}), job["status"], json.dumps(payload, ensure_ascii=False, allow_nan=False)))
+            encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False)
+            # An UPSERT's DO UPDATE conflict policy overrides INSERT OR REPLACE
+            # in the history trigger. Use an ordinary update under one writer
+            # transaction so existing display rows can be replaced atomically.
+            conn.execute("BEGIN IMMEDIATE")
+            changed = conn.execute("UPDATE czsc_tasks SET status=?,payload=? WHERE job_id=?",
+                                   (job["status"], encoded, job["job_id"])).rowcount
+            if not changed:
+                conn.execute("INSERT INTO czsc_tasks(job_id,fingerprint,status,payload) VALUES (?,?,?,?)",
+                             (job["job_id"], stable_hash({"kind": job["kind"], "spec": job["spec"]}), job["status"], encoded))
             conn.commit()
 
     def get(self, job_id: str) -> dict[str, Any]:

@@ -87,7 +87,7 @@ def verify_lightweight_probe(report: dict, requested_device: str) -> dict:
             or not isinstance(report.get('incremental_source'),dict) or not isinstance(report.get('simulation_ledger'),dict)):
         raise RuntimeError('Installed lightweight probe device/serialization/component evidence is incomplete')
     additions = report.get('v101') or {}
-    for name in ('ma_profile', 'board_scope', 'task_maintenance', 'spawn'):
+    for name in ('ma_profile', 'board_scope', 'task_maintenance', 'task_lifecycle', 'spawn'):
         if not isinstance(additions.get(name), dict) or additions[name].get('status') != 'passed':
             raise RuntimeError('Installed v1.0.1 probe is incomplete: '+name)
     ma = additions['ma_profile']
@@ -109,6 +109,12 @@ def verify_lightweight_probe(report: dict, requested_device: str) -> dict:
             or any(maintenance.get(key) is not True for key in ('pagination', 'active_delete_rejected',
                 'terminal_record_deleted', 'preview_non_destructive', 'wrong_plan_hash_rejected', 'exact_fixture_cleanup'))):
         raise RuntimeError('Installed v1.0.1 task maintenance evidence is incomplete')
+    lifecycle = additions['task_lifecycle']
+    if (lifecycle.get('production_state_touched') is not False
+            or any(lifecycle.get(key) is not True for key in ('real_task_manager', 'maintenance_triggers',
+                'running_progress', 'success_persisted', 'cancellation_persisted', 'history_projection_consistent',
+                'restart_terminal_preserved', 'workers_joined', 'synthetic_business_only'))):
+        raise RuntimeError('Installed v1.0.1 task lifecycle evidence is incomplete')
     spawn = additions['spawn']
     checksum = spawn.get('adapter_sha256')
     if (spawn.get('start_method') != 'spawn' or spawn.get('stocks') != 2
