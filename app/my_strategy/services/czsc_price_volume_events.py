@@ -6,6 +6,8 @@ No completed-history chart or CZSC/MA signal is consumed here.
 """
 from __future__ import annotations
 
+import copy
+
 import numpy as np
 import pandas as pd
 
@@ -37,15 +39,27 @@ def event_config(config=None):
     return value
 
 
-def detect_wyckoff_events(raw, metrics, eligible, config=None):
+def detect_wyckoff_events(raw, metrics, eligible, config=None, *, resume_state=None, state_sink=None, cancel_check=None):
     """Return same-index metadata and 10 event inputs from a forward state machine.
 
     ``metrics`` contains prior ATR, volume ratio, and prior rolling boundaries.
     ``eligible`` is independent raw quality eligibility; invalid bars clear
     pending state rather than inventing a test across a missing/unsafe interval.
     """
+    from my_strategy.core.run_context import stable_hash
+    from my_strategy.services.czsc_trend_support import _json
     settings = event_config(config)
-    n = len(raw)
+    n = len(raw);start_index=0
+    if resume_state:
+        if (resume_state.get('format')!='wyckoff_event_state_v1' or
+            resume_state.get('sha256')!=stable_hash({k:v for k,v in resume_state.items() if k!='sha256'})):
+            raise ValueError('Wyckoff event state SHA or schema mismatch')
+        start_index=resume_state['rows']
+        if type(start_index) is not int or not 0<start_index<n:raise ValueError('Wyckoff event state requires strict append')
+        if (resume_state['config_hash']!=stable_hash(settings) or
+            resume_state['raw_prefix_hash']!=stable_hash(_json(raw.iloc[:start_index].to_dict('records'))) or
+            resume_state['eligible_prefix_hash']!=stable_hash(np.asarray(eligible[:start_index],dtype=bool).tolist())):
+            raise ValueError('Wyckoff event state input prefix or config changed')
     arrays = {key: pd.to_numeric(raw[key], errors="coerce").to_numpy(dtype=float)
               for key in ("open", "high", "low", "close", "volume")}
     values = {key: np.asarray(metrics[key], dtype=float) for key in
@@ -57,13 +71,19 @@ def detect_wyckoff_events(raw, metrics, eligible, config=None):
     ages = np.full(n, np.nan)
     demand = np.zeros(n, dtype=float)
     supply = np.zeros(n, dtype=float)
-    events, states, anchors, observations = [], [], [], []
-    provenance, stops, buys, sells, evidence = [], np.full(n, np.nan), [], [], []
+    events, states, anchors, observations = [[None]*start_index for _ in range(4)]
+    provenance, stops, buys, sells, evidence = [None]*start_index, np.full(n,np.nan), [False]*start_index, [False]*start_index, [[] for _ in range(start_index)]
     range_low = np.full(n, np.nan); range_high = np.full(n, np.nan)
     pending = None
     last_event = None
     state = "unknown"
-    for i in range(n):
+    if resume_state:
+        pending=copy.deepcopy(resume_state['pending']);last_event=copy.deepcopy(resume_state['last_event']);state=resume_state['state']
+    for i in range(start_index,n):
+        if (i-start_index)%32==0 and cancel_check:
+            if hasattr(cancel_check,'check'):cancel_check.check()
+            elif cancel_check.is_set() if hasattr(cancel_check,'is_set') else cancel_check():
+                raise InterruptedError('Wyckoff事件计算已取消')
         op, hi, lo, cl, vol = [arrays[key][i] for key in ("open", "high", "low", "close", "volume")]
         atr, rel, support, resistance, count = [values[key][i] for key in
             ("atr", "relative_volume", "range_low", "range_high", "range_count")]
@@ -180,4 +200,10 @@ def detect_wyckoff_events(raw, metrics, eligible, config=None):
     result["wyckoff_rule_sell"] = np.asarray(sells, dtype=bool)
     result["wyckoff_entry_evidence"] = pd.Series(evidence, index=raw.index, dtype=object)
     result["wyckoff_event_version"] = WYCKOFF_EVENT_VERSION
-    return result
+    if state_sink is not None:
+        state_sink.update(format='wyckoff_event_state_v1',rows=n,config_hash=stable_hash(settings),
+            raw_prefix_hash=stable_hash(_json(raw.to_dict('records'))),
+            eligible_prefix_hash=stable_hash(np.asarray(eligible,dtype=bool).tolist()),
+            pending=_json(pending),last_event=_json(last_event),state=state)
+        state_sink['sha256']=stable_hash(state_sink)
+    return result.iloc[start_index:].copy() if start_index else result

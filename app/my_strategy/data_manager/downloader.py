@@ -97,7 +97,8 @@ class DataDownloader:
     def download_stock_basic(self, min_count: int = 3000) -> DownloadResult:
         result = self._provider_instance().fetch_basic(min_count=min_count)
         if result.ok and result.data is not None:
-            out = result.data.copy()
+            from my_strategy.core.market_scope import filter_new_stock_basic
+            out = filter_new_stock_basic(result.data)
             if "total_market_cap" in out.columns:
                 out["total_market_cap"] = pd.to_numeric(out["total_market_cap"], errors="coerce")
             if "turnover" in out.columns:

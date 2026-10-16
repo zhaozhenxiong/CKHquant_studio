@@ -15,7 +15,6 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 router = APIRouter(prefix="/api")
-SYMBOL = re.compile(r"^\d{6}\.(SH|SZ|BJ)$")
 _SUBMISSION_FALLBACK = threading.Lock()
 _ACTIVE_COMPUTE = frozenset({'queued', 'running', 'cancelling'})
 
@@ -95,13 +94,22 @@ def _structure_preview_identity(spec, settings):
 
 
 def clean_symbol(value: str) -> str:
-    value = value.strip().upper()
-    if not SYMBOL.fullmatch(value):
-        raise ValueError("股票代码应为六位数字及 .SH/.SZ/.BJ 后缀")
-    return value
+    from my_strategy.core.market_scope import require_supported_symbol
+    return require_supported_symbol(value)
 
 
-class AnalysisRequest(BaseModel):
+class MethodFields(BaseModel):
+    analysis_method: Literal['structure', 'structure_kronos', 'structure_kronos_ma_mlp', 'structure_kronos_ma_l2', 'legacy_reference'] | None = None
+    score_model_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
+    lookback: Literal[128, 256] | None = None
+    horizon: Literal[1, 5, 10] | None = None
+    samples: Literal[8, 32, 64] | None = None
+    seed: int | None = Field(default=None, ge=0, le=2147483647, strict=True)
+    budget_seconds: int | None = Field(default=None, ge=10, le=1800, strict=True)
+    max_predictions: int | None = Field(default=None, ge=1, le=10000, strict=True)
+
+
+class AnalysisRequest(MethodFields):
     model_config = ConfigDict(extra='forbid')
     symbol: str
     save: bool = False
@@ -148,6 +156,13 @@ class AnalysisRequest(BaseModel):
     def dates(self):
         if self.start and self.end and self.start > self.end:
             raise ValueError('开始日期不得晚于结束日期')
+        if self.analysis_method is not None:
+            self.research = self.analysis_method == 'legacy_reference'
+        if self.analysis_method in {'structure_kronos', 'structure_kronos_ma_mlp', 'structure_kronos_ma_l2'}:
+            if (self.model_run_id or self.model_fold or self.consensus_config is not None or self.consensus_version
+                    or self.calendar_run_id or self.model_policy != 'auto' or self.current_position_fraction is not None):
+                raise ValueError('组合方法不能使用历史参考模型检查点或参数')
+            return self
         if self.model_fold:
             self.model_policy = 'pinned'
         if self.model_policy == 'pinned' and not self.model_run_id:
@@ -164,7 +179,7 @@ class AnalysisRequest(BaseModel):
         return self
 
 
-class TaskSpec(BaseModel):
+class TaskSpec(MethodFields):
     model_config = ConfigDict(extra='forbid')
     symbols: list[str] = Field(default_factory=list, max_length=10000)
     analysis_mode: Literal['reference'] | None = None
@@ -182,6 +197,7 @@ class TaskSpec(BaseModel):
     calendar_run_id: str | None = None
     usage_mode: Literal['forward', 'historical'] = 'historical'
     model_policy: Literal['auto', 'pinned'] = 'auto'
+    resume_scan_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,179}$')
     _identity = field_validator('model_run_id', 'model_fold', 'calendar_run_id')(AnalysisRequest.identity.__func__)
     _device = field_validator('device')(AnalysisRequest.compute_device.__func__)
 
@@ -194,6 +210,15 @@ class TaskSpec(BaseModel):
     def dates(self):
         if self.start and self.end and self.start > self.end:
             raise ValueError('开始日期不得晚于结束日期')
+        if self.analysis_method is not None:
+            self.research = self.analysis_method == 'legacy_reference'
+        if self.analysis_method in {'structure_kronos', 'structure_kronos_ma_mlp', 'structure_kronos_ma_l2'}:
+            if (self.model_run_id or self.model_fold or self.consensus_config is not None or self.consensus_version
+                    or self.calendar_run_id or self.model_policy != 'auto'):
+                raise ValueError('组合方法不能使用历史参考模型检查点或参数')
+            return self
+        if self.resume_scan_id:
+            raise ValueError('只有组合方法扫描支持按冻结结果续算')
         if self.model_policy == 'pinned' and not self.model_run_id:
             raise ValueError('固定模型需要完整当前模型运行')
         if self.model_fold and not self.model_run_id:
@@ -219,7 +244,9 @@ class TaskRequest(BaseModel):
         if self.spec.analysis_mode is not None and self.spec.analysis_mode != expected_mode:
             raise ValueError('任务用途与分析模式不一致')
         self.spec.analysis_mode = expected_mode
-        if self.kind == 'scan' and self.spec.start is None:
+        if self.kind == 'update' and (self.spec.analysis_method or self.spec.resume_scan_id):
+            raise ValueError('更新行情不接受扫描方法或续算参数')
+        if self.kind == 'scan' and self.spec.start is None and not self.spec.resume_scan_id:
             self.spec.start = date(2026, 1, 1)
             self.spec.dates()
         return self
@@ -284,7 +311,9 @@ def add_watchlist(spec: WatchlistRequest, request: Request):
 
 @router.delete("/watchlist/{symbol}")
 def remove_watchlist(symbol: str, request: Request):
-    return request.app.state.personal.remove_watchlist(clean_symbol(symbol))
+    # Removal of an older excluded entry must remain possible.
+    from my_strategy.core.market_scope import normalize_public_symbol
+    return request.app.state.personal.remove_watchlist(normalize_public_symbol(symbol))
 
 
 
@@ -299,9 +328,9 @@ def health():
 
 
 @router.get("/data/status")
-async def status():
+async def status(refresh: bool = False):
     from my_strategy.adapters.czsc_adapter import data_status
-    return await asyncio.to_thread(data_status)
+    return await asyncio.to_thread(data_status, refresh=refresh)
 
 
 @router.get("/data/latest")
@@ -406,8 +435,8 @@ async def selection_rollback(spec: SelectionRollbackRequest, request: Request):
 
 @router.get("/symbols")
 async def symbols(q: str = "", limit: int = Query(default=50, ge=1, le=10000)):
-    from my_strategy.adapters.czsc_adapter import list_symbols
-    return {"symbols": await asyncio.to_thread(list_symbols, query=q or None, limit=limit)}
+    from my_strategy.core.market_scope import supported_catalog
+    return {"symbols": await asyncio.to_thread(supported_catalog, query=q or None, limit=limit)}
 
 
 @router.post("/analysis")
@@ -420,12 +449,18 @@ async def analysis(spec: AnalysisRequest, request: Request):
                              if key not in {"consensus_config", "consensus_version", "save"}}
         settings = strategy_config()
         preview_identity = None
-        if not spec.save and not spec.research:
+        from my_strategy.services.analysis_methods import COMBINED, request_context
+        combined = spec.analysis_method in COMBINED
+        if not spec.save and not spec.research and not combined:
             preview_identity = _structure_preview_identity(spec, settings)
             cached = request.app.state.light.store.get(preview_identity, namespace='analysis_previews')
             if cached:
                 return {**cached, 'reused':True}
-        if spec.research:
+        if combined:
+            from my_strategy.services.analysis_methods import analyze_method
+            result = analyze_method(request.app.state.light, query)
+            query.update(result['method_context'])
+        elif spec.research:
             from my_strategy.web_dashboard.trend_strategy import analyze_trend_consensus
             result = analyze_trend_consensus(**calculation_query, config=settings, consensus_config=spec.consensus_config,
                                          consensus_version=spec.consensus_version)
@@ -433,6 +468,9 @@ async def analysis(spec: AnalysisRequest, request: Request):
             baseline_query = {key: calculation_query[key] for key in ("symbol", "start", "end", "as_of", "current_position_fraction") if key in calculation_query}
             from my_strategy.web_dashboard.trend_strategy import analyze_trend_consensus
             result = analyze_trend_consensus(**baseline_query, config=settings, structure_only=True)
+        if spec.analysis_method is not None:
+            result.setdefault('analysis_method', spec.analysis_method)
+            result.setdefault('method_context', request_context(query))
         consensus = result.get("consensus_decisions") or {}
         if consensus.get("config"):
             query["consensus_config"] = consensus["config"]
@@ -484,7 +522,8 @@ def tasks(request: Request):
 
 @router.post("/tasks", status_code=202)
 def submit(spec: TaskRequest, request: Request):
-    return submit_compute(request, 'legacy', spec.kind, spec.spec.model_dump(mode="json", exclude_none=True))
+    return submit_compute(request, 'legacy', spec.kind, spec.spec.model_dump(mode="json", exclude_none=True,
+        exclude_unset=bool(spec.spec.resume_scan_id)))
 
 
 @router.get("/tasks/{job_id}")
@@ -494,7 +533,7 @@ def task(job_id: str, request: Request, view: Literal["scan"] | None = None):
     saved = request.app.state.tasks.get(job_id)
     if saved.get("kind") not in {"scan", "update", "model_training", "model_validation", "board_features", "board_sync", "board_knowledge"}:
         raise HTTPException(status_code=404, detail="任务不存在")
-    if view == "scan" and saved.get("kind") == "scan" and saved.get("status") == "succeeded" and isinstance(saved.get("result"), dict):
+    if view == "scan" and saved.get("kind") == "scan" and saved.get("status") in {"succeeded", "partial", "cancelled"} and isinstance(saved.get("result"), dict):
         return {**saved, "result": compact_scan_view(saved["result"])}
     return saved
 
@@ -512,96 +551,14 @@ def runs(request: Request, kind: str | None = None, limit: int = Query(default=3
     return {"runs": [run for run in request.app.state.tasks.results.list(kind, limit) if run.get("kind") in allowed]}
 
 
-def _scan_display_metadata(value):
-    """Keep saved display identities and scores, omitting raw model inputs/contracts."""
-    if not isinstance(value, dict):
-        return value
-    retained = {key: item for key, item in value.items()
-                if not isinstance(item, (dict, list))}
-    for key in ("reason_codes", "reasons", "model_input_reason_codes", "original_opportunity_ids",
-                "original_event_ids", "origin_event_ids", "sources", "point_types", "label_target", "expert_probabilities",
-                "native_labels", "source_boundaries", "source_ids", "source_event_ids"):
-        if key in value:
-            retained[key] = value[key]
-    for key in ("model_identity", "fallback_model", "rule_identity", "current_state", "current_valid_zone",
-                "reference_price_band", "reference_risk_plan", "position_reference", "reference_quality_identity"):
-        if key in value:
-            retained[key] = _scan_display_metadata(value[key])
-    if "model_availability_diagnostics" in value:
-        def availability(record):
-            if not isinstance(record, dict):
-                return record
-            result = _scan_display_metadata({key: item for key, item in record.items()
-                                            if key != "model_availability_diagnostics"})
-            if "candidates" in record:
-                result["candidates"] = [_scan_display_metadata(item) for item in record["candidates"]]
-            if "dual_fallback" in record:
-                result["dual_fallback"] = availability(record["dual_fallback"])
-            return result
-        retained["model_availability_diagnostics"] = availability(value["model_availability_diagnostics"])
-    # Targets are rendered directly, including older descriptive target objects.
-    if "target" in value:
-        retained["target"] = value["target"]
-    return retained
-
-
-_SCAN_EVENT_FIELDS = frozenset(("event_id", "opportunity_id", "original_event_id", "original_pattern_id",
-    "symbol", "source", "source_frequency", "event_type", "signal", "name", "side", "action", "time",
-    "anchor_at", "available_at", "first_available_at", "first_confirmed_at", "origin_observed_at",
-    "signal_at", "observed_at", "confirmed_at", "reference_price_date", "reference_price_source",
-    "point_type", "confirmed", "input_eligible", "candidate_eligible", "direction_eligible",
-    "risk_candidate_eligible", "risk_reason_codes", "reason_codes", "reason", "reference_price",
-    "stop_price", "risk_stop_price", "stop_distance", "price_floor", "price_ceiling", "target_weight", "sources",
-    "candidate_direction_valid", "evidence_visible", "pattern_id", "version", "family", "rule_name",
-    "is_confirmed", "invalidates_event_id", "reference_layer", "source_label",
-    "consensus_action", "consensus_qualified", "consensus_reason_codes", "reference_only",
-    "signal_date", "date", "account_scope", "analysis_mode"))
-
-
-def _scan_events(values):
-    if not isinstance(values, list):
-        return values
-    return [{key: item for key, item in value.items() if key in _SCAN_EVENT_FIELDS}
-            if isinstance(value, dict) else value for value in values]
-
-
-def _scan_row_view(row):
-    if not isinstance(row, dict):
-        return row
-    result = {key: value for key, value in row.items() if not isinstance(value, (dict, list))}
-    for key in ("reason_codes", "original_opportunity_ids"):
-        if key in row:
-            result[key] = row[key]
-    for key in ("model_resolution", "exit_model", "policy_entry_model", "reference_recommendation",
-                "reference_risk_plan", "position_reference", "reference_quality_identity"):
-        if key in row:
-            result[key] = _scan_display_metadata(row[key])
-    if isinstance(row.get("agents"), dict):
-        result["agents"] = {key: _scan_display_metadata(value) for key, value in row["agents"].items()}
-    candidate = row.get("candidate_evidence")
-    if isinstance(candidate, list):
-        result["candidate_evidence"] = _scan_events(candidate)
-    elif isinstance(candidate, dict):
-        result["candidate_evidence"] = {key: value for key, value in candidate.items()
-                                        if not isinstance(value, (dict, list))}
-        for key in ("facts", "risk_details"):
-            if key in candidate:
-                result["candidate_evidence"][key] = _scan_events(candidate[key])
-    for key in ("events", "signal_points", "source_reference_points", "reference_points"):
-        if key in row:
-            result[key] = _scan_events(row[key])
-    return result
-
-
-def compact_scan_view(result):
-    """Project current reference evidence without changing the saved report."""
-    return {**result, "rows": [_scan_row_view(row) for row in result.get("rows", [])],
-            "scan_view": {"schema": "current_scan_view", "compact": True,
-                          "analysis_mode": "reference", "raw_evidence": "per_stock_analysis"}}
+from my_strategy.storage.scan_view import compact_scan_view
 
 
 @router.get("/runs/{run_id}")
-def run(run_id: str, request: Request, view: Literal["scan"] | None = None):
+def run(run_id: str, request: Request, view: Literal["scan"] | None = None,
+        page: int | None = Query(default=None,ge=1), page_size: int = Query(default=40,ge=1,le=100),
+        q: str = Query(default='',max_length=200), category: str = Query(default='all',max_length=40),
+        symbols: str | None = Query(default=None,max_length=10000)):
     store = request.app.state.tasks.results
     if view not in (None, "scan") or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,179}", run_id):
         raise HTTPException(status_code=422, detail="运行视图无效")
@@ -622,7 +579,8 @@ def run(run_id: str, request: Request, view: Literal["scan"] | None = None):
         return store.get(run_id)
     if indexed[0] != "scan":
         raise HTTPException(status_code=422, detail="紧凑扫描视图仅适用于扫描运行")
-    return compact_scan_view(store.get(run_id))
+    return store.get_scan_page(run_id,page=page,page_size=page_size,query=q,category=category,
+        symbols=symbols.split(',') if symbols is not None else None)
 
 
 @router.get("/runs/{run_id}/market-history")

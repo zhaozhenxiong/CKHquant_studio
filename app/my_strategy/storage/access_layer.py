@@ -62,7 +62,11 @@ class DataAccessLayer:
         return self.raw.read_stock_basic()
 
     def save_stock_basic(self, df: pd.DataFrame) -> int:
-        return self.raw.save_stock_basic(df)
+        from my_strategy.core.market_scope import filter_new_stock_basic
+        eligible = filter_new_stock_basic(df)
+        if eligible is None or eligible.empty:
+            return 0
+        return self.raw.save_stock_basic(eligible)
 
     def read_industry_metadata(self, *, eligible_only: bool = False) -> pd.DataFrame:
         return self.raw.read_industry_metadata(eligible_only=eligible_only)

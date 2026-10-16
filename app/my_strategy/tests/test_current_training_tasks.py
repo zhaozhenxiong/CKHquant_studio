@@ -114,8 +114,10 @@ def test_current_scan_progress_is_monotonic_and_compute_records_actual_work(mana
 def test_current_checkpoint_dispatch_and_http_identity_contract(manager,monkeypatch):
     from my_strategy.web_dashboard import trend_strategy
     monkeypatch.setattr(trend_strategy,"scan_trend_consensus",lambda **kwargs:kwargs)
-    result=manager._run("fixture","scan",dict(research=True,model_run_id="current-model",model_fold="trend_2026Q3",device="cpu"))
+    symbols=["600000.SH"]  # Explicit synthetic scope; no local securities catalog is required.
+    result=manager._run("fixture","scan",dict(research=True,symbols=symbols,model_run_id="current-model",model_fold="trend_2026Q3",device="cpu"))
     assert result["model_run_id"]=="current-model" and result["model_fold"]=="trend_2026Q3"
+    assert result["symbols"]==symbols
     assert result["structure_only"] is False
     with pytest.raises(ValueError,match="任务类型不受支持"):
         manager.submit("backtest",{})
@@ -125,7 +127,7 @@ def test_current_checkpoint_dispatch_and_http_identity_contract(manager,monkeypa
     with TestClient(create_app(manager)) as client:
         assert client.get("/api/research/status").status_code==410
         assert client.get("/api/training/status").json()["active_model"] is None
-        response=client.post("/api/tasks",json=dict(kind="scan",spec=dict(research=True,model_family="current")))
+        response=client.post("/api/tasks",json=dict(kind="scan",spec=dict(research=True,symbols=symbols,model_family="current")))
         assert response.status_code==202
         assert client.post("/api/tasks",json=dict(kind="backtest")).status_code==422
         for field in ("model_run_id","calendar_run_id"):

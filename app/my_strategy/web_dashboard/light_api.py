@@ -40,6 +40,7 @@ class SimulationSpec(BaseModel):
     save:bool=False
     score_model_id:str|None=Field(default=None,max_length=160)
     score_model_type:Literal['mlp','l2']='mlp'
+    feature_profile:Literal['mixed_v1','ma_trend_v1']|None=None
     research_mode:Literal['historical_candidate','paper']='historical_candidate'
     candidate_sessions:Literal[1,3]=3
     fusion_mode:Literal['evidence','hard_filters']='evidence'
@@ -61,6 +62,7 @@ class ScoreSpec(BaseModel):
     end:date=date(2025,12,31)
     model_type:Literal['mlp','l2']='mlp'
     variant:Literal['A','B']='A'
+    feature_profile:Literal['mixed_v1','ma_trend_v1']='mixed_v1'
     device:Literal['cpu','auto','mps','cuda']='cpu'
     budget_seconds:int=Field(default=600,ge=10,le=600)
     select:Literal[False]=False
@@ -110,6 +112,8 @@ class TuneSpec(BaseModel):
 def _recent_job_summaries(light):
     """Read bounded terminal history without restoring any executable job."""
     from contextlib import nullcontext
+    if hasattr(light,'journal'):
+        return light.journal.recent(30)
     terminal={'succeeded','partial','failed','blocked','cancelled'}
     merged={};recorded={};store=light.store
     if hasattr(store,'connection') and hasattr(store,'_lock'):

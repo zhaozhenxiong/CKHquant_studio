@@ -17,6 +17,8 @@ import pandas as pd
 from my_strategy.adapters.czsc_adapter import _connection, normalize_symbol
 from my_strategy.core.run_context import stable_hash
 from my_strategy.services.czsc_trend_support import VERIFIED_SOURCES
+from my_strategy.services.board_calculation_scope import (CALCULATION_SCOPE, calculation_membership,
+    is_calculation_symbol, verify_calculation_membership)
 
 
 BOARD_FEATURE_COLUMNS = (
@@ -32,13 +34,14 @@ STOCK_BOARD_FEATURE_COLUMNS = tuple('industry_' + name[6:] for name in BOARD_FEA
 )
 DEFAULT_BOARD_POLICY = dict(min_members=5, min_coverage=.8, volatility_sessions_per_year=252)
 BOARD_FEATURE_PROFILE = dict(name='tonghuashun_board_context', columns=list(STOCK_BOARD_FEATURE_COLUMNS),
+    calculation_scope=CALCULATION_SCOPE,
     board_columns=list(BOARD_FEATURE_COLUMNS), missing='null_not_zero', price_basis='verified_stored_unadjusted',
     formulas=dict(returns='compound_daily_mean_simple_returns;complete_verified_sessions',
         breadth='valid_members_only;metric_specific_min_members_and_coverage',
         ma20='close>mean(last20_closes_including_current)',
         breakout20='close>max(previous20_highs)',
         amount='CNY_sum_of_qualified_current_observations',
-        market_share='board_amount/local_observed_A_share_amount',
+        market_share='board_amount/local_observed_SH_SZ_A_share_amount',
         relative_amount='current_amount/mean(previous20_board_amounts)',
         volatility='sample_std(last20_daily_returns)*sqrt(252)',
         drawdown='max_peak_to_trough_of_last20_returns_with_initial_NAV_1',
@@ -81,9 +84,11 @@ def _calendar(values, day):
 
 
 def _snapshot(value, cutoff=None):
-    row=dict(value);members=[normalize_symbol(symbol) for symbol in row.get('members',[])]
-    if len(members)!=len(set(members)):raise ValueError('duplicate board members')
-    row['members']=sorted(members)
+    row=dict(value);projection=calculation_membership(value)
+    # This internal calculation view is never written back to the source KB.
+    row['members']=list(projection['eligible_members'])
+    row['calculation_membership']=projection
+    row['calculation_scope']=CALCULATION_SCOPE
     if row.get('kind') not in {'industry','concept'} or not row.get('board_id') or not row.get('snapshot_hash'):
         raise ValueError('board snapshot identity incomplete')
     if row.get('source') not in {'tonghuashun_public','tonghuashun_quant','tonghuashun','fuyao:ths'}:
@@ -91,9 +96,8 @@ def _snapshot(value, cutoff=None):
     for key in ('observed_at','available_at','effective_at'):row[key]=_timestamp(row[key]).isoformat()
     if cutoff is not None and any(_timestamp(row[key])>cutoff for key in ('observed_at','available_at','effective_at')):
         raise ValueError('future board membership is not visible at this decision')
-    expected=row.get('expected_count')
-    if type(expected) is not int or expected<0:raise ValueError('board expected member count is unknown')
-    row['usable_membership']=row.get('complete') is True and expected==len(members)
+    row['expected_count']=projection['eligible_count']
+    row['usable_membership']=projection['usable_membership']
     return row
 
 
@@ -106,6 +110,10 @@ def _read_prices(db_path, dates):
         frame=pd.read_sql_query('SELECT stock AS symbol,date,open,high,low,close,volume,amount,source,has_trade_price'+
             available+' FROM stock_daily_normalized WHERE date>=? AND date<=? ORDER BY stock,date',
             conn,params=[dates[0],dates[-1]])
+    if frame.empty:return frame,pd.DataFrame(index=dates),{},stable_hash([])
+    # Excluded exchanges must not enter the price content hash, pivots, or the
+    # whole-market amount denominator, even when their quotes are valid.
+    frame=frame.loc[frame.symbol.map(is_calculation_symbol)].copy()
     if frame.empty:return frame,pd.DataFrame(index=dates),{},stable_hash([])
     frame['symbol']=frame.symbol.map(normalize_symbol)
     frame['date']=pd.to_datetime(frame.date,errors='raise').dt.strftime('%Y-%m-%d')
@@ -123,9 +131,6 @@ def _read_prices(db_path, dates):
         cutoff=pd.to_datetime(frame.date+'T15:00:00+08:00',utc=True)
         valid &=known.notna() & known.le(cutoff)
     frame[numeric.columns]=numeric
-    a_share=frame.symbol.map(lambda symbol:symbol.endswith('.SH') and symbol.startswith('6') or
-        symbol.endswith('.SZ') and symbol.startswith(('0','3')) or symbol.endswith('.BJ') and symbol.startswith(('4','8','9')))
-    valid &=a_share
     frame['_valid']=valid
     unique=frame.drop_duplicates(['symbol','date'],keep='first')
     matrices={}
@@ -159,7 +164,8 @@ def _compound(values):
 
 
 def _code_hashes(store):
-    paths=[Path(__file__)]
+    from my_strategy.services import board_calculation_scope
+    paths=[Path(__file__),Path(board_calculation_scope.__file__)]
     try:paths.append(Path(inspect.getfile(type(store))))
     except (TypeError,OSError):pass
     return {path.name:hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
@@ -191,9 +197,12 @@ def build_board_features(store, *, raw_db_path=None, calendar_dates, price_date,
             by_date[date]={row['board_id']:row for row in rows}
         current=list(by_date[day].values())
     frame,close,matrices,price_hash=_read_prices(raw_db_path,dates)
-    requested=None if symbols is None else sorted(set(normalize_symbol(symbol) for symbol in symbols))
+    requested=None if symbols is None else sorted(set(normalize_symbol(symbol) for symbol in symbols if is_calculation_symbol(symbol)))
     membership_identity={date:{board:row['snapshot_hash'] for board,row in rows.items()} for date,rows in by_date.items()}
+    projection_identity={date:{board:row['calculation_membership']['projection_hash'] for board,row in rows.items()}
+        for date,rows in by_date.items()}
     identity=dict(profile=BOARD_FEATURE_PROFILE,schema_hash=BOARD_SCHEMA_HASH,mode=mode,price_date=day,
+        calculation_scope=CALCULATION_SCOPE,calculation_projections=projection_identity,
         membership_snapshots=membership_identity,price_content_sha256=price_hash,price_rows=len(frame),
         calendar_hash=stable_hash(calendar),policy=cfg,code_hashes=code,symbols=requested,
         verified_price_sources=sorted(VERIFIED_SOURCES),price_basis='stored_unadjusted_no_total_return_factor')
@@ -205,6 +214,11 @@ def build_board_features(store, *, raw_db_path=None, calendar_dates, price_date,
                     cached.get('schema_hash')!=BOARD_SCHEMA_HASH or cached.get('profile')!=BOARD_FEATURE_PROFILE['name'] or
                     cached.get('policy_hash')!=stable_hash(cfg) or cached.get('mode')!=mode or cached.get('price_date')!=day):
                 raise ValueError('board feature cache identity drift')
+            if cached.get('calculation_scope')!=CALCULATION_SCOPE:raise ValueError('board calculation scope drift')
+            for board in cached.get('boards',[]):
+                verify_calculation_membership(board.get('calculation_membership'))
+                if board['calculation_membership']!=by_date[day][board['board_id']]['calculation_membership']:
+                    raise ValueError('board cached calculation membership drift')
             return cached
     daily={};lookups={name:matrix.to_dict(orient='index') for name,matrix in matrices.items()}
     def observation(name,date,symbol):return _number(lookups.get(name,{}).get(date,{}).get(symbol))
@@ -254,7 +268,8 @@ def build_board_features(store, *, raw_db_path=None, calendar_dates, price_date,
     if component_store is not None and mode=='current_reference':
         for snapshot in current:
             members=snapshot['members'];board=snapshot['board_id']
-            local_identity={'format':'board_member_sums_v1','snapshot_hash':snapshot['snapshot_hash'],
+            local_identity={'format':'board_member_sums_v2','snapshot_hash':snapshot['snapshot_hash'],
+                'calculation_scope':CALCULATION_SCOPE,'projection_hash':snapshot['calculation_membership']['projection_hash'],
                 'policy':cfg,'code':code,'dates':output_dates,
                 'observations':[[date,[[symbol,*[observation(field,date,symbol) for field in
                     ('close','return','advance','above_ma20','breakout20','amount')]] for symbol in members]] for date in output_dates]}
@@ -370,10 +385,12 @@ def build_board_features(store, *, raw_db_path=None, calendar_dates, price_date,
                 'reason_codes':[] if usable else ['comparable_amount_population_unavailable']}
         eligible=mode=='causal' and all(value is not None for value in values.values())
         board_rows.append({**values,'board_id':snapshot['board_id'],'kind':snapshot['kind'],'name':snapshot['name'],
+            'calculation_scope':CALCULATION_SCOPE,'calculation_membership':snapshot['calculation_membership'],
+            'source_snapshot_hash':snapshot['snapshot_hash'],'projection_hash':snapshot['calculation_membership']['projection_hash'],
             **({'capital_visualization':capital_visualization} if capital_visualization is not None else {}),
             'effective_members':row['effective_members'],'expected_members':row['expected_count'],'coverage':row['coverage'],
             'membership_scope':snapshot.get('membership_scope','source_full'),
-            'source_member_count':snapshot.get('source_member_count',snapshot['expected_count']),
+            'source_member_count':snapshot.get('source_member_count',snapshot['calculation_membership']['source_member_count']),
             'excluded_source_members':list(snapshot.get('excluded_source_members',[])),
             'metric_counts':row['metric_counts'],'metric_coverage':row['metric_coverage'],
             'membership_date':_timestamp(snapshot['observed_at']).date().isoformat(),'membership_available_at':snapshot['available_at'],
@@ -383,8 +400,11 @@ def build_board_features(store, *, raw_db_path=None, calendar_dates, price_date,
             'policy_hash':stable_hash(cfg),'cache_key':key,'price_content_sha256':price_hash,'calendar_hash':identity['calendar_hash'],'code_hashes':code,
             'membership_dependency_hashes':sorted({rows[snapshot['board_id']]['snapshot_hash'] for rows in by_date.values() if snapshot['board_id'] in rows}),
             'status':'available' if all(value is not None for value in values.values()) else 'unavailable',
-            'reason_codes':([] if snapshot['usable_membership'] else ['membership_incomplete'])+
-                (['verified_empty_membership'] if snapshot['expected_count']==0 else [])+
+            'reason_codes':([] if snapshot['calculation_membership']['source_complete'] and
+                snapshot['calculation_membership']['source_expected_count']==snapshot['calculation_membership']['source_member_count']
+                else ['membership_incomplete'])+
+                (['verified_empty_membership'] if snapshot['calculation_membership']['source_expected_count']==0 else [])+
+                (['no_supported_members'] if snapshot['expected_count']==0 else [])+
                 ([] if row['effective_members']>=cfg['min_members'] and row['coverage']>=cfg['min_coverage'] else ['members_or_coverage_below_frozen_minimum'])+
                 ([] if eligible or mode=='current_reference' else ['historical_dependency_or_price_window_unavailable'])})
     stock_rows=[]
@@ -433,6 +453,8 @@ def build_board_features(store, *, raw_db_path=None, calendar_dates, price_date,
         peers_below_minimum=industry_id is not None and (peer_count<cfg['min_members'] or peer_coverage<cfg['min_coverage'])
         available_times=[cutoff,*[_timestamp(snapshot['available_at']) for snapshot in relevant]]
         stock_rows.append({**values,'symbol':symbol,'industry_id':industry_id,'industry_match_count':len(industries),
+            'calculation_scope':CALCULATION_SCOPE,
+            'calculation_projection_hashes':{row['board_id']:row['calculation_membership']['projection_hash'] for row in relevant},
             'industry_matches':[{'board_id':row['board_id'],'name':row['name'],'taxonomy':row.get('taxonomy'),
                 'level':row.get('level'),'hierarchy_verified':row.get('hierarchy_verified',False)} for row in industries],
             'industry_hierarchy_verified':not hierarchy_unverified if industries else False,
@@ -458,11 +480,13 @@ def build_board_features(store, *, raw_db_path=None, calendar_dates, price_date,
                     '历史成员归属或行情窗口尚不完整，缺失特征保持空值。')] if incomplete else [])})
     if _code_hashes(store)!=code:raise ValueError('board generating code changed during feature preparation')
     result=dict(profile=BOARD_FEATURE_PROFILE['name'],schema_hash=BOARD_SCHEMA_HASH,mode=mode,price_date=day,
+        calculation_scope=CALCULATION_SCOPE,
+        calculation_membership={row['board_id']:row['calculation_membership'] for row in current},
         membership_date=max((_timestamp(row['observed_at']).date().isoformat() for row in current),default=None),
         available_at=max([cutoff,*[_timestamp(row['available_at']) for row in current]]).isoformat(),
         training_eligible=mode=='causal' and bool(stock_rows) and all(row['training_eligible'] for row in stock_rows),
         qualification='pending',historical_membership_status='current_snapshots_only_no_historical_backfill',
-        price_basis='stored_unadjusted_no_total_return_factor',market_scope='local_verified_observed_A_shares',
+        price_basis='stored_unadjusted_no_total_return_factor',market_scope='local_verified_observed_SH_SZ_A_shares',
         policy=cfg,policy_hash=stable_hash(cfg),cache_key=key,cache_identity=identity,boards=board_rows,stocks=stock_rows,
         diagnostics=dict(price_rows=len(frame),board_count=len(board_rows),stock_count=len(stock_rows),
             current_membership_historical_replay=mode=='current_reference'))
@@ -476,6 +500,7 @@ def require_board_training_features(row, *, decision_at, expected_schema_hash=BO
     decision=_timestamp(decision_at)
     policy_hash=expected_policy_hash or stable_hash(DEFAULT_BOARD_POLICY)
     if (row.get('mode')!='causal' or row.get('training_eligible') is not True or
+            row.get('calculation_scope')!=CALCULATION_SCOPE or not row.get('calculation_projection_hashes') or
             row.get('schema_hash')!=expected_schema_hash or row.get('profile')!=BOARD_FEATURE_PROFILE['name'] or
             row.get('price_date')!=decision.date().isoformat() or _timestamp(row['available_at'])>decision or
             not row.get('snapshot_hashes') or not row.get('membership_dependency_hashes') or

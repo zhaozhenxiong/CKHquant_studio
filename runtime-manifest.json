@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "application_version": "1.0.0",
+  "application_version": "1.0.1",
   "method": "CZSC",
   "version": "1.0.1",
   "source_manifest": "app/czsc-source-manifest.json",
@@ -51,7 +51,18 @@
     "signed-share-and-weight-deltas",
     "incremental-structure-plan",
     "sha-verified-json-native-state",
-    "scoped-daily-backfill"
+    "scoped-daily-backfill",
+    "moving-average-mlp-profile",
+    "same-input-ma-l2-comparison",
+    "three-method-budgeted-resumable-scan",
+    "safe-task-history-maintenance",
+    "permanent-beijing-entry-exclusion",
+    "verified-sh-sz-board-calculation-scope",
+    "persistent-light-task-lifecycle",
+    "indexed-hot-data-status",
+    "paged-saved-scan-view",
+    "bounded-shared-source-scheduling",
+    "protected-backup-and-restore"
   ],
   "python": "3.12",
   "devices": [
@@ -60,12 +71,12 @@
     "cuda"
   ],
   "platform_verification": {
-    "macos_arm64_cpu": "pending_1_0_0_exact_installed_asset_verification",
-    "macos_arm64_mps": "pending_1_0_0_exact_installed_asset_verification",
-    "windows_x64_cpu": "pending_1_0_0_exact_installed_asset_verification",
-    "linux_x64_cpu": "pending_1_0_0_exact_installed_asset_verification",
-    "windows_x64_cuda": "not_verified_1_0_0",
-    "linux_x64_cuda": "not_verified_1_0_0",
+    "macos_arm64_cpu": "pending_1_0_1_exact_installed_asset_verification",
+    "macos_arm64_mps": "pending_1_0_1_exact_installed_asset_verification",
+    "windows_x64_cpu": "pending_1_0_1_exact_installed_asset_verification",
+    "linux_x64_cpu": "pending_1_0_1_exact_installed_asset_verification",
+    "windows_x64_cuda": "not_verified_1_0_1",
+    "linux_x64_cuda": "not_verified_1_0_1",
     "macos_x64": "not_in_release_matrix"
   },
   "verification_report": "release-validation.json",
@@ -76,17 +87,17 @@
   "runs": "artifacts/runs",
   "legacy_compatibility": false,
   "previous_release_verification": {
-    "application_version": "0.1.7",
-    "release_url": "https://github.com/zhaozhenxiong/CKHquant_studio/releases/tag/v0.1.7"
+    "application_version": "1.0.0",
+    "release_url": "https://github.com/zhaozhenxiong/CKHquant_studio/releases/tag/v1.0.0"
   },
   "verification_scope": {
-    "version_1_0_0": "pending_exact_installed_asset_and_platform_validation",
     "financial_certification": false,
-    "source_commit_binding": "release_manifest_generated_from_actual_release_checkout"
+    "source_commit_binding": "release_manifest_generated_from_actual_release_checkout",
+    "version_1_0_1": "pending_exact_installed_asset_and_platform_validation"
   },
   "software_release": {
-    "version": "1.0.0",
-    "status": "functional_acceptance_passed_pending_exact_asset_ci",
+    "version": "1.0.1",
+    "status": "pending_exact_merged_source_and_installed_asset_validation",
     "authorized_by": "user",
     "parameter_policy": "frozen_research_candidates_no_automatic_promotion",
     "research_version": "agent_mlp_sim_v1"
@@ -130,7 +141,7 @@
     "contains_trained_models": false,
     "contains_personal_data": false,
     "local_model_baseline_published": false,
-    "tag": "v1.0.0",
+    "tag": "v1.0.1",
     "source_commit_binding": "release.json.git_revision_generated_from_exact_release_checkout",
     "contains_research_ledgers": false
   },

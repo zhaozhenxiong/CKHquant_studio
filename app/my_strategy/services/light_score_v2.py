@@ -7,10 +7,12 @@ returns an explicit pending report; successful fitting is not policy acceptance.
 from __future__ import annotations
 
 from copy import deepcopy
+from collections import OrderedDict
 from datetime import datetime,timezone
 import hashlib
 from pathlib import Path
 import time
+import threading
 import warnings
 
 import numpy as np
@@ -23,6 +25,8 @@ from my_strategy.services.simple_score import _dates,_metrics,_probabilities
 SCHEMA='light_score_v2'
 SPLITS=('train','tune','calibration','policy','test')
 CLASSES=('down','flat','up')
+_NETWORKS = OrderedDict()
+_NETWORK_LOCK = threading.RLock()
 
 
 def _check(cancel,deadline):
@@ -49,6 +53,25 @@ def _network(inputs,widths,dropout):
         last=width
     layers.append(torch.nn.Linear(last,3))
     return torch.nn.Sequential(*layers)
+
+
+def _inference_network(artifact):
+    """Bounded immutable CPU networks shared across batch/stock evaluations."""
+    import torch
+    key = artifact['model_version']
+    with _NETWORK_LOCK:
+        if key in _NETWORKS:
+            _NETWORKS.move_to_end(key)
+            return _NETWORKS[key]
+        architecture = artifact['architecture']
+        with torch.random.fork_rng(devices=[]):
+            net = _network(architecture['input_dimensions'], architecture['widths'], architecture['dropout'])
+        net.load_state_dict({k:torch.as_tensor(v,dtype=torch.float32) for k,v in artifact['state_dict'].items()}, strict=True)
+        net.eval()
+        _NETWORKS[key] = net
+        while len(_NETWORKS) > 8:
+            _NETWORKS.popitem(last=False)
+        return net
 
 
 def _bounds(frame,split_ranges,gap_sessions):
@@ -194,7 +217,7 @@ def _registry(existing,trials,variant,identity):
     return merge_experiment_registry(existing,entries)
 
 
-def fit_light_score(frame,split_ranges,*,variant='A',source_identity,label_contract,
+def fit_light_score(frame,split_ranges,*,variant='A',feature_profile='mixed_v1',source_identity,label_contract,
                     feature_columns=None,optional_columns=None,trials=None,budget_seconds=600,
                     device='cpu',cancel_check=None,observation_manifest=None,experiment_registry=None,
                     min_segment_rows=30,gap_sessions=0,cpu_threads=2,progress=None,registration_callback=None):
@@ -205,6 +228,9 @@ def fit_light_score(frame,split_ranges,*,variant='A',source_identity,label_contr
     shared registry. Exhaustion/cancellation raises without publishing a model.
     """
     if variant not in {'A','B'}: raise ValueError('Unknown light-score variant')
+    if feature_profile not in {'mixed_v1','ma_trend_v1'}: raise ValueError('Unknown score feature profile')
+    ma_profile = feature_profile == 'ma_trend_v1'
+    if ma_profile and variant != 'A': raise ValueError('MA profile supports A only; Kronos remains external evidence')
     if not source_identity or not label_contract: raise ValueError('Frozen source and label contracts are required')
     if not 0<budget_seconds<=600 or not 1<=cpu_threads<=2: raise ValueError('Training budget/thread limit exceeded')
     if len(frame)>100000 or len(frame)==0 or min_segment_rows<10: raise ValueError('Light score population limits exceeded')
@@ -215,10 +241,17 @@ def fit_light_score(frame,split_ranges,*,variant='A',source_identity,label_contr
     if not required<=set(data): raise ValueError('Missing label/temporal population fields')
     if data.duplicated(['symbol','as_of']).any(): raise ValueError('Duplicate stock/date training rows')
     if not data.label.isin([0,1,2]).all(): raise ValueError('Labels must be 0/1/2')
-    features=list(feature_columns or BASE_FEATURES+EXTRA_FEATURES+(KRONOS_FEATURES if variant=='B' else []))
+    if ma_profile:
+        from my_strategy.services.light_ma_features import MA_TREND_COLUMNS, profile_contract
+        if feature_columns is not None and list(feature_columns) != list(MA_TREND_COLUMNS):
+            raise ValueError('MA profile requires its frozen ordered feature columns')
+        if optional_columns: raise ValueError('MA profile has no optional core features')
+        if 'score_input_eligible' not in data or not data.score_input_eligible.eq(True).all():
+            raise ValueError('MA training requires verified eligible input rows')
+    features=list(MA_TREND_COLUMNS if ma_profile else feature_columns or BASE_FEATURES+EXTRA_FEATURES+(KRONOS_FEATURES if variant=='B' else []))
     forbidden={'symbol','as_of','date','label','label_mature_at','feature_available_at','future_return','realized_pnl'}
     if len(set(features))!=len(features) or not features or any(key in forbidden for key in features): raise ValueError('Invalid feature columns')
-    optional=list(optional_columns if optional_columns is not None else [k for k in EXTRA_FEATURES+KRONOS_FEATURES if k in features])
+    optional=[] if ma_profile else list(optional_columns if optional_columns is not None else [k for k in EXTRA_FEATURES+KRONOS_FEATURES if k in features])
     if not set(optional)<=set(features): raise ValueError('Optional feature not in schema')
     masks_features=[k for k in optional if k not in KRONOS_FEATURES]
     dimensions=len(features)+len(masks_features)+(4 if variant=='B' else 0)
@@ -250,6 +283,11 @@ def fit_light_score(frame,split_ranges,*,variant='A',source_identity,label_contr
         observation_manifest_sha256=content_hash(observation_manifest) if observation_manifest else None,
         implementation_sha256={name:hashlib.sha256((Path(__file__).parent/name).read_bytes()).hexdigest()
             for name in ('light_score_v2.py','light_score_training.py','light_qualification.py','light_experiment_registry.py')})
+    identity['feature_profile'] = feature_profile
+    if ma_profile:
+        identity['feature_contract'] = profile_contract()
+        for name in ('light_ma_features.py','czsc_market_features.py','czsc_market_profiles.py'):
+            identity['implementation_sha256'][name] = hashlib.sha256((Path(__file__).parent/name).read_bytes()).hexdigest()
     registry=_registry(experiment_registry,specs,variant,identity)
     if registration_callback:
         committed=registration_callback(deepcopy(registry))
@@ -359,7 +397,7 @@ def fit_light_score(frame,split_ranges,*,variant='A',source_identity,label_contr
     if variant=='B':
         supported=[state for state in KRONOS_STATES if all(patterns[s][state]['rows']>=10 and min(patterns[s][state]['class_counts'].values())>=3 for s in ('train','calibration'))]
     _check(cancel_check,deadline)
-    artifact=dict(schema=SCHEMA,status='completed',model_type='torch_mlp',variant=variant,features=features,classes=list(CLASSES),
+    artifact=dict(schema=SCHEMA,status='completed',model_type='torch_mlp',variant=variant,feature_profile=feature_profile,features=features,classes=list(CLASSES),
         identity=identity,architecture=dict(input_dimensions=dimensions,widths=chosen['configuration']['widths'],dropout=chosen['configuration']['dropout'],activation='GELU'),
         state_dict={key:value.tolist() for key,value in chosen['state'].items()},preprocessing=preprocessing,
         temperature=temperature,calibration_kind='independent_positive_temperature',train_prior=prior.tolist(),
@@ -394,7 +432,19 @@ def score_light_samples(artifact,frame,*,as_of,historical_reconstruction=False,m
     if 'feature_available_at' in frame and (_dates(frame.feature_available_at,daily_close=True)>requested).any():
         raise ValueError('Features unavailable at decision')
     if 'as_of' in frame and (_dates(frame.as_of,daily_close=True)>requested).any(): raise ValueError('Future observations cannot be scored')
-    x=_preprocess_apply(frame,artifact['preprocessing'])
+    ma_profile = artifact.get('feature_profile', 'mixed_v1') == 'ma_trend_v1'
+    eligible = np.ones(len(frame), dtype=bool)
+    scoring_frame = frame
+    if ma_profile:
+        if 'score_input_eligible' not in frame: raise ValueError('MA score quality metadata is missing')
+        eligible = frame.score_input_eligible.eq(True).to_numpy()
+        # Ineligible rows retain a missing score; neutral placeholders only let
+        # the eligible rows share this batch, and are never emitted as scores.
+        scoring_frame = frame.copy()
+        for column in artifact['features']:
+            if column not in scoring_frame: raise ValueError('Missing core score feature: '+column)
+            scoring_frame.loc[~eligible,column] = 0.
+    x=_preprocess_apply(scoring_frame,artifact['preprocessing'])
     if model_kind not in {'mlp','l2'}: raise ValueError('Unknown comparison model')
     if model_kind=='l2':
         if mode!='historical_candidate': raise ValueError('L2 comparator has no independent paper-policy qualification')
@@ -402,25 +452,22 @@ def score_light_samples(artifact,frame,*,as_of,historical_reconstruction=False,m
         p=_probabilities(logits,linear['temperature'])
     else:
         import torch
-        architecture=artifact['architecture']
-        with torch.random.fork_rng(devices=[]):
-            net=_network(architecture['input_dimensions'],architecture['widths'],architecture['dropout'])
-            weights={key:torch.as_tensor(value,dtype=torch.float32) for key,value in artifact['state_dict'].items()}
-            net.load_state_dict(weights,strict=True);net.eval()
-            with torch.no_grad(): logits=net(torch.as_tensor(x)).numpy().astype(float)
+        net=_inference_network(artifact)
+        with torch.no_grad(): logits=net(torch.as_tensor(x)).numpy().astype(float)
         p=_probabilities(logits,artifact['temperature'])
     qualification=resolve_qualification(artifact,mode=mode,as_of=as_of if decision_time is None else requested.isoformat(),qualification_event=qualification_event)
     row_statuses=[];scores=[];probabilities=[]
     for i in range(len(frame)):
-        supported=artifact['variant']!='B' or frame.iloc[i]['kronos_state'] in artifact['supported_missing_patterns']
-        row_statuses.append('scored' if supported else 'unsupported_missing_pattern')
+        supported=eligible[i] and (artifact['variant']!='B' or frame.iloc[i]['kronos_state'] in artifact['supported_missing_patterns'])
+        row_statuses.append('scored' if supported else 'ma_input_ineligible' if not eligible[i] else 'unsupported_missing_pattern')
         scores.append(float(100*(p[i,2]+.5*p[i,1])) if supported else None)
         probabilities.append(dict(zip(CLASSES,p[i].tolist())) if supported else None)
     if any(status!='scored' for status in row_statuses):
-        qualification={**qualification,'allow_increase':False,'positive_allocation_eligible':False,'reason':'unsupported_missing_pattern'}
+        qualification={**qualification,'allow_increase':False,'positive_allocation_eligible':False,'reason':next(s for s in row_statuses if s!='scored')}
     result=dict(schema=SCHEMA,status='scored' if all(s=='scored' for s in row_statuses) else 'unavailable',
         model_version=artifact['model_version'],scorer_id=content_hash(dict(model=artifact['model_version'],head=model_kind)),
         model_type=artifact['model_type'] if model_kind=='mlp' else 'multinomial_logistic_L2',variant=artifact['variant'],as_of=str(as_of),
+        feature_profile=artifact.get('feature_profile','mixed_v1'),
         features=artifact['features'],scores=scores,probabilities=probabilities,row_statuses=row_statuses,
         score_semantics='100 * (P(up) + 0.5 * P(flat))',qualification=qualification,
         historical_reconstruction=bool(historical_reconstruction),model_actually_frozen=actual_frozen,

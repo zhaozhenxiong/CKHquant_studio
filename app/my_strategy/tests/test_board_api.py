@@ -238,9 +238,10 @@ def test_feature_build_uses_latest_qualified_local_price_and_returns_only_summar
     from my_strategy.services import czsc_trend_support, board_features
     raw = tmp_path / 'raw.db'
     with sqlite3.connect(raw) as connection:
-        connection.execute('CREATE TABLE stock_daily_normalized(date TEXT,source TEXT,has_trade_price INTEGER)')
-        connection.executemany('INSERT INTO stock_daily_normalized VALUES(?,?,?)', [
-            ('2026-10-12', 'tushare', 1), ('2026-10-13', 'unverified_fixture', 1), ('2026-10-14', 'tushare', 0)])
+        connection.execute('CREATE TABLE stock_daily_normalized(stock TEXT,date TEXT,source TEXT,has_trade_price INTEGER)')
+        connection.executemany('INSERT INTO stock_daily_normalized VALUES(?,?,?,?)', [
+            ('000001.SZ', '2026-10-12', 'tushare', 1), ('000001.SZ', '2026-10-13', 'unverified_fixture', 1),
+            ('000001.SZ', '2026-10-14', 'tushare', 0), ('920001.BJ', '2026-10-15', 'tushare', 1)])
     monkeypatch.setattr(czsc_trend_support, '_calendar', lambda _: (['2026-10-12'], 'verified-fixture'))
     calls = []
     def builder(store, **kwargs):

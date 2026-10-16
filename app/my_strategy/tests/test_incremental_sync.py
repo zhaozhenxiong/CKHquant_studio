@@ -147,3 +147,31 @@ def test_partial_native_producer_is_checked_without_legacy_cache_dependency(plan
     assert not board_fluent.freshness_status(**params)['native_stale']
     monkeypatch.setattr(incremental_source,'code_identity',lambda:{'producer':'changed'})
     assert board_fluent.freshness_status(**params)['native_stale']
+
+
+def test_new_explicit_incremental_requests_reject_beijing_before_computing(planned):
+    options,calls,cache,market=planned
+    with pytest.raises(ValueError,match='北交所'):
+        sync.create_plan(**options,scope='selected',symbols=['430001.BJ'])
+    assert calls==[]
+
+
+def test_catalog_plan_binds_calculation_population_and_projection(planned):
+    options,calls,cache,market=planned
+    plan=sync.create_plan(**options,scope='full')
+    catalog=sync._catalog(options['kb_db_path'])
+    assert plan['contract']['calculation_scope']=='sh_sz_a_v1'
+    assert plan['contract']['projection_hashes']=={r['board_id']:r['calculation_membership']['projection_hash'] for r in catalog}
+    assert plan['contract']['symbols']==sorted({s for r in catalog for s in r['calculation_membership']['eligible_members']})
+    assert calls==[]
+
+
+def test_watch_scope_preserves_saved_beijing_record_but_does_not_schedule_it(planned):
+    options,calls,cache,market=planned;path=options['store'].root.parent/'personal_portfolio.db'
+    with sqlite3.connect(path) as conn:
+        conn.execute('CREATE TABLE watchlist(symbol TEXT)')
+        conn.executemany('INSERT INTO watchlist VALUES(?)',[(market['symbols'][0],),('430001.BJ',)])
+    plan=sync.create_plan(**options,scope='watch')
+    assert plan['contract']['symbols']==[market['symbols'][0]] and calls==[]
+    with sqlite3.connect(path) as conn:
+        assert conn.execute('SELECT symbol FROM watchlist WHERE symbol=?',('430001.BJ',)).fetchone()

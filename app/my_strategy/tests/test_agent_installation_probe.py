@@ -49,6 +49,15 @@ def test_v1_installation_probe_uses_real_bounded_isolated_components(fixture_con
     assert result['incremental_source']['append_matches_full'] and result['incremental_source']['cancelled_terminal']
     assert result['simulation_ledger']['actual_fills'] == 2
     assert result['scratch_removed'] and not result['business_models_loaded']
+    from verify_installation import verify_lightweight_probe
+    assert verify_lightweight_probe(result, 'cpu') is result
+    evidence = result['v101']
+    assert evidence['ma_profile']['input_dimensions'] == 20
+    assert evidence['ma_profile']['same_input_l2'] and not evidence['ma_profile']['active_model_registered']
+    assert evidence['board_scope']['eligible_count'] == 2 and evidence['board_scope']['excluded_count'] == 4
+    assert evidence['task_maintenance']['active_delete_rejected']
+    assert evidence['spawn']['start_method'] == 'spawn' and evidence['spawn']['stocks'] == 2
+    assert evidence['spawn']['children_joined'] and evidence['spawn']['worker_pids']
     assert fixture_connections and all(connection.closed for connection in fixture_connections)
 
 

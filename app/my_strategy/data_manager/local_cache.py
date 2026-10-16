@@ -76,6 +76,18 @@ class LocalCache:
         df.attrs["khquant_storage_mode"] = self.storage.settings.mode
         return df.sort_values("date").reset_index(drop=True)
 
+    def stock_daily_update_summaries(self, codes: list[str]) -> dict:
+        if read_db_first() and not write_files():
+            return self.raw_repository.stock_daily_update_summaries(codes)
+        # Compatibility file mode remains bounded to one frame at a time.
+        result = {}
+        for code in codes:
+            frame = self.read_stock_daily(code)
+            result[code] = {'last_date': None if frame.empty else pd.to_datetime(frame['date']).max(),
+                'rows': len(frame), 'has_trade_prices': 'trade_close' in frame and
+                bool(pd.to_numeric(frame['trade_close'], errors='coerce').notna().any())}
+        return result
+
     def save_stock_daily(self, code: str, df: pd.DataFrame, source: str = "unknown", *, incremental: bool = False) -> None:
         if df is None or df.empty:
             raise ValueError("refuse to save empty stock daily cache")
@@ -183,6 +195,10 @@ class LocalCache:
     def save_stock_basic(self, df: pd.DataFrame) -> None:
         if df is None or df.empty:
             raise ValueError("refuse to save empty stock basic cache")
+        from my_strategy.core.market_scope import filter_new_stock_basic
+        df = filter_new_stock_basic(df)
+        if df.empty:
+            return
         if write_db():
             self.storage.save_stock_basic(df)
         if write_files():

@@ -7,12 +7,13 @@ Cancellation checkpoints belong to a new request, never revive a cancelled job.
 from __future__ import annotations
 
 from copy import deepcopy
+from bisect import bisect_left, bisect_right
 import time
 
 import pandas as pd
 
 from my_strategy.services.agent_evidence import identity
-from my_strategy.services.position_simulation import run_position_simulation,PreparedSimulationRuntime
+from my_strategy.services.position_simulation import run_position_simulation,PreparedSimulationRuntime,materialize_simulation
 
 VERSION = 'causal_daily_scheduler_v1'
 OBSERVATION = 'daily_agent_observation'
@@ -26,7 +27,10 @@ def stopped(stop):
 def decision_day(event, calendar):
     value = pd.Timestamp(event.get('available_at') or (str(event['date'])[:10]+'T15:00:00+08:00'))
     value = value.tz_localize('Asia/Shanghai') if value.tzinfo is None else value.tz_convert('Asia/Shanghai')
-    return next((day for day in calendar if pd.Timestamp(day+'T15:00:00+08:00') >= value), None)
+    day = value.date().isoformat()
+    late = value > pd.Timestamp(day+'T15:00:00+08:00')
+    index = bisect_right(calendar, day) if late else bisect_left(calendar, day)
+    return calendar[index] if index < len(calendar) else None
 
 
 class ScheduleCancelled(InterruptedError):
@@ -40,13 +44,15 @@ def run_daily_schedule(frames, evidence, *, configs, calendar, start, end,
                        max_predictions_per_day=60, deadline=None, stop=None,
                        progress=None, checkpoint_callback=None, corporate_actions=None,
                        execution_mode='historical', observed_at=None,
-                       include_benchmarks=True):
+                       include_benchmarks=True, checkpoint_stages=None):
     if execution_mode not in {'historical','forward'}: raise ValueError('Unknown execution_mode')
     if max_predictions_per_day < 0: raise ValueError('Daily quota cannot be negative')
     prepared_runtime=PreparedSimulationRuntime(frames,calendar,start=start,end=end)
     state = deepcopy(checkpoint or {})
     if state and state.get('version') != VERSION: raise ValueError('Scheduler version changed; create a branch')
     all_evidence = deepcopy(state.get('evidence', evidence))
+    if prepared_runtime is not None:
+        prepared_runtime.own_append_only_evidence(all_evidence)
     accounts = deepcopy(state.get('comparisons', comparisons)) or {}
     original_last = min((v['state']['last_date'] for v in accounts.values()), default=None)
     coverage = deepcopy(state.get('coverage')) or dict(requested=0, succeeded=0, unusable=0,failed=0,budget_skipped=0)
@@ -64,8 +70,19 @@ def run_daily_schedule(frames, evidence, *, configs, calendar, start, end,
             day = decision_day(event, calendar)
             if day: effective[symbol].setdefault(day, []).append(event)
 
-    def snapshot(stage, pending_value=None):
-        item = dict(version=VERSION, stage=stage, comparisons=accounts,
+    def snapshot(stage, pending_value=None, *, required=False):
+        deliver = checkpoint_callback is not None and (checkpoint_stages is None or stage in checkpoint_stages)
+        if not required and not deliver:
+            return None
+        # Private daily states skip repeated metrics/JSON conversion. Every
+        # externally visible checkpoint still has the original complete shape.
+        published_accounts = {policy: materialize_simulation(value) for policy, value in accounts.items()}
+        if pending_value is not None:
+            pending_value = dict(pending_value)
+            for key in ('day_start', 'risk_preview'):
+                pending_value[key] = {policy: materialize_simulation(value)
+                                      for policy, value in pending_value.get(key, {}).items()}
+        item = dict(version=VERSION, stage=stage, comparisons=published_accounts,
             evidence=all_evidence, coverage=coverage, errors=errors, days=day_records,
             complete_through=complete_through, risk_through=risk_through,
             evaluation_gap=evaluation_gap, pending=pending_value,
@@ -73,18 +90,18 @@ def run_daily_schedule(frames, evidence, *, configs, calendar, start, end,
                             'order':'held_then_active_candidates_then_new_candidates_symbol_ascending'},
             execution_mode=execution_mode)
         value = deepcopy(item)
-        if checkpoint_callback: checkpoint_callback(value)
+        if deliver: checkpoint_callback(value)
         return value
 
     def check(pending_value=None):
-        if stopped(stop): raise ScheduleCancelled(snapshot('cancelled', pending_value))
+        if stopped(stop): raise ScheduleCancelled(snapshot('cancelled', pending_value, required=True))
 
     def advance(day, previous, *, benchmarks=False, risk_only=False):
         if prepared_runtime is not None:prepared_runtime.begin_step()
         return {policy:run_position_simulation(frames,all_evidence,config=config,
             start=start,end=day,calendar=calendar,state=(previous.get(policy) or {}).get('state'),
             corporate_actions=corporate_actions,include_benchmarks=benchmarks,risk_only=risk_only,
-            prepared_runtime=prepared_runtime)
+            prepared_runtime=prepared_runtime,_defer_summary=not benchmarks)
             for policy,config in configs.items()}
 
     def interrupted_result(day, current):
@@ -95,11 +112,12 @@ def run_daily_schedule(frames, evidence, *, configs, calendar, start, end,
         for risk_day in [d for d in new_days if d>=day]:
             check(current)
             risk_accounts=advance(risk_day,risk_accounts,risk_only=True)
-        value=snapshot('interrupted',current)
+        value=snapshot('interrupted',current,required=True)
         value['risk_through']=end
         value['pending_observation_count']=len(current['queue'])-len(current['outcomes'])
         if checkpoint_callback:checkpoint_callback(value)
-        return dict(comparisons=accounts or risk_accounts,risk_comparisons=risk_accounts,
+        risk_accounts={policy:materialize_simulation(value) for policy,value in risk_accounts.items()}
+        return dict(comparisons=value['comparisons'] or risk_accounts,risk_comparisons=risk_accounts,
             evidence=all_evidence,coverage=coverage,errors=errors,checkpoint=value,status='partial',
             scheduler={k:v for k,v in value.items() if k not in {'comparisons','evidence','errors'}},
             comparison_scope='completed_evaluation' if accounts else 'risk_only_no_completed_evaluation')
@@ -120,7 +138,7 @@ def run_daily_schedule(frames, evidence, *, configs, calendar, start, end,
                                           for e in effective[s].get(day,[]))}
         queue = sorted(held)+sorted(active-held)+sorted(fresh-held-active)
         current = pending if pending and pending.get('date') == day else dict(date=day,queue=queue,outcomes=[],
-            day_start=deepcopy(accounts),risk_preview=preview,phase='risk_complete')
+            day_start=accounts,risk_preview=preview,phase='risk_complete')
         if current['queue'] != queue: raise ValueError('Checkpoint causal queue changed')
         risk_through = day
         snapshot('observing', current)
@@ -145,7 +163,7 @@ def run_daily_schedule(frames, evidence, *, configs, calendar, start, end,
                     coverage['requested'] -= 1
                     if not stopped(stop) and deadline is not None and time.monotonic()>=deadline:
                         return interrupted_result(day,current)
-                    raise ScheduleCancelled(snapshot('cancelled',current))
+                    raise ScheduleCancelled(snapshot('cancelled',current,required=True))
                 except (ValueError,RuntimeError,TimeoutError) as exc:
                     status = 'failed'
                     forecast = dict(as_of=day,status='unavailable',reason=str(exc),quality={'prediction_usable':False})
@@ -198,7 +216,7 @@ def run_daily_schedule(frames, evidence, *, configs, calendar, start, end,
         pending=None
         snapshot('day_committed')
     if coverage['requested'] != sum(coverage[k] for k in OUTCOMES): raise AssertionError('Observation counts do not reconcile')
-    final=snapshot('completed' if not evaluation_gap else 'partial')
-    return dict(comparisons=accounts,evidence=all_evidence,coverage=coverage,errors=errors,
+    final=snapshot('completed' if not evaluation_gap else 'partial',required=True)
+    return dict(comparisons=final['comparisons'],evidence=all_evidence,coverage=coverage,errors=errors,
         scheduler={k:v for k,v in final.items() if k not in {'comparisons','evidence','errors'}},
         checkpoint=final,status='partial' if evaluation_gap else 'completed')

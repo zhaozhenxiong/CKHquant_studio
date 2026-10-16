@@ -80,3 +80,21 @@ def test_missing_cache_chunk_is_local_repair_not_false_reuse(source):
     repaired=service.source('002436.SZ',dates[-1],calendar_dates=dates)
     assert not repaired[1].attrs['incremental']['reused']
     assert repaired[3]==result[3]
+
+
+def test_append_serializes_only_open_tail_and_renews_closed_chunk_dependencies(source,monkeypatch):
+    service,store,raw,dates=source
+    before=service.source('002436.SZ',dates[309],calendar_dates=dates)
+    original=store.put_many;written=[]
+    def put_many(items,**kwargs):
+        written.extend(len(item['result']['rows']) for item in items if item.get('namespace')=='incremental_chunks')
+        return original(items,**kwargs)
+    monkeypatch.setattr(store,'put_many',put_many)
+    after=service.source('002436.SZ',dates[-1],calendar_dates=dates)
+    assert written==[340-256]
+    assert after[1].attrs['incremental']['feature_closed_chunks_reused']==1
+    manifest=service._peek(after[3]['source_cache_key'])
+    rows=store.connection.execute('SELECT cache_key,expires_at FROM results').fetchall()
+    expirations={row['cache_key']:row['expires_at'] for row in rows}
+    assert all(expirations[part['cache_key']]>=expirations[after[3]['source_cache_key']] for part in manifest['chunks'])
+    assert store.connection.execute('SELECT COUNT(*) FROM leases').fetchone()[0]==0

@@ -315,6 +315,7 @@
     $('training-selection-events').innerHTML = items.length ? items.map(item => { const payload = item.payload || item; return `<article><strong>${esc(({select:'更新当前研究模型',rollback:'回滚当前研究选择'})[item.kind] || item.action || item.event_type || '模型选择记录')}</strong><span>记录 ${esc(item.created_at || payload.recorded_at || payload.selected_at || '')}${payload.effective_from ? ` · 生效 ${esc(payload.effective_from)}` : ''}</span><p>${esc(payload.reason || payload.reason_code || '通过冻结证据检查后记录')}</p><small>模型 ${esc(payload.run_id || payload.model_run_id || '无模型状态')}${payload.previous_run_id ? ` · 前任 ${esc(payload.previous_run_id)}` : ''}</small></article>`; }).join('') : '<p class="subtle">尚无当前体系替换事件；训练完成不会自动伪造选择或发布记录。</p>';
   }
   async function pollJobs() {
+    if(document.hidden){clearTimeout(state.timer);state.timer=setTimeout(()=>pollJobs().catch(()=>{}),15000);return;}
     clearTimeout(state.timer);
     const jobs = [...state.jobs.values()].filter(job => active.has(job.status));
     for (const job of jobs) { try { state.jobs.set(job.job_id,await api(`/api/tasks/${encodeURIComponent(job.job_id)}`)); } catch (error) { fail(error); } }

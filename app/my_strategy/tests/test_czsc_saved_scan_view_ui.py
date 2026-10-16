@@ -42,7 +42,7 @@ def test_saved_compact_scan_renders_search_and_drills_causal_reference():
     run_js(SCAN + r'''
 const calls=[];global.fetch=async(url)=>{calls.push(url);return response(scan);};
 await workbench.openRun('saved/final','scan');
-assert.equal(calls[0],'/api/runs/saved%2Ffinal?view=scan');
+assert.equal(calls[0],'/api/runs/saved%2Ffinal?view=scan&page=1&page_size=100');
 assert.equal(element('scan-count').textContent,'2');
 assert(element('scan-rows').innerHTML.includes('S · 参考减仓'));
 element('scan-search').value='东诚';workbench.renderScan();
@@ -79,13 +79,13 @@ assert.deepEqual(lastAnalysisQuery.consensus_config,scan.consensus_config);
 ''')
 
 
-def test_finished_scan_task_reads_compact_job_before_delivery_and_delivers_once():
+def test_finished_scan_task_reads_first_indexed_page_and_delivers_once():
     run_js(SCAN + r'''
 const job={job_id:'finished scan',kind:'scan',status:'succeeded',run_id:'final-scan',result:null};
 workbench.state.tracked.scan=job.job_id;
 const calls=[];global.fetch=async(url)=>{calls.push(url);
  if(url==='/api/tasks')return response({tasks:[job]});
- if(url==='/api/tasks/finished%20scan?view=scan')return response({...job,result:scan});
+ if(url==='/api/runs/final-scan?view=scan&page=1&page_size=100')return response(scan);
  if(url==='/api/runs?limit=30')return response({runs:[]});
  throw new Error('unexpected full result request: '+url);};
 await workbench.refreshTasks();await settle();
@@ -143,4 +143,26 @@ assert.equal(workbench.state.scan.run_id,'later');
 global.fetch=async(url)=>{assert.equal(url,'/api/runs/legacy-unknown');return response(scan);};
 await workbench.openRun('legacy-unknown');
 assert.equal(workbench.state.scan.run_id,'final-scan');
+''')
+
+
+def test_paged_scan_search_and_favorites_use_server_filter_and_ignore_stale_page():
+    run_js(SCAN + r'''
+scan.scan_view={...scan.scan_view,paged:true,page:1,page_size:100,total:201,total_rows:201};
+workbench.state.scan=scan;workbench.renderScan();
+assert.equal(element('scan-next').disabled,false);
+const requests=pendingNetwork();
+element('scan-search').value='东诚';const old=fire('scan-search','input');
+element('scan-search').value='缺行情';const current=fire('scan-search','input');
+assert(new URL(requests[0].url,'http://test').searchParams.get('q')==='东诚');
+assert(new URL(requests[1].url,'http://test').searchParams.get('q')==='缺行情');
+requests[1].resolve(response({...scan,rows:[scan.rows[1]],scan_view:{...scan.scan_view,total:1}}));await current;
+requests[0].resolve(response({...scan,rows:[scan.rows[0]],scan_view:{...scan.scan_view,total:1}}));await old;
+assert(element('scan-rows').innerHTML.includes('000016.SZ'));
+assert(!element('scan-rows').innerHTML.includes('002675.SZ'));
+workbench.state.favorites=new Set(['002675.SZ']);element('scan-filter').value='favorites';
+const favorite=fire('scan-filter','change');
+assert.equal(new URL(requests[2].url,'http://test').searchParams.get('symbols'),'002675.SZ');
+requests[2].resolve(response({...scan,rows:[],scan_view:{...scan.scan_view,total:0}}));await favorite;
+assert(element('scan-page-label').textContent.includes('0 条'));
 ''')

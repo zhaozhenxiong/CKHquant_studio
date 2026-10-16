@@ -189,6 +189,7 @@ class BoardFluentStore:
         identity=_verified(row['identity_json'],row['identity_sha'])
         if digest(identity)!=row['generation_id'] or identity['cache_key']!=row['cache_key'] or identity['contract_hash']!=row['contract_hash']:
             raise ValueError('Fluent generation identity drift')
+        if public.get('publication_inputs',{})!=identity.get('publication_inputs',{}):raise ValueError('Fluent publication input identity drift')
         if public['price_date']!=row['price_date']:raise ValueError('Fluent generation date drift')
         native=None
         if row['native_identity_json'] is not None:native=_verified(row['native_identity_json'],row['native_identity_sha'])
@@ -199,19 +200,77 @@ class BoardFluentStore:
     def get_generation(self,generation_id):
         with self._read() as conn:return self._generation(conn,generation_id) if conn else None
 
+    def verify_calculation_scope(self,generation_id):
+        """Verify saved board projections for explicit reads without math or stock bundles."""
+        with self._read() as conn:
+            generation=self._generation(conn,generation_id) if conn else None
+            if generation is None:raise ValueError('Fluent generation is missing')
+            self._scope_projection(conn,generation)
+            return generation
+
     def current_generation(self,level='market'):
         if level not in {'market','full'}:raise ValueError('unknown Fluent publication level')
         with self._read() as conn:
             if conn is None:return None
             row=conn.execute(f'SELECT generation_id FROM feature_generations WHERE {level}_active=1').fetchone()
-            return self._generation(conn,row[0]) if row else None
+            if not row:return None
+            generation=self._generation(conn,row[0])
+            return generation if self._scope_projection(conn,generation) is not None else None
+
+    def list_generations(self,limit=50):
+        """Enumerate saved references; selecting history is always explicit."""
+        with self._read() as conn:
+            if conn is None:return []
+            result=[]
+            for row in conn.execute('SELECT generation_id FROM feature_generations WHERE market_ready=1 ORDER BY created_at DESC LIMIT ?',
+                                    (max(1,min(int(limit),200)),)):
+                generation=self._generation(conn,row[0]);self._scope_projection(conn,generation)
+                result.append(generation)
+            return result
+
+    @staticmethod
+    def _scope_projection(conn,generation):
+        """Validate the saved calculation population without raw-price reads."""
+        from my_strategy.services.board_calculation_scope import CALCULATION_SCOPE,verify_calculation_membership
+        if generation.get('calculation_scope')!=CALCULATION_SCOPE:return None
+        projections={}
+        for row in conn.execute('SELECT * FROM board_daily_features WHERE generation_id=? ORDER BY board_id',
+                                (generation['generation_id'],)):
+            value=BoardFluentStore._row(row,board=True)
+            projection=verify_calculation_membership(value.get('calculation_membership'))
+            if (value.get('calculation_scope')!=CALCULATION_SCOPE or projection['board_id']!=value['board_id'] or
+                value.get('snapshot_hash')!=projection['source_snapshot_hash'] or
+                value.get('source_snapshot_hash')!=projection['source_snapshot_hash'] or
+                value.get('projection_hash')!=projection['projection_hash'] or
+                value.get('expected_members')!=projection['eligible_count']):
+                raise ValueError('Fluent board calculation scope identity drift')
+            projections[value['board_id']]=projection
+        if generation.get('calculation_membership')!=projections or len(projections)!=generation['board_count']:
+            raise ValueError('Fluent calculation projection population drift')
+        inputs=generation.get('publication_inputs',{})
+        required=sorted({symbol for value in projections.values() for symbol in value['eligible_members']})
+        if inputs and (inputs.get('calculation_scope')!=CALCULATION_SCOPE or
+                      inputs.get('projection_hashes')!={key:value['projection_hash'] for key,value in projections.items()} or
+                      inputs.get('required_symbols')!=required):
+            raise ValueError('Fluent publication projection identity drift')
+        return projections
+
+    @staticmethod
+    def _verify_stock_scope(row,memberships):
+        from my_strategy.services.board_calculation_scope import CALCULATION_SCOPE,is_calculation_symbol
+        expected={key:value['projection_hash'] for key,value in memberships.items() if row['symbol'] in value['eligible_members']}
+        if (row.get('calculation_scope')!=CALCULATION_SCOPE or not is_calculation_symbol(row['symbol']) or
+            row.get('calculation_projection_hashes')!=expected):
+            raise ValueError('Fluent stock calculation population or projection mismatch')
 
     def ready_full_generation(self,price_date):
         """Find an immutable completed index even after its publication moved."""
         with self._read() as conn:
             if conn is None:return None
-            row=conn.execute('SELECT generation_id FROM feature_generations WHERE price_date=? AND full_ready=1 ORDER BY created_at DESC LIMIT 1',(price_date,)).fetchone()
-            return self._generation(conn,row[0]) if row else None
+            for row in conn.execute('SELECT generation_id FROM feature_generations WHERE price_date=? AND full_ready=1 ORDER BY created_at DESC',(price_date,)):
+                generation=self._generation(conn,row[0])
+                if self._scope_projection(conn,generation) is not None:return generation
+            return None
 
     def get_native_component(self,generation_id,*,allow_partial=False):
         """Read verified indexed summaries and refs; never decode producer blobs."""
@@ -231,6 +290,11 @@ class BoardFluentStore:
         if len({row['board_id'] for row in boards})!=len(boards) or len({row['symbol'] for row in stocks})!=len(stocks):raise ValueError('duplicate Fluent entity')
         if any(row.get('training_eligible') is not False or row.get('mode')!='current_reference' or row.get('price_date')!=bundle['price_date'] for row in boards+stocks):
             raise ValueError('Fluent row is historical or incompatible')
+        from my_strategy.services.board_calculation_scope import CALCULATION_SCOPE,calculation_contract
+        if bundle.get('calculation_scope')==CALCULATION_SCOPE:
+            memberships=bundle.get('calculation_membership')
+            calculation_contract(memberships)
+            for row in stocks:self._verify_stock_scope(row,memberships)
         contract=contract or {'rank_policy':RANK_POLICY};contract_hash=digest(contract)
         identity={'cache_key':bundle['cache_key'],'contract_hash':contract_hash,
                   'publication_inputs':publication_inputs or {}};generation_id=digest(identity)
@@ -279,6 +343,7 @@ class BoardFluentStore:
             for ref_type,entity_id,value in refs:self._put(conn,'feature_input_refs',('generation_id','ref_type','entity_id','payload_json','payload_sha'),
                                                          (generation_id,ref_type,entity_id,canonical(value),digest(value)))
             conn.execute('UPDATE feature_generations SET market_ready=1 WHERE generation_id=?',(generation_id,))
+            self._scope_projection(conn,self._generation(conn,generation_id))
             if publish:self._publish(conn,generation_id,'market')
         return generation_id
 
@@ -344,6 +409,7 @@ class BoardFluentStore:
         if generation is None or not generation['market_ready']:raise ValueError('Fluent generation is missing or incomplete')
         self.load_market(generation['cache_key'],generation['fluent_contract'],generation_id=generation_id)
         with self._read() as conn:
+            self._scope_projection(conn,generation)
             for table in ('feature_input_refs','board_rankings'):
                 for row in conn.execute('SELECT payload_json,payload_sha FROM '+table+' WHERE generation_id=?',(generation_id,)):
                     _verified(row['payload_json'],row['payload_sha'])
@@ -360,6 +426,24 @@ class BoardFluentStore:
         native_boards={row[0] for row in conn.execute('SELECT board_id FROM board_structure_features WHERE generation_id=?',(generation_id,))}
         if native_boards!=market_boards:raise ValueError('native board component omitted required entities')
         if not isinstance(identity,dict):raise ValueError('native component identity missing')
+        projections=BoardFluentStore._scope_projection(conn,BoardFluentStore._generation(conn,generation_id))
+        if projections is not None:
+            from my_strategy.services.board_calculation_scope import CALCULATION_SCOPE,verify_calculation_membership
+            if (identity.get('calculation_scope')!=CALCULATION_SCOPE or
+                identity.get('projection_hashes')!={key:value['projection_hash'] for key,value in projections.items()} or
+                identity.get('required_symbols')!=sorted({symbol for value in projections.values() for symbol in value['eligible_members']})):
+                raise ValueError('native calculation scope or population mismatch')
+            if not identity['required_symbols']:raise ValueError('native calculation population is empty')
+            actual=[row[0] for row in conn.execute('SELECT symbol FROM native_stock_summaries WHERE generation_id=? ORDER BY symbol',(generation_id,))]
+            if actual!=identity['required_symbols']:raise ValueError('native summary component omitted required entities')
+            for row in conn.execute('SELECT * FROM board_structure_features WHERE generation_id=?',(generation_id,)):
+                value=BoardFluentStore._row(row)
+                projection=verify_calculation_membership(value.get('calculation_membership'))
+                if (projection!=projections[value['board_id']] or value.get('calculation_scope')!=CALCULATION_SCOPE or
+                    value.get('source_snapshot_hash')!=projection['source_snapshot_hash'] or
+                    value.get('projection_hash')!=projection['projection_hash'] or
+                    value.get('expected_members')!=projection['eligible_count']):
+                    raise ValueError('native board calculation projection mismatch')
         if identity.get('format') in {'native_summary_collection_v1','incremental_native_summary_collection_v1'}:
             required=identity.get('required_symbols')
             if not isinstance(required,list) or any(not isinstance(symbol,str) for symbol in required) or required!=sorted(set(required)):
@@ -376,7 +460,8 @@ class BoardFluentStore:
     def _selected(self,conn,generation_id):
         if generation_id is not None:return generation_id
         row=conn.execute('SELECT generation_id FROM feature_generations WHERE market_active=1').fetchone()
-        return row[0] if row else None
+        if row and self._scope_projection(conn,self._generation(conn,row[0])) is not None:return row[0]
+        return None
 
     def board(self,board_id,generation_id=None,include_structure=True):
         with self._read() as conn:
@@ -398,10 +483,13 @@ class BoardFluentStore:
             if conn is None:return None
             generation_id=self._selected(conn,generation_id)
             if generation_id is None:return None
-            self._generation(conn,generation_id)
+            generation=self._generation(conn,generation_id)
             row=conn.execute('SELECT * FROM stock_daily_features WHERE generation_id=? AND symbol=?',(generation_id,symbol)).fetchone()
             if row is None:return None
             value={**self._row(row),'generation_id':generation_id}
+            from my_strategy.services.board_calculation_scope import CALCULATION_SCOPE
+            if generation.get('calculation_scope')==CALCULATION_SCOPE:
+                self._verify_stock_scope(value,generation['calculation_membership'])
             value.update(_verified(row['memberships_json'],row['memberships_sha']))
             native=conn.execute('SELECT * FROM native_stock_summaries WHERE generation_id=? AND symbol=?',(generation_id,symbol)).fetchone()
             value['native_summary']=self._row(native) if native else None

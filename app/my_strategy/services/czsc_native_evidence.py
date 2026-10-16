@@ -260,11 +260,18 @@ def _zone_snapshot(zone: Any, available: str, seen: dict[str, dict], finished_ke
     return value
 
 
+def _check_cancel(cancel_check):
+    if cancel_check is not None and hasattr(cancel_check,'check'):
+        cancel_check.check();return
+    if cancel_check and (cancel_check.is_set() if hasattr(cancel_check, 'is_set') else cancel_check()):
+        raise InterruptedError('原生结构计算已取消')
+
+
 def _structure_evidence(bars: pd.DataFrame, raw_quality: np.ndarray, metrics: pd.DataFrame,
                         settings: dict, czsc_config: dict | None,
-                        calendar: _VerifiedCalendar, *, resume_state=None, state_sink=None) -> tuple[list, list, list, list]:
+                        calendar: _VerifiedCalendar, *, resume_state=None, state_sink=None, cancel_check=None, compact=False) -> tuple[list, list, list, list]:
     from my_strategy.services.czsc_incremental_state import dump_session, restore_session
-    session = restore_session(resume_state['session']) if resume_state else CzscSession(
+    session = restore_session(resume_state['session'], cancel_check=cancel_check) if resume_state else CzscSession(
         str(bars.iloc[0].symbol), strategy_config(czsc_config), len(bars),
         collect_confirmations=False, create_position=False)
     facts: list[dict] = []; evaluations: list[dict] = []; daily_events: list[list] = []; auxiliary: list[dict] = []
@@ -284,6 +291,8 @@ def _structure_evidence(bars: pd.DataFrame, raw_quality: np.ndarray, metrics: pd
         engine[key] = engine[key].where(np.isfinite(engine[key]) & (engine[key] >= 0), 0.)
     for i, row in enumerate(engine.itertuples(index=False)):
         if i < start_index: continue
+        if (i-start_index)%32==0:_check_cancel(cancel_check)
+        detail=not compact or i==len(bars)-1
         date, close = _day(row.date), float(row.close); available = date + "T15:00:00+08:00"
         session.advance_structure(row)
         analysis = session.kas["日线"]; finished = analysis.finished_bis
@@ -389,7 +398,7 @@ def _structure_evidence(bars: pd.DataFrame, raw_quality: np.ndarray, metrics: pd
                 dependency_start = min(dependency_start, int(bars.date.searchsorted(pd.Timestamp(fact["dependency_start"]))))
         current_span = calendar.span(dependency_start, i)
         eligible = bool(raw_quality[i] and current_span["dependency_calendar_complete"] and bad_prefix[i + 1] == bad_prefix[dependency_start])
-        supports = copy.deepcopy(list(active.values())) if eligible else []
+        supports = (copy.deepcopy(list(active.values())) if detail else list(active.values())) if eligible else []
         buys = [fact for fact in supports if fact["side"] == "BUY"]
         sells = [fact for fact in supports if fact["side"] == "SELL"]
         zone_buy = bool(zone and close >= zone["resistance_high"])
@@ -411,11 +420,12 @@ def _structure_evidence(bars: pd.DataFrame, raw_quality: np.ndarray, metrics: pd
             "date": date, "available_at": available, "snapshot_at": available, "input_eligible": eligible,
             "buy_valid": bool(eligible and buy_strength > 0), "sell_valid": bool(eligible and sell_strength > 0),
             "direction_state": "CONFLICT" if eligible and buy_strength > 0 and sell_strength > 0 else "BUY" if eligible and buy_strength > 0 else "SELL" if eligible and sell_strength > 0 else "ABSTAIN",
-            "current_state": state, "support_facts": supports,
+            "current_state": state, "support_facts": supports if detail else [],
             "active_buy_event_ids": [fact["event_id"] for fact in buys], "active_sell_event_ids": [fact["event_id"] for fact in sells],
-            "invalidated_event_ids": list(invalidated), "invalidations_at_day": invalidations,
+            "invalidated_event_ids": list(invalidated) if detail else [], "invalidations_at_day": invalidations,
             "reason_codes": [] if eligible else ["native_structure_input_ineligible", *([] if current_span["dependency_calendar_complete"] else ["native_structure_dependency_calendar_incomplete"])]})
-        daily_events.append(copy.deepcopy(new))
+        daily_events.append(copy.deepcopy(new) if detail else [])
+    _check_cancel(cancel_check)
     if state_sink is not None:
         state_sink.update(rows=len(bars), session=dump_session(session), seen=seen,
             zone_seen=zone_seen, active=active, invalidated=invalidated)
@@ -423,12 +433,20 @@ def _structure_evidence(bars: pd.DataFrame, raw_quality: np.ndarray, metrics: pd
 
 
 def _wyckoff_evidence(bars: pd.DataFrame, legacy: pd.DataFrame, metrics: pd.DataFrame,
-                      scores: pd.DataFrame, settings: dict, w_config: dict | None = None) -> tuple[list, list, list]:
+                      scores: pd.DataFrame, settings: dict, w_config: dict | None = None, *, cancel_check=None, compact=False, resume_state=None, state_sink=None) -> tuple[list, list, list]:
     facts: list[dict] = []; evaluations: list[dict] = []; daily_events: list[list] = []
     pending: dict[str, dict] = {}; active: dict[str, dict] = {}; invalidated: dict[str, dict] = {}
     origin_index: dict[str, int] = {}
     event_settings = event_config(w_config)
-    for i, row in enumerate(legacy.to_dict(orient="records")):
+    start_index=0
+    if resume_state:
+        start_index=resume_state['rows']
+        pending,active,invalidated,origin_index=[copy.deepcopy(resume_state[key]) for key in ('pending','active','invalidated','origin_index')]
+        if not 0<start_index<len(bars) or len(legacy)!=len(bars)-start_index:
+            raise ValueError('Native Wyckoff state requires aligned append')
+    for i, row in enumerate(legacy.to_dict(orient="records"),start=start_index):
+        if i%32==0:_check_cancel(cancel_check)
+        detail=not compact or i==len(bars)-1
         date = _day(bars.iloc[i].date); available = date + "T15:00:00+08:00"; close = float(bars.iloc[i].close)
         eligible = bool(row["wyckoff_input_eligible"]); atr = _number(metrics.iloc[i].atr)
         kind = str(row["wyckoff_event"]); anchor = row.get("wyckoff_anchor_at") or date; new = []
@@ -489,7 +507,7 @@ def _wyckoff_evidence(bars: pd.DataFrame, legacy: pd.DataFrame, metrics: pd.Data
             invalidations.extend(_invalidate(active, invalidated, matching, available, "legacy_pending_invalidated"))
         supports = []
         for item in active.values():
-            snapshot = copy.deepcopy(item)
+            snapshot = copy.deepcopy(item) if detail else dict(item)
             age = i - origin_index[item["event_id"]]
             strength = _W_WEIGHTS[item["event_type"]] * max(0., 1. - age / settings["event_score_decay_bars"])
             snapshot.update(snapshot_at=available, current_available_at=available, age_bars=age,
@@ -517,11 +535,13 @@ def _wyckoff_evidence(bars: pd.DataFrame, legacy: pd.DataFrame, metrics: pd.Data
             "date": date, "available_at": available, "snapshot_at": available, "input_eligible": bool(eligible and continuous),
             "buy_valid": buy_valid, "sell_valid": sell_valid,
             "direction_state": "BUY" if buy_valid else "SELL" if sell_valid else "ABSTAIN",
-            "current_state": state, "support_facts": supports, "active_buy_event_ids": [item["event_id"] for item in buys],
-            "active_sell_event_ids": [item["event_id"] for item in sells], "invalidated_event_ids": list(invalidated),
+            "current_state": state, "support_facts": supports if detail else [], "active_buy_event_ids": [item["event_id"] for item in buys],
+            "active_sell_event_ids": [item["event_id"] for item in sells], "invalidated_event_ids": list(invalidated) if detail else [],
             "invalidations_at_day": invalidations,
             "reason_codes": list(row["wyckoff_reason_codes"]) if not eligible else [] if continuous else ["current_volume_metrics_unavailable"]})
-        daily_events.append(copy.deepcopy(new))
+        daily_events.append(copy.deepcopy(new) if detail else [])
+    if state_sink is not None:
+        state_sink.update(rows=len(bars),pending=pending,active=active,invalidated=invalidated,origin_index=origin_index)
     return facts, evaluations, daily_events
 
 
@@ -606,7 +626,8 @@ def can_reuse_native_wyckoff(prepared: PreparedNativeWyckoff, config: dict | Non
 def build_native_evidence(frame: pd.DataFrame, config: dict | None = None, *,
                              market_dates: list[str] | None = None,
                              prepared_wyckoff: PreparedNativeWyckoff | None = None,
-                             incremental_state: dict | None = None, capture_state: bool = False) -> dict:
+                             incremental_state: dict | None = None, capture_state: bool = False,
+                             cancel_check=None, compact: bool = False) -> dict:
     """Enrich a complete single-stock causal prefix; never mutate its old columns.
 
     Optional ``config['native_evidence']`` changes obtain a distinct schema.
@@ -620,6 +641,7 @@ def build_native_evidence(frame: pd.DataFrame, config: dict | None = None, *,
     A prepared W result is reused only after raw/index, policy/calendar,
     quality metadata and generated output identity checks all succeed.
     """
+    _check_cancel(cancel_check)
     settings = _settings(config)
     semantics = {**copy.deepcopy(NATIVE_SEMANTICS), "config": settings}
     czsc_settings = strategy_config((config or {}).get("czsc_strategy") or (config or {}).get("strategy"))
@@ -653,26 +675,9 @@ def build_native_evidence(frame: pd.DataFrame, config: dict | None = None, *,
     market_dates = market_dates if market_dates is not None else frame.attrs.get("verified_market_dates")
     calendar = _VerifiedCalendar(bars, market_dates)
     w_config = _wyckoff_config(config, market_dates)
-    if prepared_wyckoff is None:
-        legacy = prepare_wyckoff_inputs(frame, bars, config=w_config)
-    else:
-        if (not can_reuse_native_wyckoff(prepared_wyckoff, config) or
-                prepared_wyckoff.input_hash != _wyckoff_input_hash(frame, bars, w_config) or
-                prepared_wyckoff.output_hash != _wyckoff_output_hash(prepared_wyckoff.frame)):
-            raise ValueError("prepared Wyckoff input, policy or output identity drift")
-        # The no-calendar branch below adjusts eligibility, so keep the bound
-        # prepared result immutable and independently reusable.
-        legacy = prepared_wyckoff.frame.copy()
-    if not calendar.provided:
-        legacy["wyckoff_input_eligible"] = False
-        legacy["wyckoff_reason_codes"] = [list(codes) + ["native_verified_calendar_unavailable"] for codes in legacy.wyckoff_reason_codes]
-    metrics = _prior_metrics(bars)
-    raw_quality = legacy["wyckoff_input_eligible"].to_numpy(dtype=bool)
-    scores = _continuous_scores(bars, metrics, raw_quality)
-    structure_state={} if capture_state else None
     prefix_rows=0
     if incremental_state:
-        if (incremental_state.get('format')!='native_evidence_state_v1' or
+        if (incremental_state.get('format') not in {'native_evidence_state_v1','native_evidence_state_v2'} or
             incremental_state.get('state_sha256')!=stable_hash({k:v for k,v in incremental_state.items() if k!='state_sha256'})):
             raise ValueError('native continuation state SHA or schema mismatch')
         prefix_rows=incremental_state['structure']['rows']
@@ -684,15 +689,45 @@ def build_native_evidence(frame: pd.DataFrame, config: dict | None = None, *,
         if (incremental_state.get('schema_hash')!=schema_hash or incremental_state.get('config_hash')!=config_hash or
             incremental_state.get('raw_prefix_hash')!=actual or incremental_state.get('calendar_prefix_hash')!=stable_hash(prefix_dates)):
             raise ValueError('native continuation input prefix or contract changed')
+    feature_state={} if capture_state else None
+    calculation={}
+    w_resume=(incremental_state or {}).get('wyckoff')
+    feature_resume=(incremental_state or {}).get('wyckoff_features')
+    # A v1 snapshot remains readable. Without both v2 state machines replay
+    # Wyckoff exactly and slice only after generation.
+    if not (w_resume and feature_resume):w_resume=feature_resume=None
+    if prepared_wyckoff is None:
+        legacy = prepare_wyckoff_inputs(frame,bars,config=w_config,resume_state=feature_resume,
+            state_sink=feature_state,calculation_sink=calculation,cancel_check=cancel_check)
+    else:
+        if feature_resume:raise ValueError('Prepared full Wyckoff and incremental Wyckoff state cannot be combined')
+        if (not can_reuse_native_wyckoff(prepared_wyckoff, config) or
+                prepared_wyckoff.input_hash != _wyckoff_input_hash(frame, bars, w_config) or
+                prepared_wyckoff.output_hash != _wyckoff_output_hash(prepared_wyckoff.frame)):
+            raise ValueError("prepared Wyckoff input, policy or output identity drift")
+        # The no-calendar branch below adjusts eligibility, so keep the bound
+        # prepared result immutable and independently reusable.
+        legacy = prepared_wyckoff.frame.copy()
+    if not calendar.provided:
+        legacy["wyckoff_input_eligible"] = False
+        legacy["wyckoff_reason_codes"] = [list(codes) + ["native_verified_calendar_unavailable"] for codes in legacy.wyckoff_reason_codes]
+    _check_cancel(cancel_check)
+    metrics = _prior_metrics(bars)
+    raw_quality = calculation.get('full_eligibility',legacy["wyckoff_input_eligible"].to_numpy(dtype=bool))
+    if not calendar.provided:raw_quality=np.zeros(len(bars),dtype=bool)
+    scores = _continuous_scores(bars, metrics, raw_quality)
+    structure_state={} if capture_state else None
     structural, structure_eval, structure_daily, auxiliary = _structure_evidence(bars, raw_quality, metrics,
         settings, czsc_settings, calendar, resume_state=incremental_state['structure'] if incremental_state else None,
-        state_sink=structure_state)
-    wyckoff, w_eval, w_daily = _wyckoff_evidence(bars, legacy, metrics, scores, settings, (config or {}).get("wyckoff"))
+        state_sink=structure_state,cancel_check=cancel_check,compact=compact)
+    wyckoff_state={} if capture_state else None
+    wyckoff, w_eval, w_daily = _wyckoff_evidence(bars,legacy,metrics,scores,settings,(config or {}).get("wyckoff"),
+        cancel_check=cancel_check,compact=compact,resume_state=w_resume,state_sink=wyckoff_state)
     if prefix_rows:
         frame=frame.iloc[prefix_rows:]; scores=scores.iloc[prefix_rows:]
-        w_eval=w_eval[prefix_rows:];w_daily=w_daily[prefix_rows:]
+        if not w_resume:w_eval=w_eval[prefix_rows:];w_daily=w_daily[prefix_rows:]
         wyckoff=[item for item in wyckoff if item['date']>=_day(frame.iloc[0].date)]
-    for item in structure_eval + w_eval:
+    for item in ((structure_eval[-1:]+w_eval[-1:]) if compact else structure_eval + w_eval):
         item["evidence_schema_hash"] = schema_hash
         item["evidence_config_hash"] = config_hash
         item["snapshot_id"] = item["source_id"] + ":snapshot:native:" + stable_hash({
@@ -707,14 +742,14 @@ def build_native_evidence(frame: pd.DataFrame, config: dict | None = None, *,
     result["native_structure_support_low"] = [item["current_state"]["support_floor"] for item in structure_eval]
     result["native_structure_resistance_high"] = [item["current_state"]["resistance_ceiling"] for item in structure_eval]
     result["native_structure_current_valid_zone"] = pd.Series([item["current_state"]["current_valid_zone"] for item in structure_eval], index=frame.index, dtype=object)
-    result["native_structure_snapshot"] = pd.Series(structure_eval, index=frame.index, dtype=object)
+    if not compact:result["native_structure_snapshot"] = pd.Series(structure_eval, index=frame.index, dtype=object)
     result["native_w_demand_score"] = scores["demand"]
     result["native_w_supply_score"] = scores["supply"]
     result["native_w_event_demand_support"] = [item["current_state"]["event_demand_support"] for item in w_eval]
     result["native_w_event_supply_support"] = [item["current_state"]["event_supply_support"] for item in w_eval]
     result["native_w_input_eligible"] = scores["eligible"]
-    result["native_w_snapshot"] = pd.Series(w_eval, index=frame.index, dtype=object)
-    result["native_events_at_day"] = pd.Series([s + w for s, w in zip(structure_daily, w_daily)], index=frame.index, dtype=object)
+    if not compact:result["native_w_snapshot"] = pd.Series(w_eval, index=frame.index, dtype=object)
+    if not compact:result["native_events_at_day"] = pd.Series([s + w for s, w in zip(structure_daily, w_daily)], index=frame.index, dtype=object)
     result["native_version"] = NATIVE_EVIDENCE_VERSION
     result["native_schema_hash"] = schema_hash
     result["native_auxiliary_input_eligible"] = [item["input_eligible"] for item in auxiliary]
@@ -730,15 +765,19 @@ def build_native_evidence(frame: pd.DataFrame, config: dict | None = None, *,
                         native_semantics=semantics, native_config_hash=config_hash)
     output={"frame": result, "events": sorted(structural + wyckoff, key=lambda item: (item["date"], item["source"], item["event_id"])),
             "evaluations": [{"date": s["date"], "available_at": s["available_at"], "structure": s, "wyckoff": w}
-                            for s, w in zip(structure_eval, w_eval)],
+                            for s, w in zip(structure_eval[-1:] if compact else structure_eval, w_eval[-1:] if compact else w_eval)],
             "wyckoff_events": copy.deepcopy(wyckoff), "version": NATIVE_EVIDENCE_VERSION,
             "auxiliary_evaluations": auxiliary, "calendar_provenance": calendar.provenance,
             "config_hash": config_hash, "schema_hash": schema_hash, "semantics": semantics}
+    _check_cancel(cancel_check)
     if capture_state:
-        output['incremental_state']={'format':'native_evidence_state_v1','structure':structure_state,
+        output['incremental_state']={'format':'native_evidence_state_v2','structure':structure_state,
+            'wyckoff':wyckoff_state,'wyckoff_features':feature_state,
             'schema_hash':schema_hash,'config_hash':config_hash,'raw_prefix_hash':stable_hash(_json(bars.to_dict('records'))),
             'calendar_prefix_hash':stable_hash([d for d in (market_dates or []) if d<=_day(bars.iloc[-1].date)])}
         output['incremental_state']['state_sha256']=stable_hash(output['incremental_state'])
         output['incremental']={'native_rows_appended':len(bars)-prefix_rows,'native_prefix_reused':prefix_rows,
-            'wyckoff_mode':'single_stock_vector_replay','wyckoff_rows_replayed':len(bars)}
+            'wyckoff_mode':'state_append_with_exact_vector_metrics' if w_resume else 'single_stock_vector_replay',
+            'wyckoff_rows_replayed':0 if w_resume else len(bars),'wyckoff_rows_appended':len(bars)-prefix_rows if w_resume else 0,
+            'rolling_metrics_mode':'exact_full_prefix_pandas'}
     return output

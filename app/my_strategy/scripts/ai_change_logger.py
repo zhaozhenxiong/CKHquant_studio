@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import difflib
 import gzip
 import hashlib
 import json
@@ -42,6 +43,15 @@ REDACTIONS = [
 ]
 MAX_DIFF_CHARS = 20_000
 MAX_OUTPUT_CHARS = 50_000
+SOURCE_DIRS = ('my_strategy/adapters','my_strategy/core','my_strategy/data_manager',
+    'my_strategy/execution','my_strategy/scripts','my_strategy/services','my_strategy/storage',
+    'my_strategy/validation','my_strategy/web_dashboard','my_strategy/tests','my_strategy/configs',
+    'my_strategy/docs','my_strategy/skills','my_strategy/agent_prompts','vendor','docker','macos','parameter_profiles')
+SOURCE_SUFFIXES = {'.py','.pyi','.rs','.c','.h','.cc','.cpp','.hpp','.js','.ts','.tsx','.jsx','.css','.html','.md','.rst','.toml',
+    '.yaml','.yml','.json','.ini','.cfg','.sh','.bat','.ps1','.command','.hcl','.lock','.example'}
+SOURCE_DENY_DIRS = {'data','artifacts','knowledge_base','knowledge_base_system','kronos_model',
+    'logs','outputs','node_modules','__pycache__','.git','.venv','venv','.scratch','.release-work'}
+SOURCE_MAX_BYTES = 4 * 1024 * 1024
 
 
 def now_local() -> dt.datetime:
@@ -58,7 +68,10 @@ def ensure_dirs() -> None:
 
 
 def redact(text: str) -> str:
-    result = text
+    # Process quoted values before the legacy unquoted patterns so a spaced
+    # secret cannot leave its trailing words in snapshots or diffs.
+    result = re.sub(r"(?i)((?:[\"']?(?:api[_-]?key|token|password|cookie|secret|authorization)[\"']?)\s*[:=]\s*)(?:\"[^\"\n]*\"|'[^'\n]*'|[^\s,;]+)",
+                    lambda match: match.group(1) + '<REDACTED>', text)
     for pattern in REDACTIONS:
         result = pattern.sub(r"\1<REDACTED>", result)
     return result
@@ -79,6 +92,152 @@ def write_diff_artifact(sid: str, diff_text: str) -> str | None:
     with gzip.open(path, "wt", encoding="utf-8", newline="\n") as handle:
         handle.write(diff_text)
     return path.relative_to(PROJECT_ROOT).as_posix()
+
+
+def safe_source_path(path: Path) -> bool:
+    """Reject linked ancestors as well as leaves, including broken links."""
+    try:
+        relative = path.relative_to(PROJECT_ROOT)
+        cursor = PROJECT_ROOT
+        if cursor.is_symlink(): return False
+        for part in relative.parts:
+            cursor = cursor / part
+            if cursor.is_symlink(): return False
+        return path.resolve().is_relative_to(PROJECT_ROOT.resolve())
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def stable_source_bytes(path: Path) -> bytes:
+    if not safe_source_path(path): raise ValueError('linked or external source path')
+    fd = os.open(path, os.O_RDONLY | getattr(os,'O_NOFOLLOW',0))
+    with os.fdopen(fd,'rb') as handle:
+        before = os.fstat(handle.fileno())
+        if before.st_size > SOURCE_MAX_BYTES: raise ValueError('source exceeds snapshot size bound')
+        content = handle.read(SOURCE_MAX_BYTES + 1)
+        after = os.fstat(handle.fileno())
+    current = path.stat(follow_symlinks=False)
+    identity = lambda value: (value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
+    if not safe_source_path(path) or len(content) > SOURCE_MAX_BYTES or identity(before) != identity(after) or identity(after) != identity(current):
+        raise ValueError('source changed during snapshot read')
+    return content
+
+
+def source_snapshot() -> dict[str, Any]:
+    """Read only source/templates/docs, never business trees or linked targets."""
+    if not safe_source_path(PROJECT_ROOT):
+        return {'schema':'source_audit_v1','scope':'allowlisted source, configuration templates and documentation',
+                'complete':False,'errors':[{'path':'','error':'linked project root'}],'files':{}}
+    root_names = {'Dockerfile','.gitignore','.dockerignore','.env.example','pyproject.toml',
+                  'docker-compose.yml','docker-bake.hcl','czsc-source-manifest.json'}
+    candidates = {path for path in PROJECT_ROOT.iterdir() if path.is_file() and path.name != 'AI_CHANGELOG.md'
+                  and (path.suffix in {'.py','.md','.sh','.bat','.ps1','.command'}
+                       or path.name in root_names or path.name.startswith('requirements'))}
+    package = PROJECT_ROOT / 'my_strategy'
+    if package.is_dir() and safe_source_path(package):
+        candidates.update(path for path in package.iterdir() if path.is_file() and path.suffix in {'.py','.md'})
+    scan_errors = []
+    def unreadable_directory(exc):
+        location = Path(exc.filename).relative_to(PROJECT_ROOT).as_posix() if exc.filename else '<unknown>'
+        scan_errors.append({'path':location,'error':str(exc)})
+    for relative in SOURCE_DIRS:
+        base = PROJECT_ROOT / relative
+        if not safe_source_path(base):
+            scan_errors.append({'path':relative,'error':'linked or external source directory'}); continue
+        if not base.is_dir(): continue
+        for directory, dirs, files in os.walk(base, followlinks=False, onerror=unreadable_directory):
+            if not safe_source_path(Path(directory)):
+                scan_errors.append({'path':Path(directory).relative_to(PROJECT_ROOT).as_posix(),'error':'source directory changed to link'});dirs[:]=[];continue
+            dirs[:] = [name for name in dirs if name not in SOURCE_DENY_DIRS
+                       and not (Path(directory) / name).is_symlink()]
+            candidates.update(Path(directory) / name for name in files)
+    files, errors = {}, scan_errors
+    for path in sorted(candidates):
+        relative = path.relative_to(PROJECT_ROOT).as_posix()
+        if not safe_source_path(path) or any(part in SOURCE_DENY_DIRS for part in path.relative_to(PROJECT_ROOT).parts): continue
+        if path.name.startswith('.env') and path.name != '.env.example': continue
+        if path.name.lower() in {'credentials.json','secrets.json','credentials.yaml','secrets.yaml'}: continue
+        if path.suffix not in SOURCE_SUFFIXES and path.name not in {'Dockerfile','.gitignore','.dockerignore'} \
+                and not (path.name.startswith('requirements') and path.suffix == '.txt'): continue
+        try:
+            content = stable_source_bytes(path)
+            text = redact(content.decode('utf-8'))
+            files[relative] = {'sha256': hashlib.sha256(content).hexdigest(), 'size_bytes': len(content),
+                'redacted_sha256': hashlib.sha256(text.encode()).hexdigest(), 'text': text}
+        except (OSError, UnicodeError, ValueError) as exc:
+            errors.append({'path': relative, 'error': str(exc)})
+    return {'schema':'source_audit_v1','scope':'allowlisted source, configuration templates and documentation',
+            'complete':not errors,'errors':errors,'files':files}
+
+
+def save_source_baseline(sid: str) -> dict[str, Any]:
+    snapshot = source_snapshot()
+    encoded = gzip.compress(json.dumps(snapshot, ensure_ascii=False, sort_keys=True).encode(), mtime=0)
+    path = DIFF_ROOT / (sid + '.source-before.json.gz')
+    path.write_bytes(encoded)
+    manifest = {**snapshot, 'files': {key:{k:v for k,v in value.items() if k != 'text'}
+                                    for key,value in snapshot['files'].items()}}
+    manifest_path = DIFF_ROOT / (sid + '.source-before.manifest.json')
+    manifest_path.write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding='utf-8')
+    return {'method':'no_git_source_snapshot','status':'available' if snapshot['complete'] else 'partial',
+        'snapshot_path':path.relative_to(PROJECT_ROOT).as_posix(),
+        'snapshot_sha256':hashlib.sha256(encoded).hexdigest(),
+        'manifest_path':manifest_path.relative_to(PROJECT_ROOT).as_posix(), 'errors':snapshot['errors']}
+
+
+def source_diff(data: dict[str, Any]) -> tuple[dict[str, Any], list[str], str, str]:
+    baseline = data.get('source_baseline') or {}
+    try:
+        if not baseline.get('snapshot_path'): raise ValueError('session started without a source snapshot')
+        path = PROJECT_ROOT / baseline['snapshot_path']
+        if path.is_symlink() or not path.resolve().is_relative_to(DIFF_ROOT.resolve()):
+            raise ValueError('snapshot path outside audit diff storage')
+        encoded = path.read_bytes()
+        if hashlib.sha256(encoded).hexdigest() != baseline.get('snapshot_sha256'):
+            raise ValueError('source snapshot SHA mismatch')
+        before = json.loads(gzip.decompress(encoded))
+        if before.get('schema') != 'source_audit_v1': raise ValueError('unsupported source snapshot schema')
+        after = source_snapshot()
+        changes, patches, unknown = [], [], []
+        read_errors = before.get('errors',[]) + after['errors']
+        for relative in sorted(before['files'].keys() | after['files'].keys()):
+            old, new = before['files'].get(relative), after['files'].get(relative)
+            if not safe_source_path(PROJECT_ROOT/relative) or any(not error['path'] or relative == error['path'] or relative.startswith(error['path'] + '/') for error in read_errors):
+                unknown.append(relative); continue
+            if old and new is None and ((PROJECT_ROOT/relative).is_symlink() or (PROJECT_ROOT/relative).exists()):
+                unknown.append(relative); continue
+            if old and new and old['sha256'] == new['sha256']: continue
+            kind = 'added' if old is None else 'deleted' if new is None else 'modified'
+            changes.append({'path':relative,'change':kind,'before_sha256':old['sha256'] if old else None,
+                            'after_sha256':new['sha256'] if new else None})
+            lines = lambda value: [line+'\n' for line in (value or {}).get('text','').splitlines()]
+            patch = ''.join(difflib.unified_diff(lines(old), lines(new), fromfile='a/'+relative if old else '/dev/null',
+                tofile='b/'+relative if new else '/dev/null'))
+            patches.append(patch or '# ' + relative + ': content SHA changed; redacted text is unchanged\n')
+        complete = bool(before.get('complete') and after['complete'] and not unknown)
+        capture = {'method':'no_git_source_snapshot','status':'available' if complete else 'partial',
+            'changes':changes,'errors':read_errors,'unverifiable_paths':unknown,
+            'before_manifest_path':baseline.get('manifest_path')}
+        stat = '\n'.join(item['change']+' '+item['path'] for item in changes) or ('No verified changes; capture incomplete.' if not complete else 'No source changes within the declared whitelist.')
+        if not complete: stat = 'PARTIAL source capture; unknown files may have changed.\n'+stat
+        return capture, [item['path'] for item in changes], '\n'.join(patches), stat
+    except (OSError, ValueError, KeyError, TypeError, EOFError) as exc:
+        reason = str(exc)
+        return {'method':'no_git_source_snapshot','status':'unavailable','reason':reason}, [], '', 'UNAVAILABLE: '+reason
+
+
+def external_diff_evidence(sid: str, source: Path) -> dict[str, str]:
+    """Attach explicitly supplied evidence; never pretend it was a start snapshot."""
+    source = Path(source)
+    if source.is_symlink() or not source.is_file(): raise ValueError('external diff must be a regular file')
+    if source.stat().st_size > 50 * 1024 * 1024: raise ValueError('external diff exceeds size bound')
+    original = source.read_bytes()
+    value = redact(original.decode('utf-8'))
+    path = DIFF_ROOT / (sid + '.external.patch.gz')
+    path.write_bytes(gzip.compress(value.encode(),mtime=0))
+    return {'source_path':str(source.resolve()),'source_sha256':hashlib.sha256(original).hexdigest(),
+        'redacted_diff_sha256':hashlib.sha256(value.encode()).hexdigest(),
+        'artifact_path':path.relative_to(PROJECT_ROOT).as_posix(), 'kind':'supplemental_external_evidence'}
 
 
 def run_process(
@@ -233,7 +392,8 @@ def start_session(
 ) -> dict[str, Any]:
     ensure_dirs()
     sid = session_id()
-    baseline_status = git_status() if git_available() else ""
+    has_git = git_available()
+    baseline_status = git_status() if has_git else ""
     prompt_path = write_prompt_snapshot(sid, task, prompt)
     data: dict[str, Any] = {
         "session_id": sid,
@@ -243,7 +403,7 @@ def start_session(
         "started_at": iso_now(),
         "ended_at": None,
         "project_root": str(PROJECT_ROOT),
-        "git_available": git_available(),
+        "git_available": has_git,
         "git_branch": git_branch(),
         "baseline_commit": git_head(),
         "baseline_status": baseline_status,
@@ -261,6 +421,8 @@ def start_session(
         "diff_sha256": "",
         "note_path": None,
     }
+    if not has_git:
+        data["source_baseline"] = save_source_baseline(sid)
     save_session(data)
     return data
 
@@ -341,7 +503,7 @@ tags:
 
 ## 修改文件
 
-{chr(10).join(links) if links else '- 未检测到文件变化'}
+{chr(10).join(links) if links else '- 变更采集不可用或不完整；无法判断变化数量' if (data.get('change_capture') or {}).get('status') in {'unavailable','partial'} else '- 未检测到白名单范围内的文件变化'}
 
 ## 测试与验证
 
@@ -359,7 +521,7 @@ tags:
 
 退出码：`{data.get('command_exit_code')}`
 
-## Git Diff Stat
+## Diff Stat
 
 ```text
 {data.get('diff_stat') or '无'}
@@ -367,6 +529,8 @@ tags:
 
 ## Diff Evidence
 
+- 采集：`{(data.get('change_capture') or {}).get('method', 'git')}` / `{(data.get('change_capture') or {}).get('status', 'available')}`
+- 外部补充证据：`{(data.get('external_diff_evidence') or {}).get('artifact_path', '无')}`
 - SHA-256: `{data.get('diff_sha256') or '无'}`
 - 完整压缩 diff：`{data.get('diff_artifact_path') or '未生成（diff 未超过内联上限）'}`
 
@@ -376,7 +540,7 @@ tags:
 {command_output or '无'}
 ```
 
-## Git Diff
+## Captured Diff
 
 ```diff
 {diff_text or '# No diff captured'}
@@ -405,7 +569,7 @@ def append_changelog(data: dict[str, Any], note_path: Path) -> None:
     line = (
         f"- {data['ended_at']} | `{data['agent']}` | session `{sid}` | "
         f"`{data['status']}` | [{data['task']}]({rel_note}) | "
-        f"{len(data.get('changed_files', []))} files | "
+        f"{'unknown' if (data.get('change_capture') or {}).get('status') in {'unavailable','partial'} else len(data.get('changed_files', []))} files | "
         f"{data.get('final_commit') or 'UNCOMMITTED'}\n"
     )
     existing = [
@@ -461,12 +625,21 @@ def finish_session(
     exit_code: int | None = None,
     command_output: str | None = None,
     explicit_status: str | None = None,
+    external_diff: Path | None = None,
 ) -> dict[str, Any]:
     data = load_session(sid)
     current_status = git_status() if data.get("git_available") else ""
     diff_text = git_diff() if data.get("git_available") else ""
     changed_files = parse_status_paths(current_status)
     final_commit = git_head() if data.get("git_available") else "NO_GIT"
+    if data.get('git_available'):
+        capture = {'method':'git','status':'available' if git_available() else 'unavailable'}
+        stat = git_diff_stat() if capture['status'] == 'available' else 'UNAVAILABLE: original Git repository is unavailable'
+    else:
+        capture, changed_files, diff_text, stat = source_diff(data)
+    data['change_capture'] = capture
+    if external_diff is not None:
+        data['external_diff_evidence'] = external_diff_evidence(sid, external_diff)
 
     if explicit_status:
         status = explicit_status
@@ -487,8 +660,8 @@ def finish_session(
             "command_output": command_output or data.get("command_output", ""),
             "changed_files": changed_files,
             "final_commit": final_commit,
-            "diff_stat": git_diff_stat() if data.get("git_available") else "",
-            "diff_sha256": hashlib.sha256(redacted_diff.encode("utf-8", errors="replace")).hexdigest(),
+            "diff_stat": stat,
+            "diff_sha256": hashlib.sha256(redacted_diff.encode("utf-8", errors="replace")).hexdigest() if capture["status"] != "unavailable" else "",
             "diff_artifact_path": write_diff_artifact(sid, redacted_diff),
         }
     )
@@ -527,6 +700,7 @@ def command_finish(args: argparse.Namespace) -> int:
         risks=split_multi(args.risks),
         exit_code=args.exit_code,
         explicit_status=args.status,
+        external_diff=Path(args.external_diff) if args.external_diff else None,
     )
     print(json.dumps(data, ensure_ascii=False, indent=2))
     return 0
@@ -592,6 +766,7 @@ def build_parser() -> argparse.ArgumentParser:
     finish.add_argument("--tests", action="append")
     finish.add_argument("--risks", action="append")
     finish.add_argument("--exit-code", type=int)
+    finish.add_argument("--external-diff", help="Supplemental redacted diff evidence; does not reconstruct a missing baseline.")
     finish.add_argument(
         "--status",
         choices=["success", "partial", "failed", "blocked"],

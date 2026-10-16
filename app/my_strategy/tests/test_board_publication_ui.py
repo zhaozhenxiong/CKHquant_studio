@@ -29,9 +29,9 @@ const source=fs.readFileSync(process.argv[1],'utf8').replace("  if(!$('scan-boar
 `);
 vm.runInThisContext(source);
 const day=g=>g==='g1'?'2026-10-13':'2026-10-14';
-const status=g=>({fluent:{market:g?{generation_id:g,price_date:day(g)}:null}});
-const ranking=g=>({generation_id:g,price_date:day(g),rankings:[{generation_id:g,price_date:day(g)}]});
-const visual=g=>({generation_id:g,price_date:day(g),rows:[{generation_id:g,price_date:day(g)}]});
+const status=g=>({fluent:{market:g?{generation_id:g,calculation_scope:'sh_sz_a_v1',price_date:day(g)}:null}});
+const ranking=g=>({generation_id:g,calculation_scope:'sh_sz_a_v1',price_date:day(g),rankings:[{generation_id:g,calculation_scope:'sh_sz_a_v1',price_date:day(g)}]});
+const visual=g=>({generation_id:g,calculation_scope:'sh_sz_a_v1',price_date:day(g),rows:[{generation_id:g,calculation_scope:'sh_sz_a_v1',price_date:day(g)}]});
 const response=value=>({ok:true,status:200,json:async()=>value});
 const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
 const flush=async()=>{for(let i=0;i<12;i++)await Promise.resolve();};

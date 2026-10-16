@@ -36,7 +36,10 @@ def create_app(task_manager: TaskManager | None = None, personal_store: Personal
     from my_strategy.services.light_research import LightResearch
     from my_strategy.web_dashboard.light_api import router as light_router
     app.state.light = LightResearch(root=manager.db_path.parent / 'light_research')
+    manager.light = app.state.light
     app.include_router(light_router)
+    from my_strategy.web_dashboard.task_history_api import router as task_history_router
+    app.include_router(task_history_router)
 
     @app.middleware("http")
     async def security(request: Request, call_next):

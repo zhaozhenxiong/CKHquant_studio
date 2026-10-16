@@ -155,7 +155,7 @@
   function render(container, source, settings={}) {
     if(!container)return null;
     const summary=normalize(source);
-    if(!summary){clear(container,source?'此结果没有可用的已保存交易日状态，无法生成历史图表。':'此扫描结果未保存30交易日状态。完成新扫描后可查看；旧结果保留原扫描列表。');return null;}
+    if(!summary){clear(container,source?.message || (source?'此结果没有可用的已保存交易日状态，无法生成历史图表。':'此扫描结果未保存30交易日状态。完成新扫描后可查看；旧结果保留原扫描列表。'));return null;}
     const runId=settings.runId||summary.run_id,previous=mounts.get(container);
     if(previous?.source===source&&previous.runId===runId)return previous.controller;
     const prior=previous?.runId===runId?previous.state:null;

@@ -7,6 +7,7 @@ The returned checkpoint can be passed back with the same historical prefix.
 from __future__ import annotations
 
 import copy
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 import hashlib
 import inspect
@@ -63,6 +64,21 @@ def _clean(value):
 def _hash(value):
     return hashlib.sha256(json.dumps(_clean(value), sort_keys=True,
         ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
+def _copy_resume_state(state):
+    """Copy mutable account state, sharing only historical append-only rows.
+
+    This call never changes an existing row in these histories. The returned
+    public result is still recursively normalized/copied by _clean, so neither
+    input checkpoints nor prior outputs acquire aliases to mutable state.
+    Orders, lots, corporate entitlements and cycles remain deep-copied.
+    """
+    history = {'daily','decisions','trade_details','opportunities','agent_evidence',
+               'risk_evidence','corporate_ledger','ledger'}
+    result = copy.deepcopy({k:v for k,v in state.items() if k not in history})
+    result.update({k:list(v) for k,v in state.items() if k in history})
+    return result
 
 
 def _number(value, default=None):
@@ -191,17 +207,28 @@ def _prepare(frames, evidence, start, end, calendar, prepared_runtime=None):
             and prepared_runtime.cached_evidence is evidence
             and prepared_runtime.cached_epoch==prepared_runtime.evidence_epoch):
         return bars,normalized,prepared_runtime.cached_daily_evidence,sessions,start
-    daily_evidence = {s: {} for s in bars}
+    append_mode = prepared_runtime is not None and prepared_runtime.owned_evidence is evidence
+    daily_evidence = ({s: dict(rows) for s, rows in prepared_runtime.append_daily_evidence.items()}
+                      if append_mode else {s: {} for s in bars})
+    changed_days = set()
     for symbol, entries in (evidence or {}).items():
         if symbol not in bars: raise ValueError("Evidence symbol outside frozen population")
-        for original in entries:
+        offset = 0
+        if append_mode:
+            previous = prepared_runtime.append_cursors.get(symbol)
+            if previous is not None:
+                if previous[0] is not entries or len(entries) < previous[1]:
+                    raise ValueError('Owned scheduler evidence must be append-only')
+                offset = previous[1]
+        for original in entries[offset:]:
             entry = _clean(copy.deepcopy(original))
             if not entry.get("date"): raise ValueError("Evidence date is required")
             timestamp = pd.Timestamp(entry.get("available_at") or (str(entry["date"])[:10] + "T15:00:00+08:00"))
             timestamp = timestamp.tz_localize("Asia/Shanghai") if timestamp.tzinfo is None else timestamp.tz_convert("Asia/Shanghai")
             available_day = timestamp.date().isoformat()
             late = timestamp.hour > 15 or (timestamp.hour == 15 and (timestamp.minute or timestamp.second or timestamp.microsecond))
-            effective = next((d for d in dates if d > available_day or (d == available_day and not late)), None)
+            effective_index = bisect_right(dates, available_day) if late else bisect_left(dates, available_day)
+            effective = dates[effective_index] if effective_index < len(dates) else None
             if entry.get("observation_kind") == "daily_agent_observation":
                 # An after-close forecast belongs to this close's decision slot,
                 # but retains its actual availability. The order separately
@@ -212,9 +239,18 @@ def _prepare(frames, evidence, start, end, calendar, prepared_runtime=None):
             entry["available_at"] = timestamp.isoformat()
             entry["event_id"] = str(entry.get("event_id") or _hash({"symbol": symbol, "date": entry["date"],
                 "available_at": entry["available_at"], "side": entry.get("side"), "source": entry.get("source")}))
-            daily_evidence[symbol].setdefault(effective, []).append(entry)
-    for by_day in daily_evidence.values():
-        for entries in by_day.values(): entries.sort(key=lambda r: (r["available_at"], r["event_id"]))
+            if (symbol, effective) not in changed_days:
+                daily_evidence[symbol][effective] = list(daily_evidence[symbol].get(effective, []))
+                changed_days.add((symbol, effective))
+            daily_evidence[symbol][effective].append(entry)
+        if append_mode:
+            prepared_runtime.append_cursors[symbol] = (entries, len(entries))
+            prepared_runtime.stats['evidence_rows_parsed'] += len(entries) - offset
+    for symbol, day in changed_days:
+        daily_evidence[symbol][day].sort(key=lambda r: (r["available_at"], r["event_id"]))
+    if append_mode:
+        prepared_runtime.append_daily_evidence = daily_evidence
+        prepared_runtime.append_changed_days = {day for _, day in changed_days}
     if prepared_runtime is not None and prepared_runtime.evidence_epoch is not None:
         prepared_runtime.cached_evidence=evidence
         prepared_runtime.cached_epoch=prepared_runtime.evidence_epoch
@@ -238,7 +274,18 @@ class PreparedSimulationRuntime:
         self.indicator_cache={};self.prefix_cache={};self.serialized_bars={}
         self.evidence_epoch=None;self.cached_epoch=None;self.cached_evidence=None
         self.cached_daily_evidence=None
-        self.stats={'price_preparations':1,'indicator_preparations':0,'prefix_days_hashed':0}
+        self.owned_evidence=None; self.append_cursors={}
+        self.append_daily_evidence={symbol:{} for symbol in self.symbols}
+        self.append_changed_days=set()
+        self.stats={'price_preparations':1,'indicator_preparations':0,'prefix_days_hashed':0,'evidence_rows_parsed':0}
+
+    def own_append_only_evidence(self, evidence):
+        """Opt in only for the scheduler's private deep-copied evidence graph.
+
+        Public callers keep full mutation validation. The scheduler never
+        exposes this graph until a deep-copied checkpoint or final result.
+        """
+        self.owned_evidence=evidence
 
     @staticmethod
     def encoded(value):
@@ -278,7 +325,12 @@ class PreparedSimulationRuntime:
         # Rebuild this union when evidence changes so added/removed dates are
         # hashed exactly as in the ordinary, uncached path.
         cached['dates']=sorted(set(cached['base_dates']) | {day for day in observed_days if day<=self.end})
-        encoded_evidence={day:self.encoded({s:evidence[s].get(day,[]) for s in self.symbols}) for day in observed_days}
+        if self.owned_evidence is not None and evidence is self.append_daily_evidence:
+            encoded_evidence=dict(cached['evidence'])
+            for day in observed_days if not cached['evidence'] else self.append_changed_days:
+                encoded_evidence[day]=self.encoded({s:evidence[s].get(day,[]) for s in self.symbols})
+        else:
+            encoded_evidence={day:self.encoded({s:evidence[s].get(day,[]) for s in self.symbols}) for day in observed_days}
         cutoff=sessions[-1]
         changed=[day for day in set(cached['evidence'])|set(encoded_evidence)
             if day<=cutoff and cached['evidence'].get(day)!=encoded_evidence.get(day)]
@@ -669,10 +721,50 @@ def simulation_metrics(daily, trades, initial_cash, config=None, completed_cycle
     ))
 
 
+def _simulation_summary(state, cfg, contract):
+    """Materialize presentation metrics from one complete immutable account state."""
+    contract_hash = state['contract_hash']
+    orders = {order['order_id']: order for order in state['orders']}
+    # The trade table derives exclusively from the shared Broker Ledger.
+    ledger = pd.DataFrame(state["ledger"]).to_dict("records")
+    trades = [{**record, **detail} for record, detail in zip(ledger, state["trade_details"])]
+    metrics = simulation_metrics(state["daily"], trades, cfg["initial_cash"], cfg, state["cycles"])
+    metrics.update(rejected_attempts=sum(a["status"]=="rejected" for o in state["orders"] for a in o["attempts"]),
+        pending_exits=sum(orders[i]["side"]=="SELL" for i in state["pending"]))
+    lineage = dict(**contract, input_prefix_hash=state["input_prefix_hash"],
+        identity=_hash([contract_hash, state["input_prefix_hash"], state["last_date"]]),
+        account_scope="shared_cash_account", execution="next_verified_open_with_declared_slippage",
+        source_events="caller_supplied_confirmed_available_at", profit_certification=False,
+        warnings=["Historical research only; model pretraining and forward performance are not certified.",
+                  "Company-action coverage is unverified; unadjusted price returns are not certified total returns."
+                    if not cfg["company_actions_verified"] else "Caller supplied company-action coverage; explicit rights/payment assumptions are recorded.",
+                  "Missing historical execution limits use declared main-board research assumptions."
+                    if not cfg["require_verified_rules"] else "Execution requires supplied verified dated limits.",
+                  "Calendar inferred from observations; missing market sessions cannot be identified."
+                    if not contract["calendar_verified"] else "Caller supplied the session calendar.",
+                  "Daily-bar opening fills are a research approximation, not verified historical order fills."])
+    result = dict(version=VERSION, status="completed", policy=cfg["policy"], daily=state["daily"],
+        trades=trades, orders=state["orders"], decisions=state["decisions"], metrics=metrics,
+        corporate_ledger=state["corporate_ledger"], opportunities=state["opportunities"],
+        agent_evidence=state["agent_evidence"], risk_evidence=state["risk_evidence"], qualification_mode=cfg["research_mode"],
+        lineage=lineage, state=state, profit_certification=False, research_only=True)
+    from my_strategy.services.agent_evidence import opportunity_funnel
+    result["opportunity_funnel"] = opportunity_funnel(state["opportunities"],state["orders"],trades,state["cycles"])
+    return result
+
+
+def materialize_simulation(result):
+    """Expand a scheduler-private deferred account before any checkpoint/publication."""
+    context = result.get('_deferred_summary')
+    if context is None:
+        return result
+    return _clean(_simulation_summary(result['state'], context['config'], context['contract']))
+
+
 def run_position_simulation(frames: dict[str, pd.DataFrame], evidence: dict[str, list[dict]], *,
                             config=None, start=None, end=None, calendar=None, state=None,
                             corporate_actions=None, progress=None, check_cancel=None,
-                            include_benchmarks=True, risk_only=False, prepared_runtime=None):
+                            include_benchmarks=True, risk_only=False, prepared_runtime=None, _defer_summary=False):
     """Replay new sessions only; return JSON-safe results and an immutable checkpoint.
 
     Evidence uses confirmed=True, side=B/BUY/S/SELL, date, available_at,
@@ -709,7 +801,7 @@ def run_position_simulation(frames: dict[str, pd.DataFrame], evidence: dict[str,
             prefix_hashes[day] = prefix.hexdigest()
         rows = {s: _indicators(raw[s], cfg, [a for a in actions if a["symbol"] == s]) for s in symbols}
     if state:
-        state = copy.deepcopy(state)
+        state = _copy_resume_state(state)
         if state.get("version") != VERSION or state.get("contract_hash") != contract_hash:
             raise ValueError("Simulation configuration/population identity changed; create a new branch")
         last = state["last_date"]
@@ -1137,31 +1229,12 @@ def run_position_simulation(frames: dict[str, pd.DataFrame], evidence: dict[str,
     state.update(cash=broker.cash, positions=broker.positions, avg_cost=broker.avg_cost,
         ledger=[entry.to_dict() for entry in broker.ledger.entries], consumed=sorted(consumed),
         input_prefix_hash=prefix_hashes[state["last_date"]])
-    # The trade table derives exclusively from the shared Broker Ledger.
-    ledger = broker.ledger.to_frame().to_dict("records")
-    trades = [{**record, **detail} for record, detail in zip(ledger, state["trade_details"])]
-    metrics = simulation_metrics(state["daily"], trades, cfg["initial_cash"], cfg, state["cycles"])
-    metrics.update(rejected_attempts=sum(a["status"]=="rejected" for o in state["orders"] for a in o["attempts"]),
-        pending_exits=sum(orders[i]["side"]=="SELL" for i in state["pending"]))
-    lineage = dict(**contract, input_prefix_hash=state["input_prefix_hash"],
-        identity=_hash([contract_hash, state["input_prefix_hash"], state["last_date"]]),
-        account_scope="shared_cash_account", execution="next_verified_open_with_declared_slippage",
-        source_events="caller_supplied_confirmed_available_at", profit_certification=False,
-        warnings=["Historical research only; model pretraining and forward performance are not certified.",
-                  "Company-action coverage is unverified; unadjusted price returns are not certified total returns."
-                    if not cfg["company_actions_verified"] else "Caller supplied company-action coverage; explicit rights/payment assumptions are recorded.",
-                  "Missing historical execution limits use declared main-board research assumptions."
-                    if not cfg["require_verified_rules"] else "Execution requires supplied verified dated limits.",
-                  "Calendar inferred from observations; missing market sessions cannot be identified."
-                    if calendar is None else "Caller supplied the session calendar.",
-                  "Daily-bar opening fills are a research approximation, not verified historical order fills."])
-    result = dict(version=VERSION, status="completed", policy=cfg["policy"], daily=state["daily"],
-        trades=trades, orders=state["orders"], decisions=state["decisions"], metrics=metrics,
-        corporate_ledger=state["corporate_ledger"], opportunities=state["opportunities"],
-        agent_evidence=state["agent_evidence"], risk_evidence=state["risk_evidence"], qualification_mode=cfg["research_mode"],
-        lineage=lineage, state=state, profit_certification=False, research_only=True)
-    from my_strategy.services.agent_evidence import opportunity_funnel
-    result["opportunity_funnel"] = opportunity_funnel(state["opportunities"],state["orders"],trades,state["cycles"])
+    if _defer_summary:
+        if include_benchmarks:
+            raise ValueError('Deferred summaries cannot include benchmarks')
+        return {'state': state, 'daily': state['daily'],
+                '_deferred_summary': {'config': cfg, 'contract': contract}}
+    result = _simulation_summary(state, cfg, contract)
     if include_benchmarks and not passive:
         benchmarks = {}
         for label, weight in (("cash", 0), ("buy_hold_initial_budget", min(cfg["initial_weight"], cfg["max_total_weight"]/len(symbols))),

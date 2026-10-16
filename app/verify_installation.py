@@ -19,16 +19,19 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 PRIMARY_PAGES = ("analysis", "scan", "watchlist", "simulation", "data")
+COMBINED_METHODS = ('structure_kronos', 'structure_kronos_ma_mlp', 'structure_kronos_ma_l2')
 
 
 def verify_primary_navigation(html: str) -> list[str]:
     """Inspect the shipped navigation, rather than accepting any HTML fallback."""
     class Navigation(HTMLParser):
         def __init__(self):
-            super().__init__();self.in_primary=False;self.routes=[];self.ids=set()
+            super().__init__();self.in_primary=False;self.routes=[];self.ids=set();self.select=None;self.options={}
         def handle_starttag(self, tag, attrs):
             attributes=dict(attrs)
             if attributes.get('id'):self.ids.add(attributes['id'])
+            if tag=='select':self.select=attributes.get('id');self.options[self.select]=[]
+            if tag=='option' and self.select:self.options[self.select].append(attributes.get('value'))
             if tag=='nav' and attributes.get('aria-label')=='主要导航':self.in_primary=True
             if self.in_primary and tag=='a':
                 route=attributes.get('data-route')
@@ -36,9 +39,14 @@ def verify_primary_navigation(html: str) -> list[str]:
                 self.routes.append(route)
         def handle_endtag(self, tag):
             if tag=='nav':self.in_primary=False
+            if tag=='select':self.select=None
     parsed=Navigation();parsed.feed(html)
     if tuple(parsed.routes)!=PRIMARY_PAGES or not {'view-simulation','light-predict-form','light-score-type','light-score-variant'}<=parsed.ids:
         raise RuntimeError('Installed primary navigation or Agent/MLP controls are incomplete')
+    if (any(not set(COMBINED_METHODS) <= set(parsed.options.get(name, [])) for name in ('analysis-mode', 'scan-mode'))
+            or 'ma_trend_v1' not in parsed.options.get('light-feature-profile', [])
+            or not {'task-history-panel', 'task-delete-selected', 'task-cleanup-preview'} <= parsed.ids):
+        raise RuntimeError('Installed v1.0.1 method/profile/task controls are incomplete')
     return parsed.routes
 
 
@@ -78,7 +86,100 @@ def verify_lightweight_probe(report: dict, requested_device: str) -> dict:
             or model.get('inference_device')!='cpu' or model.get('save_reload_identical') is not True
             or not isinstance(report.get('incremental_source'),dict) or not isinstance(report.get('simulation_ledger'),dict)):
         raise RuntimeError('Installed lightweight probe device/serialization/component evidence is incomplete')
+    additions = report.get('v101') or {}
+    for name in ('ma_profile', 'board_scope', 'task_maintenance', 'spawn'):
+        if not isinstance(additions.get(name), dict) or additions[name].get('status') != 'passed':
+            raise RuntimeError('Installed v1.0.1 probe is incomplete: '+name)
+    ma = additions['ma_profile']
+    if (ma.get('feature_profile') != 'ma_trend_v1' or ma.get('input_dimensions') != 20
+            or ma.get('training_device') != model['training_device']
+            or ma.get('calibration_device') != 'cpu' or ma.get('inference_device') != 'cpu'
+            or any(ma.get(key) is not True for key in ('same_input_l2', 'distinct_scorer_same_model',
+                'save_reload_identical', 'causal_prefix_identical', 'missing_calendar_rejected', 'ineligible_stays_unscored'))
+            or any(ma.get(key) is not False for key in ('consumes_kronos', 'active_model_registered', 'paper_allocation_eligible'))):
+        raise RuntimeError('Installed v1.0.1 MA/L2 device/input/qualification evidence is incomplete')
+    board = additions['board_scope']
+    if (board.get('calculation_scope') != 'sh_sz_a_v1'
+            or [board.get(key) for key in ('source_member_count', 'eligible_count', 'excluded_count', 'bj_aliases_rejected')] != [6, 2, 4, 5]
+            or any(board.get(key) is not True for key in ('source_preserved', 'projection_tamper_rejected', 'empty_scope_unusable',
+                'historical_requires_explicit', 'scoped_publication_verified', 'mixed_denominator_rejected'))):
+        raise RuntimeError('Installed v1.0.1 board/BJ scope evidence is incomplete')
+    maintenance = additions['task_maintenance']
+    if (maintenance.get('production_state_touched') is not False
+            or any(maintenance.get(key) is not True for key in ('pagination', 'active_delete_rejected',
+                'terminal_record_deleted', 'preview_non_destructive', 'wrong_plan_hash_rejected', 'exact_fixture_cleanup'))):
+        raise RuntimeError('Installed v1.0.1 task maintenance evidence is incomplete')
+    spawn = additions['spawn']
+    checksum = spawn.get('adapter_sha256')
+    if (spawn.get('start_method') != 'spawn' or spawn.get('stocks') != 2
+            or spawn.get('prediction') != 'synthetic_stub_no_weights'
+            or not isinstance(checksum, str) or len(checksum) != 64 or any(c not in '0123456789abcdef' for c in checksum)
+            or not spawn.get('worker_pids') or not 1 <= len(spawn['worker_pids']) <= 2
+            or len(set(spawn['worker_pids'])) != len(spawn['worker_pids']) or type(spawn.get('parent_pid')) is not int
+            or any(type(pid) is not int or pid <= 0 or pid == spawn['parent_pid'] for pid in spawn['worker_pids'])
+            or any(spawn.get(key) is not True for key in ('real_native_preparation', 'rows_and_frozen_identity_identical',
+                'cancelled_preserves_pending', 'expired_budget_rejected', 'children_joined', 'algorithm_bytecode_preserved'))):
+        raise RuntimeError('Installed v1.0.1 spawn lifecycle evidence is incomplete')
     return report
+
+
+def verify_v101_api(base: str) -> dict:
+    """Validate shipped boundaries; invalid requests must never submit work."""
+    document = request(base, '/openapi.json')
+    paths = document.get('paths') or {}
+    required = {'/api/task-history': 'get', '/api/task-history/overview': 'get',
+        '/api/task-history/delete': 'post', '/api/task-history/cleanup/preview': 'post',
+        '/api/task-history/cleanup/execute': 'post', '/api/task-history/cleanup/recover': 'post',
+        '/api/boards/generations': 'get'}
+    if any(method not in paths.get(path, {}) for path, method in required.items()):
+        raise RuntimeError('Installed v1.0.1 maintenance/scope API is missing')
+    schemas = document.get('components', {}).get('schemas', {})
+    def choices(schema, field):
+        value = schemas.get(schema, {}).get('properties', {}).get(field, {})
+        return set(value.get('enum', [])) | {item for part in value.get('anyOf', []) for item in part.get('enum', [])}
+    for schema in ('AnalysisRequest', 'TaskSpec'):
+        if choices(schema, 'analysis_method') != set(COMBINED_METHODS) | {'structure', 'legacy_reference'}:
+            raise RuntimeError('Installed v1.0.1 combined method API catalog differs')
+    for schema in ('ScoreSpec', 'SimulationSpec'):
+        if choices(schema, 'feature_profile') != {'mixed_v1', 'ma_trend_v1'}:
+            raise RuntimeError('Installed v1.0.1 MA profile API differs')
+    history = request(base, '/api/task-history')
+    if history.get('total') != 0 or history.get('items') != []:
+        raise RuntimeError('Fresh installation task history is not empty')
+    rejected = [
+        ('/api/analysis', {'symbol': '000001.SZ', 'analysis_method': 'unknown'}),
+        ('/api/analysis', {'symbol': '000001.SZ', 'analysis_method': COMBINED_METHODS[0], 'model_run_id': 'legacy'}),
+        ('/api/analysis', {'symbol': '000001.SZ', 'analysis_method': COMBINED_METHODS[0], 'samples': 7}),
+        ('/api/tasks', {'kind': 'scan', 'spec': {'analysis_method': COMBINED_METHODS[1], 'budget_seconds': 0}}),
+        ('/api/tasks', {'kind': 'scan', 'spec': {'analysis_method': COMBINED_METHODS[2], 'score_model_id': '../model'}}),
+        ('/api/analysis', {'symbol': '430001.BJ', 'analysis_method': 'structure'}),
+        ('/api/tasks', {'kind': 'scan', 'spec': {'symbols': ['920001.BSE'], 'analysis_method': COMBINED_METHODS[0]}}),
+        ('/api/light/predict', {'symbol': 'BJ430001'}),
+        ('/api/light/score/train', {'symbols': ['430001.BJ'], 'feature_profile': 'ma_trend_v1'}),
+        ('/api/light/score/train', {'symbols': ['000001.SZ'], 'feature_profile': 'ma_trend_v1', 'select': True}),
+        ('/api/light/simulate', {'symbols': ['430001.BJ'], 'start': '2024-01-01', 'end': '2024-12-31'}),
+        ('/api/task-history/delete', {'tasks': [{'backend': 'legacy', 'job_id': '../../raw'}]}),
+        ('/api/task-history/cleanup/execute', {'plan_id': 'invalid', 'plan_sha256': 'invalid'}),
+    ]
+    for path, body in rejected:
+        try:
+            request(base, path, 'POST', body)
+        except HTTPError as exc:
+            if exc.code != 422:
+                raise RuntimeError('Invalid installed v1.0.1 request failed at the wrong boundary: '+path) from exc
+        else:
+            raise RuntimeError('Invalid installed v1.0.1 request was accepted: '+path)
+    after = request(base, '/api/task-history')
+    if after.get('total') != 0 or after.get('items') != [] or request(base, '/api/light/status').get('jobs'):
+        raise RuntimeError('Invalid installed v1.0.1 requests created work')
+    boards = request(base, '/api/boards/generations')
+    if (boards.get('required_calculation_scope') != 'sh_sz_a_v1' or boards.get('current_generation_id') is not None
+            or boards.get('generations') != [] or boards.get('needs_rebuild') is not True):
+        raise RuntimeError('Fresh installed boards fabricated a current scoped generation')
+    return dict(status='passed', combined_methods=list(COMBINED_METHODS), feature_profile='ma_trend_v1',
+        rejected_requests=len(rejected), invalid_requests_created_jobs=False, work_submitted=False,
+        board_calculation_scope='sh_sz_a_v1', missing_board_generation_explicit=True,
+        maintenance_routes=sorted(required))
 
 
 def model_probe(device: str) -> dict:
@@ -424,6 +525,7 @@ print(json.dumps({'version':distribution.version,'package_path':str(path),'prefi
                         raise RuntimeError(f"Missing installed dashboard page: {page}")
                 navigation = verify_primary_navigation(request(base,'/'))
                 lightweight_api = verify_lightweight_api(base)
+                v101_api = verify_v101_api(base)
                 for path, method, body in retired_routes:
                     expect_removed_route(base, path, method, body)
                 if restart == 0:
@@ -443,6 +545,7 @@ print(json.dumps({'version':distribution.version,'package_path':str(path),'prefi
     report = {"status": "passed", "python": sys.executable, "state": str(state), "device": device,
               "application_identity": identity, "doctor": doctor, "model": model,
               "lightweight_v1": lightweight, "lightweight_api":lightweight_api,
+              "v101_api": v101_api,
               "primary_navigation":navigation, "lightweight_entrypoint":True,
               "training_center": training_center, "dashboard_pages": list(pages), "watchlist_restart": True,
               "retired_routes_rejected": [f"{method} {path}" for path, method, _ in retired_routes],

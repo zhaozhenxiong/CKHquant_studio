@@ -347,10 +347,19 @@ def test_normalize_minute_frame_basic():
     __import__("importlib.util").util.find_spec("akshare") is None,
     reason="akshare not installed",
 )
-def test_akshare_provider_healthcheck_smoke():
+def test_akshare_provider_healthcheck_smoke(monkeypatch):
+    import akshare as ak
+    spot = pd.DataFrame({"code": ["000001", "600000"], "price": [10.0, 20.0]})
+    calls = []
+    def fake_spot():
+        calls.append("stock_zh_a_spot_em")
+        return spot.copy()
+    monkeypatch.setattr(ak, "stock_zh_a_spot_em", fake_spot)
     provider = AkShareProvider()
     result = provider.healthcheck()
-    assert isinstance(result, ProviderResult)
+    assert isinstance(result, ProviderResult) and result.ok
+    pd.testing.assert_frame_equal(result.data, spot.head(1))
+    assert calls == ["stock_zh_a_spot_em"]
 
 
 @pytest.mark.skipif(

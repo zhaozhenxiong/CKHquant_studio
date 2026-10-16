@@ -167,7 +167,7 @@ def bind_wyckoff_profile(frame, config=None):
     return result
 
 
-def prepare_wyckoff_inputs(frame, raw=None, config=None):
+def prepare_wyckoff_inputs(frame, raw=None, config=None, *, resume_state=None, state_sink=None, calculation_sink=None, cancel_check=None):
     """Add independent W32 and point-in-time metadata without changing old rules.
 
     One supplied daily row remains one output row, in its original index. Raw
@@ -209,6 +209,12 @@ def prepare_wyckoff_inputs(frame, raw=None, config=None):
                             wyckoff_profile=profile, wyckoff_formal_qualified=False)
         return result
     settings = event_config(config); profile = get_wyckoff_profile(config)
+    start_index=resume_state['events']['rows'] if resume_state else 0
+    if resume_state and (resume_state.get('format')!='wyckoff_feature_state_v1' or
+        resume_state.get('sha256')!=stable_hash({k:v for k,v in resume_state.items() if k!='sha256'}) or
+        resume_state.get('schema_hash')!=profile['schema_hash']):
+        raise ValueError('Wyckoff feature state SHA or schema mismatch')
+    if start_index and not 0<start_index<len(raw):raise ValueError('Wyckoff feature state requires strict append')
     eligible, reasons, quality = _raw_quality(raw, frame, config)
     p = raw[["open", "high", "low", "close", "volume", "amount"]].apply(pd.to_numeric, errors="coerce")
     op, hi, lo, cl, vol, amount = [p[key] for key in p]
@@ -230,9 +236,10 @@ def prepare_wyckoff_inputs(frame, raw=None, config=None):
     down = vol.where(direction < 0, 0.).shift(1).rolling(20, min_periods=20).sum()
     up_count = (direction > 0).astype(float).shift(1).rolling(20, min_periods=20).sum()
     down_count = (direction < 0).astype(float).shift(1).rolling(20, min_periods=20).sum()
-    duration = np.zeros(len(p), dtype=float); length = 0
+    duration = np.zeros(len(p), dtype=float); length = resume_state['range_duration'] if resume_state else 0
     ranges_valid = ((width / atr <= settings["range_max_width_atr"]) & (previous >= low60) & (previous <= high60)).to_numpy()
-    for i, valid in enumerate(ranges_valid):
+    for i in range(start_index,len(ranges_valid)):
+        valid=ranges_valid[i]
         length = min(120, length + 1) if valid else 0
         duration[i] = length
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -270,16 +277,26 @@ def prepare_wyckoff_inputs(frame, raw=None, config=None):
     metrics = {"atr": atr, "relative_volume": current["w_relative_volume20"],
                "range_low": low60, "range_high": high60,
                "range_count": lo.shift(1).rolling(settings["range_bars"], min_periods=1).count()}
-    events = detect_wyckoff_events(raw, metrics, eligible, config)
-    result = frame.copy()
+    # Only bounded numeric rolling kernels replay the full prefix. Their exact
+    # floating-point history is retained; the two causal state machines resume.
+    event_state={} if state_sink is not None else None
+    events = detect_wyckoff_events(raw,metrics,eligible,config,
+        resume_state=resume_state['events'] if resume_state else None,state_sink=event_state,cancel_check=cancel_check)
+    if calculation_sink is not None:calculation_sink['full_eligibility']=eligible.copy()
+    if state_sink is not None:
+        state_sink.update(format='wyckoff_feature_state_v1',schema_hash=profile['schema_hash'],
+            range_duration=int(length),events=event_state)
+        state_sink['sha256']=stable_hash(state_sink)
+    result = frame.iloc[start_index:].copy()
+    current=current.iloc[start_index:];eligible=eligible[start_index:];reasons=reasons[start_index:]
     for key in current:
         result[key] = current[key].astype(float)
     for key in events:
         result[key] = events[key]
     result["wyckoff_input_eligible"] = eligible
-    result["wyckoff_reason_codes"] = pd.Series(reasons, index=frame.index, dtype=object)
+    result["wyckoff_reason_codes"] = pd.Series(reasons, index=result.index, dtype=object)
     for name in ("corporate_action_suspected", "volume_amount_unit_disagreement", "suspended", "active_bars"):
-        result["wyckoff_" + name] = quality[name]
+        result["wyckoff_" + name] = quality[name][start_index:]
     result["wyckoff_formal_qualified"] = False
     result["wyckoff_qualification_reasons"] = pd.Series([
         ["unadjusted_no_verified_corporate_action_timeline", "historical_st_delisting_timeline_unavailable", "shadow_research_only"]

@@ -11,11 +11,13 @@ from my_strategy.adapters.czsc_adapter import _connection, raw_path
 from my_strategy.core.paths import BASIC_KB_DB_PATH, DATA_ROOT
 from my_strategy.core.run_context import stable_hash
 from my_strategy.services import board_features as mathematics
+from my_strategy.services.board_calculation_scope import (CALCULATION_SCOPE, calculation_membership,
+    calculation_contract, is_calculation_symbol)
 from my_strategy.services.czsc_trend_support import VERIFIED_SOURCES, _calendar
 from my_strategy.storage.board_fluent import BoardFluentStore, RANK_POLICY, digest
 from my_strategy.storage.board_knowledge import BoardKnowledgeStore
 
-FLUENT_PROFILE = {'version':'current_board_fluent_v1','mode':'current_reference',
+FLUENT_PROFILE = {'version':'current_board_fluent_v2','mode':'current_reference','calculation_scope':CALCULATION_SCOPE,
                   'market_schema_hash':mathematics.BOARD_SCHEMA_HASH,'ranking_policy':RANK_POLICY,
                   'native_basis':'member_native','capital_basis':'turnover_amount_proxy'}
 
@@ -47,8 +49,9 @@ def source_witness(*,raw_db_path=None,kb_db_path=None):
 
 def latest_qualified_price_date(raw_db_path=None):
     with _connection(raw_db_path) as connection:
-        day=connection.execute('SELECT MAX(date) FROM stock_daily_normalized WHERE has_trade_price=1 AND source IN ('+
-            ','.join('?' for _ in VERIFIED_SOURCES)+')',sorted(VERIFIED_SOURCES)).fetchone()[0]
+        rows=connection.execute('SELECT stock,MAX(date) FROM stock_daily_normalized WHERE has_trade_price=1 AND source IN ('+
+            ','.join('?' for _ in VERIFIED_SOURCES)+') GROUP BY stock',sorted(VERIFIED_SOURCES)).fetchall()
+        day=max((row[1] for row in rows if row[1] and is_calculation_symbol(row[0])),default=None)
     if not day:raise ValueError('no qualified local price date')
     return day
 
@@ -114,9 +117,12 @@ def build_board_fluent(*,kb_db_path=None,raw_db_path=None,fluent_db_path=None,ca
     snapshots=[value for value in snapshots if value['kind'] in {'industry','concept'}]
     if not snapshots:raise ValueError('no complete current board membership mappings')
     frozen_snapshots={value['board_id']:value['snapshot_hash'] for value in snapshots}
+    memberships={value['board_id']:calculation_membership(value) for value in snapshots}
+    scope_identity=calculation_contract(memberships)
     lease=None
     if sync_id is None:
         lease_identity={'source_witness':witness,'snapshot_hashes':frozen_snapshots,'calendar_dates':list(calendar_dates),
+                        **scope_identity,
                         'contract':contract,'with_native':with_native,'source_native_run_id':source_native_run_id,
                         'raw_source_run_id':raw_source_run_id,'native_config':native_config,
                         'source_root':str(source_root) if source_root else None,
@@ -180,7 +186,9 @@ def build_board_fluent(*,kb_db_path=None,raw_db_path=None,fluent_db_path=None,ca
                                               price_date=day,mode='current_reference',symbols=symbols,component_store=component_store)
         validate_sources()
         if generation_contract()!=contract:raise ValueError('Fluent generating code changed during preparation')
-        publication={'source_witness':witness,'snapshot_hashes':frozen_snapshots}
+        if market.get('calculation_membership')!=memberships or market.get('calculation_scope')!=CALCULATION_SCOPE:
+            raise ValueError('board mathematical calculation projection differs from frozen source')
+        publication={'source_witness':witness,'snapshot_hashes':frozen_snapshots,**scope_identity}
         if check_cancel:check_cancel()
         existing_full=store.current_generation('full')
         full_market_compatible=(existing_full is not None and existing_full['cache_key']==market['cache_key'] and
@@ -198,7 +206,7 @@ def build_board_fluent(*,kb_db_path=None,raw_db_path=None,fluent_db_path=None,ca
         if with_native:
             from my_strategy.services.board_native_summary import (collect_native_summaries,aggregate_board_native,
                                                                   validate_native_reuse,native_generation_contract)
-            requested_symbols=sorted({symbol for value in snapshots for symbol in value['members']})
+            requested_symbols=scope_identity['required_symbols']
             report('native_summary',0,len(requested_symbols))
             def native_progress(**values):
                 stage=values.pop('stage','native_summary');current=values.pop('current',0);total=values.pop('total',1)
@@ -214,7 +222,8 @@ def build_board_fluent(*,kb_db_path=None,raw_db_path=None,fluent_db_path=None,ca
                     native_cache_db_path or DATA_ROOT/'processed/czsc/native_structure.db')
                 config_matches=native_config is None or native_generation_contract(source_root=source_root,config=native_config)==old_contract
                 calendar_matches=old.get('calendar_hash')==calendar_prefix_hash
-                population_matches=old.get('required_symbols')==requested_symbols
+                population_matches=(old.get('calculation_scope')==CALCULATION_SCOPE and
+                    old.get('required_symbols')==requested_symbols)
                 if explicit_matches and cache_matches and config_matches and calendar_matches and population_matches:
                     # Actual complete raw/liquidity/calendar/source proof is
                     # checked again, but no native history blob is decoded.
@@ -232,19 +241,33 @@ def build_board_fluent(*,kb_db_path=None,raw_db_path=None,fluent_db_path=None,ca
                             if publish:store.publish_full(generation_id)
                         else:
                             native_result=store.get_native_component(reusable_native['generation_id'])
+                            if old.get('projection_hashes')!=scope_identity['projection_hashes']:
+                                # Reuse verified per-stock facts under a new collection
+                                # identity; the old board aggregate is never relabelled.
+                                native_result['identity']={**native_result['identity'],**scope_identity,
+                                    'source_membership_rebind':{'parent_identity_hash':digest(old),
+                                        'parent_generation_id':reusable_native['generation_id']}}
                             native_result['diagnostics']={**native_result['diagnostics'],**verified,
                                 'indexed_native_reused':True,'indexed_native_generation_id':reusable_native['generation_id'],
                                 'native_blob_decode':False}
             if native_result is None and not reuse_full:
-                native_result=collect_native_summaries(price_date=day,
+                if not requested_symbols:
+                    native_result={'identity':{'price_date':day,**scope_identity},'complete':False,
+                        'summaries':{},'input_refs':[],
+                        'diagnostics':{'requested':0,'verified':0,'unavailable':0,'reason':'no_supported_members'}}
+                else:
+                    native_result=collect_native_summaries(price_date=day,
                     symbols=requested_symbols,
                     cache_db_path=native_cache_db_path,source_native_run_id=source_native_run_id,
                     raw_source_run_id=raw_source_run_id,source_root=source_root,artifacts_root=artifacts_root,
-                    raw_db_path=raw_db_path,config=native_config,progress=native_progress,check_cancel=check_cancel)
+                    raw_db_path=raw_db_path,config=native_config,progress=native_progress,check_cancel=check_cancel,
+                    calculation_memberships=memberships)
             validate_sources()
             if not reuse_full:native_diagnostics=native_result.get('diagnostics',{})
             incremental_partial=(not reuse_full and native_result['identity'].get('format')=='incremental_native_summary_collection_v1')
-            if not reuse_full and (native_result.get('complete') is True or incremental_partial):
+            if not reuse_full and requested_symbols and (native_result.get('complete') is True or incremental_partial):
+                if any(native_result['identity'].get(key)!=value for key,value in scope_identity.items()):
+                    raise ValueError('native collection calculation projection differs from market')
                 if native_result['identity'].get('calendar_hash')!=calendar_prefix_hash:
                     raise ValueError('native component calendar prefix differs from current verified calendar')
                 publication={**publication,'native_identity_hash':digest(native_result['identity'])}
@@ -253,7 +276,7 @@ def build_board_fluent(*,kb_db_path=None,raw_db_path=None,fluent_db_path=None,ca
                 generation_id=store.save_market(market,contract=contract,sync_id=sync_id,publish=False,
                                                 migration=migration,publication_inputs=publication)
                 processed=set(native_result.get('processed_symbols',[]))
-                aggregates=[aggregate_board_native(value,({**native_result,'complete':all(symbol in processed for symbol in value['members'])}
+                aggregates=[aggregate_board_native(value,({**native_result,'complete':all(symbol in processed for symbol in memberships[value['board_id']]['eligible_members'])}
                     if incremental_partial else native_result),min_members=market['policy']['min_members'],
                             min_coverage=market['policy']['min_coverage']) for value in snapshots]
                 store.attach_native(generation_id,native_result,aggregates,publish=False,allow_partial=incremental_partial)
@@ -271,6 +294,7 @@ def build_board_fluent(*,kb_db_path=None,raw_db_path=None,fluent_db_path=None,ca
             report('native_summary',len(snapshots),len(snapshots),generation_id=generation_id)
         generation=store.get_generation(generation_id)
         summary={'status':outcome,'sync_id':sync_id,'generation_id':generation_id,
+                 'calculation_scope':CALCULATION_SCOPE,'projection_hashes':scope_identity['projection_hashes'],
                  'market_published':generation['market_published'],'full_published':generation['full_published'],
                  'cache_hit':cache_events[-1]!='miss','cache_source':cache_events[-1],'migration':migration is not None,
                  'price_date':day,'membership_date':market['membership_date'],'board_count':len(market['boards']),

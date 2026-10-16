@@ -192,10 +192,10 @@ class TaskManager:
             self._patch(job_id, status="running")
             job = self.get(job_id)
             result = self._run(job_id, job["kind"], job["spec"])
-            self._check(job_id)
+            if result.get('status') != 'cancelled': self._check(job_id)
             self.results.save(job["kind"], result)
             outcome = 'succeeded'
-            if job['kind'] in {'update', 'board_features', 'board_sync', 'board_knowledge'}:
+            if job['kind'] in {'scan', 'update', 'board_features', 'board_sync', 'board_knowledge'}:
                 reported = result.get('status')
                 if reported in {'partial', 'failed', 'cancelled'}: outcome = reported
                 elif reported == 'interrupted': outcome = 'partial' if result.get('market_published') or result.get('completed_boards', 0) else 'failed'
@@ -252,10 +252,22 @@ class TaskManager:
             return self.training.run_validation_job(spec, **callbacks)
         if kind != "scan":
             raise ValueError("任务类型不受支持")
+        from my_strategy.services.analysis_methods import COMBINED
+        if spec.get('analysis_method') in COMBINED:
+            from my_strategy.services.method_scan_acceleration import scan_methods
+            from my_strategy.services.light_research import LightResearch
+            light = getattr(self, 'light', None)
+            owned = light is None
+            if owned: light = LightResearch(root=self.db_path.parent / 'light_research')
+            try:
+                return scan_methods(light, self.results, spec, **callbacks)
+            finally:
+                if owned: light.close()
         from my_strategy.web_dashboard.trend_strategy import scan_trend_consensus
+        from my_strategy.core.market_scope import new_scan_symbols
         params = {key: spec.get(key) for key in ("symbols", "start", "end", "model_run_id", "model_fold",
             "usage_mode", "calendar_run_id", "device", "cpu_workers", "consensus_config") if spec.get(key) is not None}
-        params['symbols'] = spec.get('symbols') or None
+        params['symbols'] = new_scan_symbols(spec.get('symbols'))
         params.setdefault('start', '2026-01-01')
         return scan_trend_consensus(**params, structure_only=not spec.get('research', True), **callbacks)
 

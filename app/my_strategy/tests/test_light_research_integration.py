@@ -19,7 +19,7 @@ def history(n=520):
     close = np.linspace(10, 15, n)
     frame = pd.DataFrame({"date": dates, "symbol": "002436.SZ", "open": close,
                           "high": close + 1, "low": close - 1, "close": close,
-                          "volume": 10000, "amount": 100000})
+                          "volume": 10000, "amount": 100000, "source":"tushare", "has_trade_price":1})
     for name in research.SCORE_COLUMNS:
         frame[name] = .5
     frame.attrs.update(data_version="fixture-raw-v1")
@@ -62,6 +62,65 @@ def test_cached_prediction_retains_inspectable_result_reference(service, monkeyp
     assert len(calls) == 1
     assert second["reused"]
     assert second["result_ref"]["cache_key"] == first["result_ref"]["cache_key"]
+
+
+def test_ma_training_identity_binds_actual_availability_even_when_labels_agree(service,monkeypatch):
+    from my_strategy.services import light_score_v2
+    frame=history();frame['available_at']=frame.date.dt.strftime('%Y-%m-%d')+'T14:00:00+08:00'
+    monkeypatch.setattr(research,'load_bars',lambda *a,**kw:frame.copy())
+    fits=[]
+    def fit(data,*args,**kwargs):
+        fits.append(data[['symbol','as_of','label']].copy())
+        return {'status':'completed','features':['ma20_bias']}
+    monkeypatch.setattr(light_score_v2,'fit_light_score',fit)
+    first=service.train_score(['002436.SZ'],frame.date.iloc[-1].strftime('%Y-%m-%d'),feature_profile='ma_trend_v1')
+    frame.loc[0,'available_at']=frame.date.iloc[0].strftime('%Y-%m-%d')+'T14:30:00+08:00'
+    second=service.train_score(['002436.SZ'],frame.date.iloc[-1].strftime('%Y-%m-%d'),feature_profile='ma_trend_v1')
+    again=service.train_score(['002436.SZ'],frame.date.iloc[-1].strftime('%Y-%m-%d'),feature_profile='ma_trend_v1')
+    assert first['identity']['sources'][0]['data_sha256']!=second['identity']['sources'][0]['data_sha256']
+    assert first['model_ref']['cache_key']!=second['model_ref']['cache_key']
+    assert again['reused'] and len(fits)==2
+    pd.testing.assert_frame_equal(fits[0],fits[1],check_exact=True)
+
+
+@pytest.mark.parametrize('model_type',['l2','mlp'])
+@pytest.mark.parametrize('explicit_cancel',[False,True])
+def test_training_fit_deadline_is_failed_budget_not_cancelled_task(service,monkeypatch,model_type,explicit_cancel):
+    from my_strategy.services import light_score_v2
+    tick=[100.]
+    monkeypatch.setattr(research.time,'monotonic',lambda:tick[0])
+    def fit(*args,**kwargs):
+        if explicit_cancel:
+            next(iter(service.stops.values())).set()
+        else:tick[0]=111.
+        kwargs['cancel_check']()
+        pytest.fail('fit must stop before a candidate can be published')
+    monkeypatch.setattr(simple_score,'fit_simple_score',fit)
+    monkeypatch.setattr(light_score_v2,'fit_light_score',fit)
+    job=service.submit('score_training',{'symbols':['002436.SZ'],'model_type':model_type,'budget_seconds':10})
+    service.queue.shutdown(wait=True)
+    result=service.get_job(job['job_id'])
+    assert result['status']==('cancelled' if explicit_cancel else 'failed')
+    assert ('已取消' if explicit_cancel else '总时间预算') in result['error']
+    assert service.current_score() is None
+    assert not result.get('result_ref')
+
+
+@pytest.mark.parametrize('explicit_cancel',[False,True])
+def test_observation_preparation_budget_remains_pending_and_explicit_cancel_remains_cancelled(service,monkeypatch,explicit_cancel):
+    tick=[100.];event=threading.Event()
+    monkeypatch.setattr(research.time,'monotonic',lambda:tick[0])
+    def source(*args,**kwargs):
+        if explicit_cancel:event.set()
+        else:tick[0]=111.
+        kwargs['stop'].check()
+    monkeypatch.setattr(service,'source',source)
+    kwargs=dict(symbols=['002436.SZ'],start='2024-01-02',end='2025-12-31',budget_seconds=10,stop=event)
+    if explicit_cancel:
+        with pytest.raises(InterruptedError):service.collect_score_observations(**kwargs)
+    else:
+        result=service.collect_score_observations(**kwargs)
+        assert result['status']=='blocked' and result['reason']=='observation_population_pending'
 
 
 def test_checkpoint_updates_are_immutable_and_preserve_other_account_cursor(service):
@@ -429,3 +488,27 @@ def test_equivalent_integer_and_float_cash_reuse_the_same_backtest(service, monk
     second=service.backtest(['002436.SZ'],'2025-12-24','2025-12-29',initial_cash=1000000.0)
     assert second['reused'] and second['result_id']==first['result_id']
     assert len(calls)==1 and len(service.store.list(namespace='simulations'))==1
+
+
+def test_training_budget_starts_before_structure_preparation(service,monkeypatch):
+    from types import SimpleNamespace
+    from my_strategy.services import light_score_v2
+    clock=[10.]
+    monkeypatch.setattr(research,'time',SimpleNamespace(monotonic=lambda:clock[0]))
+    original=service.source
+    def source(*args,**kwargs):
+        assert isinstance(kwargs['stop'],research.DeadlineStop)
+        clock[0]+=11.
+        return original(*args,**kwargs)
+    monkeypatch.setattr(service,'source',source)
+    monkeypatch.setattr(light_score_v2,'fit_light_score',lambda *a,**k:pytest.fail('expired preparation started training'))
+    with pytest.raises(TimeoutError):service.train_score(['002436.SZ'],budget_seconds=10)
+    assert service.store.list(namespace='mlp_score_models')==[]
+
+
+def test_prediction_uses_supplied_raw_snapshot_without_a_second_read(service,monkeypatch):
+    raw=history();end=str(raw.date.iloc[-1].date());calls=[]
+    monkeypatch.setattr(research,'load_bars',lambda *a,**k:pytest.fail('duplicate raw history read'))
+    monkeypatch.setattr(kronos_prediction,'predict',forecast_call(calls))
+    service.prediction('002436.SZ',end,raw_snapshot=raw)
+    assert calls==[True]

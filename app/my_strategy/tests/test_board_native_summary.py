@@ -186,6 +186,8 @@ def test_aggregate_source_eligibility_coverage_and_original_ids_are_independent(
     members=[f'{i:06d}.SZ' for i in range(1,7)];day='2026-10-12'
     snapshot=dict(board_id='THS_I_881155.TI',members=members,expected_count=6,complete=True,snapshot_hash='a'*64,available_at='2026-10-14T15:00:00+08:00')
     native=dict(identity=dict(price_date=day),complete=True,summaries={symbol:source_row(symbol,day,structure=i<5,wyckoff=i<3) for i,symbol in enumerate(members)})
+    from my_strategy.services.board_calculation_scope import calculation_membership, calculation_contract
+    native['identity'].update(calculation_contract({snapshot['board_id']:calculation_membership(snapshot)}))
     row=summary.aggregate_board_native(snapshot,native)
     assert row['structure_available'] and row['structure_coverage']==5/6 and row['structure_buy_score_mean']==.7
     assert not row['wyckoff_available'] and row['wyckoff_coverage']==.5 and row['wyckoff_buy_score_mean'] is None
@@ -201,6 +203,24 @@ def test_missing_database_contract_never_creates_files(tmp_path):
     value=summary.collect_native_summaries(price_date='2026-10-12',symbols=['000001.SZ'],source_root=tmp_path/'missing')
     assert not value['complete'] and value['summaries']['000001.SZ']['structure'] is None
     assert not (tmp_path/'missing').exists()
+
+
+def test_native_projection_has_same_denominator_and_frozen_quality_gate():
+    from my_strategy.services.board_calculation_scope import calculation_membership, calculation_contract
+    members=[f'{i:06d}.SZ' for i in range(1,11)];day='2026-10-12'
+    source=dict(board_id='THS_I_881155.TI',members=members+['430001.BJ','920001.BJ'],expected_count=12,
+        complete=True,snapshot_hash='b'*64,available_at='2026-10-14T15:00:00+08:00')
+    projection=calculation_membership(source)
+    native=dict(identity={'price_date':day,**calculation_contract({source['board_id']:projection})},complete=True,
+        summaries={symbol:source_row(symbol,day,structure=i<8,wyckoff=i<8) for i,symbol in enumerate(members)})
+    result=summary.aggregate_board_native(source,native)
+    assert result['expected_members']==10 and result['structure_coverage']==.8 and result['structure_available']
+    assert result['calculation_membership']==projection and len(source['members'])==12
+    native['summaries'][members[7]]=source_row(members[7],day,structure=False,wyckoff=False)
+    result=summary.aggregate_board_native(source,native)
+    assert result['structure_coverage']==.7 and result['structure_buy_score_mean'] is None
+    native['identity'].pop('calculation_scope')
+    with pytest.raises(ValueError,match='projection'):summary.aggregate_board_native(source,native)
 
 
 def test_refresh_cli_is_source_only_and_producer_root_is_a_fresh_worker(tmp_path,monkeypatch,capsys):

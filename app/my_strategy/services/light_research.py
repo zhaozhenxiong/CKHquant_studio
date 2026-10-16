@@ -38,7 +38,7 @@ def plain(value):
 def code_identity():
     base = Path(__file__).parent
     names = ['light_research.py', 'position_simulation.py', 'light_account_continuation.py', 'simple_score.py', 'kronos_tuning.py',
-             'agent_evidence.py','light_daily_scheduler.py','light_score_v2.py','light_score_training.py','light_qualification.py','light_experiment_registry.py',
+             'agent_evidence.py','light_daily_scheduler.py','light_score_v2.py','light_score_training.py','light_ma_features.py','light_qualification.py','light_experiment_registry.py',
              'kronos_prediction.py', 'czsc_native_evidence.py', 'czsc_market_features.py']
     identities = {name: hashlib.sha256((base / name).read_bytes()).hexdigest()
             for name in names if (base / name).is_file()}
@@ -49,10 +49,15 @@ def code_identity():
 
 def score_code_identity():
     import inspect
-    names=('light_score_v2.py','light_score_training.py','light_qualification.py','light_experiment_registry.py','simple_score.py')
+    from my_strategy.services.incremental_source import numerical_input_contract
+    names=('light_score_v2.py','light_score_training.py','light_ma_features.py','czsc_market_features.py','czsc_market_profiles.py',
+           'light_qualification.py','light_experiment_registry.py','simple_score.py')
     result={name:hashlib.sha256((Path(__file__).parent/name).read_bytes()).hexdigest() for name in names}
     result['actual_loaded_training_adapter']=hashlib.sha256(inspect.getsource(LightResearch.train_score.__wrapped__).encode()).hexdigest()
     result['observation_exclusion_adapter']=hashlib.sha256(inspect.getsource(training_observation_manifest).encode()).hexdigest()
+    result['legacy_training_adapter']=hashlib.sha256(inspect.getsource(LightResearch._train_legacy_score.__wrapped__).encode()).hexdigest()
+    result['input_contract']=numerical_input_contract()
+    result['legacy_score_columns']=list(SCORE_COLUMNS)
     return result
 
 
@@ -88,6 +93,9 @@ class DeadlineStop:
     def __init__(self, stop, deadline): self.stop,self.deadline=stop,deadline
     def is_set(self):
         return bool(self.stop and self.stop.is_set()) or time.monotonic()>=self.deadline
+    def check(self):
+        if self.stop and self.stop.is_set():raise InterruptedError('已取消轻量研究任务')
+        if time.monotonic()>=self.deadline:raise TimeoutError('已达到本次计算总时间预算')
 
 
 def training_observation_manifest(manifest,full,mature,eligible,dates,end):
@@ -96,6 +104,7 @@ def training_observation_manifest(manifest,full,mature,eligible,dates,end):
     keys=lambda frame:set(zip(frame.symbol.astype(str),frame.as_of.astype(str)))
     available,mature_keys,eligible_keys=keys(full),keys(mature),keys(eligible)
     lookup={day:i for i,day in enumerate(dates)}
+    label_exclusions={(item['symbol'],item['as_of']):item['reason_codes'] for item in mature.attrs.get('label_audit',{}).get('exclusions',[])}
     for item in derived['observations']:
         key=(str(item['symbol']),str(item.get('as_of',item.get('date')))[:10])
         reason=None
@@ -103,9 +112,13 @@ def training_observation_manifest(manifest,full,mature,eligible,dates,end):
         elif key not in mature_keys:
             at=lookup.get(key[1]);tail=dates[at+5] if at is not None and at+5<len(dates) else None
             reason='immature_label' if tail is None or tail>end else 'calendar_gap'
+            codes=label_exclusions.get(key)
+            if codes:reason=codes[0];item['training_exclusion_reason_codes']=list(codes)
         elif key not in eligible_keys:reason='core_feature_unavailable'
         if reason:item['training_exclusion_reason']=reason
-        else:item.pop('training_exclusion_reason',None)
+        else:
+            item.pop('training_exclusion_reason',None)
+            item.pop('training_exclusion_reason_codes',None)
     derived['training_exclusion_contract']={'label_horizon':5,'end':end,
         'original_manifest_sha256':stable_hash(manifest),'eligible_rows':len(eligible_keys)}
     return derived
@@ -122,9 +135,22 @@ class LightResearch:
         self.queue = ThreadPoolExecutor(max_workers=1, thread_name_prefix='light-research')
         self.jobs = {}
         self.stops = {}
+        from my_strategy.storage.task_journal import TaskJournal, bind_publication_intents
+        self.journal = TaskJournal(self.store.root / 'task_journal.db')
+        self.journal.import_legacy(self.store)
+        self._publication_context=bind_publication_intents(self.store,self.journal)
+        self._progress_flushed = {}
+        self._closed = False
 
     def close(self):
-        for stop in self.stops.values(): stop.set()
+        with self.lock:
+            self._closed = True
+            for job_id,stop in self.stops.items():
+                stop.set()
+                job=self.jobs.get(job_id)
+                if job and job['status']=='queued':
+                    job.update(status='cancelled',cancel_requested=True,finished_at=local_now().isoformat())
+                    self.journal.update(job)
         self.queue.shutdown(wait=True, cancel_futures=True)
         from my_strategy.services.kronos_prediction import release_prediction_resources
         release_prediction_resources()
@@ -202,11 +228,11 @@ class LightResearch:
         registry=merge_experiment_registry(self.store.get_setting('light_experiment_registry'),entries)
         return persist_experiment_registry(self.store,registry)
 
-    def source(self, symbol, end, *, stop=None):
+    def source(self, symbol, end, *, stop=None, raw_snapshot=None):
         from my_strategy.services.incremental_source import IncrementalSource
         dates, calendar_identity = self.calendar()
         return IncrementalSource(store=self.store, raw_db=self.raw_db).source(symbol,end,stop=stop,
-            calendar_dates=dates,calendar_identity=calendar_identity)
+            calendar_dates=dates,calendar_identity=calendar_identity,raw_snapshot=raw_snapshot)
 
     def score_model(self, cache_key=None, *, model_type='mlp'):
         if cache_key:
@@ -216,6 +242,37 @@ class LightResearch:
         if model_type in {'l2','simple'}: return self.current_score()
         candidates=self.list_score_models(model_type='mlp')
         return self.score_model(candidates[0]['model_ref']['cache_key']) if candidates else None
+
+    def resolve_score_model(self, cache_key=None, *, feature_profile='ma_trend_v1', as_of=None,
+                            research_mode='historical_candidate'):
+        """Resolve a matching frozen candidate without changing any selection.
+
+        Explicit ids fail on a profile/date mismatch. Automatic research lookup
+        skips incompatible candidates; paper eligibility is still checked by
+        the scorer, never inferred from training completion or recency.
+        """
+        from my_strategy.services.light_qualification import verify_model
+        if feature_profile not in {'mixed_v1','ma_trend_v1'}: raise ValueError('Unknown score feature profile')
+        if research_mode not in {'historical_candidate','paper'}: raise ValueError('Unknown research mode')
+        candidates = [self.score_model(cache_key)] if cache_key else [self.score_model(row['model_id'])
+            for row in self.list_score_models(model_type='mlp') if row['feature_profile']==feature_profile]
+        for model in candidates:
+            artifact=model['artifact']
+            reason=None
+            if artifact.get('schema')!='light_score_v2' or artifact.get('feature_profile','mixed_v1')!=feature_profile:
+                reason='评分模型与所选特征方案不一致'
+            elif artifact.get('status')!='completed':reason='评分候选尚未完成'
+            if not reason and as_of is not None:
+                from my_strategy.services.simple_score import _dates
+                decision=_dates([as_of],daily_close=True)[0]
+                if decision<=_dates([artifact['available_after']])[0]:reason='评分模型开发校准证据晚于分析日期'
+                elif research_mode=='paper' and decision<_dates([artifact['created_at']])[0]:reason='评分模型在该日期尚未实际冻结'
+            if reason:
+                if cache_key:raise ValueError(reason)
+                continue
+            verify_model(artifact)
+            return model
+        return None
 
     def list_score_models(self, model_type=None):
         result=[]
@@ -229,6 +286,7 @@ class LightResearch:
                 mature=sum(v.get('mature_rows',0) for v in population.values())
                 result.append({'model_ref':{'cache_key':item['cache_key']},'model_id':item['cache_key'],'model_type':model.get('model_type','l2'),
                     'variant':artifact.get('variant'),'model_version':artifact.get('model_version'),
+                    'feature_profile':artifact.get('feature_profile','mixed_v1'),
                     'training_end':model.get('training_end'),'symbols':model.get('symbols'),
                     'row_count':model.get('row_count'),'status':model.get('status'),'population':population,
                     'mature_rows':mature if population else None,
@@ -249,7 +307,10 @@ class LightResearch:
         if is_mlp:
             from my_strategy.services.light_score_training import prepare_score_features
             variant=artifact.get('variant','A')
-            prepared={symbol:prepare_score_features(frame,events=source_events.get(symbol,()),variant=variant)
+            feature_profile=artifact.get('feature_profile','mixed_v1')
+            calendar=self.calendar()[0] if feature_profile=='ma_trend_v1' else None
+            prepared={symbol:prepare_score_features(frame,events=source_events.get(symbol,()),variant=variant,
+                      feature_profile=feature_profile,calendar_dates=calendar)
                       for symbol,frame in frames.items()}
         else: prepared=frames
         def evaluate(symbol,day,forecast):
@@ -278,13 +339,17 @@ class LightResearch:
             result={'status':scored.get('status','scored'),'score':scored['scores'][0],
                 'probabilities':scored['probabilities'][0],'qualification':scored['qualification'],
                 'model_version':scored['model_version'],'model_type':'torch_mlp' if is_mlp else 'l2',
+                'feature_profile':artifact.get('feature_profile','mixed_v1'),'scorer_id':scored.get('scorer_id'),
                 'variant':artifact.get('variant'),'reason':next(iter(scored.get('row_statuses',[])),None)}
+            if is_mlp and feature_profile=='ma_trend_v1':
+                result['input_reason_codes']=row.iloc[0].get('score_reason_codes',[])
             if is_mlp:
                 try:
                     baseline=score_light_samples(artifact,row,as_of=day,historical_reconstruction=research_mode=='historical_candidate',mode=research_mode,model_kind='l2',**timing)
                     result['l2_comparison']={'status':baseline.get('status','scored'),'score':baseline['scores'][0],
                         'probabilities':baseline['probabilities'][0],'qualification':baseline['qualification'],
-                        'model_version':baseline['model_version'],'model_type':'l2','variant':variant,'consumes_kronos':variant=='B'}
+                        'model_version':baseline['model_version'],'model_type':'l2','variant':variant,'consumes_kronos':variant=='B',
+                        'feature_profile':feature_profile,'scorer_id':baseline.get('scorer_id')}
                 except ValueError as exc:
                     result['l2_comparison']={'status':'unavailable','reason':str(exc),'model_type':'l2','variant':variant}
                 result['consumes_kronos']=variant=='B'
@@ -292,19 +357,20 @@ class LightResearch:
         return evaluate
 
     @serialized_compute
-    def prediction(self, symbol, end=None, *, stop=None, **parameters):
+    def prediction(self, symbol, end=None, *, stop=None, raw_snapshot=None, **parameters):
         from my_strategy.services.kronos_prediction import predict
         parameters={**dict(lookback=128,horizon=5,samples=8,seed=42,device='auto',temperature=.8,top_p=.9),**parameters}
         symbol = normalize_symbol(symbol)
         end = end or latest_market_date(db_path=self.raw_db)
-        raw = load_bars(symbol, end=end, db_path=self.raw_db)
-        if str(raw.iloc[-1].date)[:10] != end:
+        raw = load_bars(symbol, end=end, db_path=self.raw_db) if raw_snapshot is None else raw_snapshot
+        if raw.empty or set(raw.symbol.astype(str))!={symbol} or str(raw.iloc[-1].date)[:10] != end:
             raise ValueError(f'{symbol} 缺少 {end} 行情，不能使用旧日报价')
         dates, cal = self.calendar()
         future = [d for d in dates if d > end][:int(parameters.get('horizon', 5))]
         from my_strategy.services.kronos_prediction import asset_status
         identity = {'kind': 'prediction-v1', 'symbol': symbol, 'as_of': end,
             'data': raw.attrs['data_version'], 'calendar': cal,
+            'exact_price_input_sha256': stable_hash(plain(raw.to_dict('records'))),
             'model': prediction_identity(parameters.get('device','auto')),
             'parameters': parameters, 'code': 'kronos_request_cache_v2'}
         # Asset status can include volatile load-state fields. The predictor also
@@ -356,24 +422,24 @@ class LightResearch:
         return result
 
     @serialized_compute
-    def _train_legacy_score(self, symbols, end='2025-12-31', *, stop=None, progress=None, select=False):
+    def _train_legacy_score(self, symbols, end='2025-12-31', *, stop=None, progress=None, select=False, budget_seconds=600):
         from my_strategy.services.simple_score import fit_simple_score
+        from my_strategy.services.light_score_training import direction_label_contract
+        if not 0<float(budget_seconds)<=600:raise ValueError('Training budget/thread limit exceeded')
+        started=time.monotonic();deadline=started+float(budget_seconds);bounded_stop=DeadlineStop(stop,deadline)
+        label_audits=[]
+        if select:raise ValueError('训练候选不能自动晋升；须独立资格事件')
         population = []
         sources = []
         for symbol in symbols:
-            self._check(stop)
-            raw, frame, events, identity = self.source(symbol, end, stop=stop)
+            self._check(stop,deadline)
+            raw, frame, events, identity = self.source(symbol, end, stop=bounded_stop)
             frame = frame.copy()
-            # Five verified stock bars, next open entry; any market calendar gap
-            # removes the sample instead of inventing a price.
+            from my_strategy.services.light_score_training import make_direction_training_frame
             dates, _ = self.calendar()
-            indices = {d:i for i,d in enumerate(dates)}
-            frame['as_of'] = frame.date.dt.strftime('%Y-%m-%d')
-            frame['label_mature_at'] = frame.as_of.shift(-5)
-            ret = frame.close.shift(-5) / frame.open.shift(-1) - 1
-            frame['label'] = np.where(ret > .003, 2, np.where(ret < -.003, 0, 1))
-            valid = frame.as_of.map(indices).shift(-5) - frame.as_of.map(indices) == 5
-            frame = frame[valid & frame[SCORE_COLUMNS].notna().all(axis=1)].copy()
+            frame = make_direction_training_frame(frame, dates)
+            label_audits.append(frame.attrs['label_audit'])
+            frame = frame.loc[frame[SCORE_COLUMNS].notna().all(axis=1)].copy()
             population.append(frame); sources.append(identity)
             if progress: progress(stage='simple_score_inputs', symbol=symbol)
         data = pd.concat(population, ignore_index=True).sort_values(['as_of','symbol'])
@@ -383,54 +449,73 @@ class LightResearch:
         ranges = {name:[days[boundaries[i]], days[boundaries[i+1]-1]]
                   for i,name in enumerate(['train','tune','calibration','policy','test'])}
         identity = {'kind':'simple-score-v1', 'sources':sources, 'splits':ranges,
-                    'features':SCORE_COLUMNS, 'code':score_code_identity()}
+                    'features':SCORE_COLUMNS,'label_contract':direction_label_contract(), 'code':score_code_identity()}
         saved = self.store.get(identity, namespace='score_models')
         if saved:
             ref={'cache_key':self.store.cache_key(identity,'score_models')}
             selected=self.select_score(saved,ref) if select else {**saved,'model_ref':ref}
             return {**selected, 'reused':True}
         artifact = fit_simple_score(data, SCORE_COLUMNS, ranges,
-            source_identity=identity, cancel_check=(stop.is_set if stop else None),label_contract={'horizon':5, 'entry':'next_verified_open',
-            'exit':'fifth_session_close', 'threshold':.003, 'kind':'cost_threshold_direction',
-            'fee_threshold_is_estimate':True})
+            source_identity=identity, cancel_check=bounded_stop.check,label_contract=direction_label_contract())
         artifact = plain(artifact)
-        self._check(stop)
+        self._check(stop,deadline)
         result = {'artifact':artifact, 'identity':identity, 'symbols':symbols,
             'training_end':end, 'split_ranges':ranges, 'row_count':len(data),
-            'feature_columns':SCORE_COLUMNS, 'status':'completed', 'reused':False}
+            'feature_columns':SCORE_COLUMNS,'label_audits':label_audits,
+            'timing':{'budget_scope':'preparation_and_training','budget_seconds':budget_seconds,'total_compute_seconds':time.monotonic()-started},
+            'status':'completed', 'reused':False}
         reference = self.store.put(identity, result, namespace='score_models')
         return self.select_score(result,reference) if select else {**result,'model_ref':reference,'model_type':'l2'}
 
     @serialized_compute
-    def train_score(self, symbols, end='2025-12-31', *, model_type='mlp',variant='A',device='cpu',
+    def train_score(self, symbols, end='2025-12-31', *, model_type='mlp',variant='A',feature_profile='mixed_v1',device='cpu',
                     budget_seconds=600,select=False,observation_manifest=None,stop=None,progress=None):
+        if feature_profile not in {'mixed_v1','ma_trend_v1'}:raise ValueError('Unknown score feature profile')
+        if feature_profile=='ma_trend_v1' and (variant!='A' or model_type!='mlp'):
+            raise ValueError('均线方案仅训练 A 型 MLP 及其同输入 L2；Kronos 保留外部证据')
         if model_type=='l2':
-            return self._train_legacy_score(symbols,end,stop=stop,progress=progress,select=select)
+            return self._train_legacy_score(symbols,end,stop=stop,progress=progress,select=select,budget_seconds=budget_seconds)
         if model_type!='mlp': raise ValueError('model_type must be mlp or l2')
         if not 1<=len(symbols)<=20: raise ValueError('首批学习池限定1至20股')
         if select: raise ValueError('训练候选不能自动晋升；须独立资格事件')
         if variant=='B' and not observation_manifest:
             return {'status':'blocked','reason':'fusion_data_pending','variant':'B',
                 'message':'需先冻结候选/基线持仓观察人口并补齐有界Kronos历史证据；未自动启动历史预测或训练。'}
-        from my_strategy.services.light_score_training import prepare_score_features,make_direction_training_frame,chronological_split_ranges
+        from my_strategy.services.light_score_training import prepare_score_features,make_direction_training_frame,chronological_split_ranges,direction_label_contract
         from my_strategy.services.light_score_v2 import fit_light_score
         from my_strategy.services.light_experiment_registry import persist_experiment_registry
-        frames=[];sources=[];dates,_=self.calendar()
+        if not 0<float(budget_seconds)<=600:raise ValueError('Training budget/thread limit exceeded')
+        started=time.monotonic();deadline=started+float(budget_seconds)
+        bounded_stop=DeadlineStop(stop,deadline)
+        frames=[];sources=[];dates,calendar_identity=self.calendar()
         forecasts={(o['symbol'],o.get('date',o.get('as_of'))):o.get('forecast')
                    for o in (observation_manifest or {}).get('observations',[])}
         for symbol in symbols:
-            self._check(stop)
-            _,frame,events,source=self.source(symbol,end,stop=stop)
-            frame=prepare_score_features(frame,events,forecasts,variant=variant)
+            self._check(stop,deadline)
+            if feature_profile=='ma_trend_v1':
+                # MA training needs only raw trailing prices and their quality
+                # evidence; changing score inputs never rebuilds native sources.
+                frame=load_bars(symbol,end=end,db_path=self.raw_db)
+                events=[]
+                fields=[k for k in ('symbol','date','open','high','low','close','volume','amount','source','has_trade_price','available_at') if k in frame]
+                source={'kind':'ma_raw_source_v2','symbol':symbol,'end':end,'calendar':calendar_identity,
+                    'data_sha256':stable_hash(plain(frame[fields].to_dict('records'))),
+                    'price_basis':frame.attrs.get('price_basis'),'data_version':frame.attrs.get('data_version')}
+            else:
+                _,frame,events,source=self.source(symbol,end,stop=bounded_stop)
+            frame=prepare_score_features(frame,events,forecasts,variant=variant,
+                feature_profile=feature_profile,calendar_dates=dates)
             frames.append(frame);sources.append(source)
             if progress:progress(stage='mlp_inputs',symbol=symbol,completed=len(frames),total=len(symbols))
         full=pd.concat(frames,ignore_index=True)
+        self._check(stop,deadline)
         data=make_direction_training_frame(full,dates,horizon=5,threshold=.003)
+        label_audit=data.attrs['label_audit']
         if variant=='B':
             population={(s,str(d)[:10]) for s,d in forecasts}
             data=data.loc[[(str(r.symbol),str(r.as_of)) in population for r in data.itertuples()]].copy()
         if len(data)>100000: raise ValueError('成熟样本超过10万，需重新冻结有界研究池')
-        core_valid=data[SCORE_COLUMNS].notna().all(axis=1)
+        core_valid=data.score_input_eligible.eq(True) if feature_profile=='ma_trend_v1' else data[SCORE_COLUMNS].notna().all(axis=1)
         core_excluded=int((~core_valid).sum())
         if variant=='B':
             observation_manifest=training_observation_manifest(observation_manifest,full,data,
@@ -442,27 +527,31 @@ class LightResearch:
                 'row_count':len(data),'mature_dates':data.as_of.nunique(),
                 'observation_manifest':observation_manifest,'selected':False})
         ranges=chronological_split_ranges(data)
-        identity={'kind':'light-score-v2','variant':variant,'sources':sources,'splits':ranges,
-            'device':device,'observation_manifest':observation_manifest,'code':score_code_identity()}
+        identity={'kind':'light-score-v2','variant':variant,'feature_profile':feature_profile,'sources':sources,'splits':ranges,
+            'device':device,'observation_manifest':observation_manifest,'label_contract':direction_label_contract(),'code':score_code_identity()}
         cached=self.store.get(identity,namespace='mlp_score_models')
         if cached:return {**cached,'model_ref':{'cache_key':self.store.cache_key(identity,'mlp_score_models')},'reused':True}
+        self._check(stop,deadline)
+        preparation_seconds=time.monotonic()-started
         try:
-            artifact=fit_light_score(data,ranges,variant=variant,source_identity=identity,
-                label_contract={'horizon':5,'entry':'next_verified_open','exit':'fifth_session_close',
-                    'threshold':.003,'fee_threshold_is_estimate':True},device=device,budget_seconds=budget_seconds,
-                cancel_check=(stop.is_set if stop else None),observation_manifest=observation_manifest,
+            artifact=fit_light_score(data,ranges,variant=variant,feature_profile=feature_profile,source_identity=identity,
+                label_contract=direction_label_contract(),device=device,budget_seconds=max(.001,deadline-time.monotonic()),
+                cancel_check=bounded_stop.check,observation_manifest=observation_manifest,
+                progress=progress,
                 experiment_registry=self.store.get_setting('light_experiment_registry'),
                 registration_callback=lambda value:persist_experiment_registry(self.store,value))
         except ValueError as exc:
             if variant!='B' or not ('insufficient mature rows' in str(exc) or 'five examples of every class' in str(exc)):raise
             return plain({'status':'blocked','reason':'fusion_data_pending','variant':'B','model_type':'mlp',
                 'message':str(exc),'observation_manifest':observation_manifest,'row_count':len(data),'selected':False})
-        self._check(stop)
+        self._check(stop,deadline)
         if artifact.get('status')!='completed':
             return plain({'status':'blocked','reason':'fusion_data_pending','model_type':'mlp','variant':variant,'artifact':artifact,'selected':False})
-        result=plain({'status':'completed','model_type':'mlp','variant':variant,'artifact':artifact,
+        result=plain({'status':'completed','model_type':'mlp','variant':variant,'feature_profile':feature_profile,'artifact':artifact,
             'identity':identity,'symbols':symbols,'training_end':end,'split_ranges':ranges,
-            'row_count':len(data),'candidate_row_count':len(full),'core_excluded_rows':core_excluded,'feature_columns':artifact.get('features'),
+            'row_count':len(data),'candidate_row_count':len(full),'label_audit':label_audit,
+            'timing':{'budget_scope':'preparation_and_training','budget_seconds':budget_seconds,'preparation_seconds':preparation_seconds,
+                'total_compute_seconds':time.monotonic()-started},'core_excluded_rows':core_excluded,'feature_columns':artifact.get('features'),
             'reused':False,'selected':False})
         ref=self.store.put(identity,result,namespace='mlp_score_models',pin='frozen_mlp_candidate')
         self.store.limit_unpinned('mlp_score_models',keep=6,dry_run=False)
@@ -491,7 +580,7 @@ class LightResearch:
             self._check(stop)
             try:
                 _,frame,source_events,source=self.source(symbol,end,stop=DeadlineStop(stop,deadline))
-            except InterruptedError:
+            except (InterruptedError,TimeoutError):
                 if stop and stop.is_set():raise
                 if time.monotonic()<deadline:raise
                 return {'status':'blocked','reason':'observation_population_pending',
@@ -578,24 +667,29 @@ class LightResearch:
                  lookback=128, horizon=5, seed=42, device='auto', temperature=.8,
                  top_p=.9,max_predictions=60,budget_seconds=300,save=False,
                  stop=None,progress=None,corporate_actions=None,score_model_id=None,
-                 score_model_type='mlp',research_mode='historical_candidate',candidate_sessions=3,
+                 score_model_type='mlp',feature_profile=None,research_mode='historical_candidate',candidate_sessions=3,
                  fusion_mode='evidence',execution_mode='historical',qualification_event=None,cost_stress=1.0):
         from my_strategy.services.light_daily_scheduler import run_daily_schedule,ScheduleCancelled
         from my_strategy.services.agent_evidence import volume_candidates
         if research_mode not in {'historical_candidate','paper'}:raise ValueError('Unknown research mode')
         if execution_mode=='forward' and research_mode!='paper':raise ValueError('前向模拟须使用paper模式及独立资格')
+        started=time.monotonic();deadline=started+float(budget_seconds)
+        prediction_stop=DeadlineStop(stop,deadline)
         dates,cal=self.calendar();frames={};evidence={};sources=[];score_source_events={}
         symbols=sorted(set(normalize_symbol(s) for s in symbols))
         for symbol in symbols:
-            self._check(stop)
+            self._check(stop,deadline)
             if progress:progress(stage='structure',symbol=symbol)
-            raw,frame,events,source=self.source(symbol,end,stop=stop)
+            raw,frame,events,source=self.source(symbol,end,stop=prediction_stop)
             if 'symbol' not in frame:frame=frame.assign(symbol=symbol)
             score_source_events[symbol]=events
             frames[symbol]=frame;sources.append(source)
             evidence[symbol]=[{**e} for e in events+volume_candidates(frame,symbol)
                               if start<=str(e['date'])[:10]<=end]
-        model=self.score_model(score_model_id,model_type=score_model_type)
+        if feature_profile is not None and score_model_type!='mlp':
+            raise ValueError('特征方案选择使用 MLP 候选及其配对 L2；旧简单 L2 不兼容')
+        model=(self.resolve_score_model(score_model_id,feature_profile=feature_profile,as_of=end,research_mode=research_mode)
+               if feature_profile is not None else self.score_model(score_model_id,model_type=score_model_type))
         params=dict(samples=samples,lookback=lookback,horizon=horizon,seed=seed,device=device,temperature=temperature,top_p=top_p)
         configs={policy:dict(strategy=policy,initial_cash=float(initial_cash),research_only=True,
             candidate_sessions=candidate_sessions,fusion_mode=fusion_mode,research_mode=research_mode,
@@ -609,6 +703,7 @@ class LightResearch:
             'max_predictions':max_predictions,'budget_seconds':budget_seconds,'configs':configs,
             'corporate_actions':corporate_actions or [],'code':code_identity(),
             'execution_mode':execution_mode,'qualification_event':qualification_event}
+        if feature_profile is not None:identity['feature_profile']=feature_profile
         cached=self.store.get(identity,namespace='simulations')
         if cached:
             if save:self.save_result(cached)
@@ -624,12 +719,12 @@ class LightResearch:
             # immutable objects reclaimed normally. No per-day run directories.
             if value.get('stage')!='observing':
                 self._write_checkpoint(checkpoint_identity,plain(value),'simulation_checkpoints')
-        deadline=time.monotonic()+budget_seconds
-        prediction_stop=DeadlineStop(stop,deadline)
+        preparation_seconds=time.monotonic()-started
         scheduled=run_daily_schedule(frames,evidence,configs=configs,calendar=dates,start=start,end=end,
             prediction=lambda symbol,day:self.prediction(symbol,day,stop=prediction_stop,**params),score=scorer,
             max_predictions_per_day=max_predictions,deadline=deadline,stop=stop,
             checkpoint=checkpoint,checkpoint_callback=save_checkpoint,progress=progress,
+            checkpoint_stages={'day_committed','cancelled','interrupted','completed','partial'},
             corporate_actions=corporate_actions,execution_mode=execution_mode)
         self._check(stop)
         comparisons=scheduled['comparisons'];evidence=scheduled['evidence']
@@ -646,7 +741,10 @@ class LightResearch:
             'score_model':model.get('model_ref') if model else None,
             'score_model_type':model.get('model_type',score_model_type) if model else score_model_type,
             'score_variant':(model or {}).get('artifact',{}).get('variant'),
+            'feature_profile':(model or {}).get('artifact',{}).get('feature_profile','mixed_v1') if model else feature_profile,
             'qualification_mode':research_mode,'scheduler':scheduled['scheduler'],
+            'timing':{'budget_scope':'preparation_and_replay','preparation_seconds':preparation_seconds,
+                'total_compute_seconds':time.monotonic()-started,'budget_seconds':budget_seconds},
             'risk_comparisons':scheduled.get('risk_comparisons'),
             'comparison_scope':scheduled.get('comparison_scope','completed_evaluation'),
             'diagnostics':{'opportunity_funnel':{k:v['opportunity_funnel'] for k,v in comparisons.items()},
@@ -752,6 +850,7 @@ class LightResearch:
 
     def submit(self, kind, spec):
         with self.lock:
+            if self._closed: raise RuntimeError('任务服务正在关闭')
             fingerprint = stable_hash({'kind':kind,'spec':spec})
             for job in self.jobs.values():
                 if job['fingerprint']==fingerprint and job['status'] in {'queued','running','cancelling'}:
@@ -759,16 +858,39 @@ class LightResearch:
             job_id=uuid.uuid4().hex
             job={'job_id':job_id,'kind':kind,'fingerprint':fingerprint,'status':'queued',
                  'created_at':local_now().isoformat(),'spec':spec,'progress':{}}
-            self.jobs[job_id]=job; self.stops[job_id]=threading.Event()
-            self.queue.submit(self._run,job_id)
+            job, created = self.journal.create(job)
+            if not created: return deepcopy(job)
+            from my_strategy.storage.task_journal import JournalStop
+            self.jobs[job_id]=job
+            self.stops[job_id]=JournalStop(self.journal,job_id,threading.Event())
+            try:
+                self.queue.submit(self._run,job_id)
+            except Exception as exc:
+                job.update(status='failed',error=str(exc),finished_at=local_now().isoformat())
+                self.journal.update(job)
+                raise
             return deepcopy(job)
 
     def _run(self,job_id):
         job=self.jobs[job_id]
+        self._publication_context.job=job
+        heartbeat_done=threading.Event()
+        def heartbeat():
+            while not heartbeat_done.wait(5.):
+                try: self.journal.heartbeat(job_id)
+                except Exception as exc:
+                    with self.lock: job['heartbeat_error']=str(exc)
+        heartbeat_thread=threading.Thread(target=heartbeat,name='task-heartbeat',daemon=True)
+        heartbeat_thread.start()
         def update(**value):
-            with self.lock: job['progress']=value
+            with self.lock:
+                job['progress']=value
+                now=time.monotonic()
+                if now-self._progress_flushed.get(job_id,0)>=1.:
+                    self.journal.update(job); self._progress_flushed[job_id]=now
         try:
             self._check(self.stops[job_id]); job['status']='running'
+            self.journal.update(job)
             spec=job['spec']; kind=job['kind']
             if kind=='prediction': result=self.prediction(**spec,stop=self.stops[job_id])
             elif kind=='score_training': result=self.train_score(**spec,stop=self.stops[job_id],progress=update)
@@ -785,6 +907,17 @@ class LightResearch:
                 result=sync_light_daily(**spec,service=self,check_cancel=self.stops[job_id].is_set,
                     progress=lambda value:update(**value))
             else: raise ValueError('未知轻量任务')
+            # Bind committed business results before publishing the terminal receipt.
+            if result.get('result_id'):
+                job['result_id']=result['result_id']
+                job['result_ref']={'type':'simulation','result_id':result['result_id']}
+            else:
+                reference=next((result[key] for key in ('result_ref','model_ref','manifest_ref')
+                    if isinstance(result.get(key),dict) and result[key].get('cache_key')),None)
+                if reference is None:
+                    reference=self.store.put({'job_id':job_id},result,namespace='job_results',ttl_seconds=30*86400)
+                job['result_ref']={'type':'cas',**reference}
+            self.journal.update(job)
             self._check(self.stops[job_id])
             reported=result.get('status')
             outcome=reported if reported in {'partial','cancelled','failed','blocked'} else 'succeeded'
@@ -792,17 +925,18 @@ class LightResearch:
         except InterruptedError as exc: job.update(status='cancelled',error=str(exc))
         except Exception as exc: job.update(status='failed',error=str(exc))
         finally:
+            self._publication_context.job=None
+            heartbeat_done.set(); heartbeat_thread.join(timeout=1.)
             from my_strategy.services.kronos_prediction import release_prediction_resources
-            release_prediction_resources()
             job['finished_at']=local_now().isoformat()
-            # Only the summary is persisted; no duplicate full result in jobs.
-            small={k:v for k,v in job.items() if k!='result'}
-            small['result_id']=job.get('result',{}).get('result_id')
+            self.journal.update(job)
+            release_prediction_resources()
             if job['kind']=='incremental' and job['status']=='cancelled':
                 key='incremental_plan:'+job['spec']['plan_id']
                 current=self.store.get_setting(key,{})
                 self.store.set_setting(key,{**current,'status':'cancelled','job_id':job_id})
-            self.store.put({'job_id':job_id},small,namespace='jobs',ttl_seconds=(90 if job['status']=='failed' else 30)*86400)
+            # The journal is the task record; business results remain in their verified stores.
+            # Avoid emitting a new CAS object for every task-state transition.
             # Bound in-memory terminal history just like the visible task list.
             terminal=[key for key,value in self.jobs.items() if value['status'] in {'succeeded','failed','cancelled','partial','blocked'}]
             for key in terminal[:-30]:
@@ -811,14 +945,22 @@ class LightResearch:
     def get_job(self,job_id):
         with self.lock:
             if job_id in self.jobs: return deepcopy(self.jobs[job_id])
-        saved=self.store.get({'job_id':job_id},namespace='jobs')
+        saved=(self.journal.get(job_id) if hasattr(self,'journal') else None) or self.store.get({'job_id':job_id},namespace='jobs')
         if not saved: raise KeyError(job_id)
+        if hasattr(self,'journal') and saved['status'] in {'interrupted','failed','cancelled'} and not saved.get('result_ref'):
+            saved['recovered_outputs']=self.journal.recovered_outputs(job_id,self.store)
         if saved.get('result_id'): saved['result']=self.result(saved['result_id'])
+        elif (saved.get('result_ref') or {}).get('type')=='cas':
+            saved['result']=self.store.get_by_key(saved['result_ref']['cache_key'])
+            if saved['result'] is None: saved['result_unavailable']='结果已过期或不可用；任务记录保留'
+            else: saved['result']={**saved['result'],**saved.get('result_metadata',{})}
         return saved
 
     def cancel(self,job_id):
         with self.lock:
-            if job_id not in self.jobs: raise KeyError(job_id)
-            if self.jobs[job_id]['status'] in {'queued','running'}:
-                self.stops[job_id].set(); self.jobs[job_id]['status']='cancelling'
-            return deepcopy(self.jobs[job_id])
+            saved=self.journal.cancel(job_id)
+            if job_id in self.jobs:
+                self.jobs[job_id].update(saved)
+                if saved['status']=='cancelling': self.stops[job_id].set()
+                return deepcopy(self.jobs[job_id])
+            return saved

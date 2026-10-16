@@ -6,7 +6,9 @@
  const pct=x=>x==null?'—':`${num(x*100)}%`;
  const labels={structure_rules:'结构与量价',structure_kronos:'结构与量价 + Kronos',structure_kronos_score:'结构与量价 + Kronos + MLP',structure_kronos_l2:'结构与量价 + Kronos + 同输入 L2'};
  const signed=(x,unit='')=>x==null||!Number.isFinite(Number(x))?'未记录':`${Number(x)>0?'+':''}${num(x)}${unit}`;
- const accountLabel=(key,value)=>key==='structure_kronos_score'?`结构与量价 + Kronos + ${value?.lineage?.score_model_type?.toUpperCase()||result?.score_model_type?.toUpperCase()||(result?.version==='structure_kronos_sim_v1'?'L2 评分':'MLP')}`:labels[key]||key;
+ const profileOf=value=>value?.feature_profile||value?.artifact?.feature_profile||value?.identity?.feature_profile||value?.lineage?.feature_profile||'mixed_v1';
+ const accountLabel=(key,value)=>{const ma=profileOf(value)==='ma_trend_v1'||profileOf(result)==='ma_trend_v1';return key==='structure_kronos_score'?`结构与量价 + Kronos + ${ma?'均线模型 MLP':value?.lineage?.score_model_type?.toUpperCase()||result?.score_model_type?.toUpperCase()||(result?.version==='structure_kronos_sim_v1'?'L2 评分':'MLP（历史融合）')}`:key==='structure_kronos_l2'&&ma?'结构与量价 + Kronos + 同输入 L2（均线）':labels[key]||key;};
+ let desiredAccount=null;
  let observationManifest=null,result=null,active=null,timer=null,chart=null,predChart=null,tradeChart=null;
  async function api(path,body){const r=await fetch('/api/light'+path,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json',...(sessionStorage.getItem('khquant_api_token')?{Authorization:'Bearer '+sessionStorage.getItem('khquant_api_token')}: {})},body:body===undefined?undefined:JSON.stringify(body)});const v=await r.json();if(!r.ok)throw Error(typeof v.detail==='string'?v.detail:JSON.stringify(v.detail));return v;}
  function error(e){$('light-error').textContent=e.message||String(e);$('light-error').hidden=false;}
@@ -14,15 +16,16 @@
  function table(head,rows){return `<div class="light-table-scroll"><table><thead><tr>${head.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${r.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;}
  async function refresh(){
   try{const s=await api('/status');$('light-model-state').textContent=`Kronos-base · 本地单份模型 · ${s.assets.status||s.assets.ready&&'就绪'||'待核验'}`;
-   const models=s.score_candidates||[], selected=$('light-score-model').value;
+   const models=(s.score_candidates||[]).filter(m=>profileOf(m)===$('light-feature-profile').value), selected=$('light-score-model').value;
    $('light-score-model').innerHTML='<option value="">自动选择兼容候选</option>'+models.map(m=>`<option value="${esc(m.model_id||m.model_ref?.cache_key||m.cache_key)}">${esc((m.model_type||'MLP').toUpperCase())} ${esc(m.variant||'A')} · ${esc(m.end||m.training_end||m.identity?.end||'')} · ${esc((m.model_id||m.model_ref?.cache_key||m.cache_key||'').slice(0,10))}</option>`).join('');
-   if([...$('light-score-model').options].some(o=>o.value===selected))$('light-score-model').value=selected;
-   const latestModel=models[0]||s.score_model;
+   if(selected&&!models.some(m=>(m.model_id||m.model_ref?.cache_key||m.cache_key)===selected))$('light-score-model').innerHTML+=`<option value="${esc(selected)}">已绑定候选（执行时核验） · ${esc(selected)}</option>`;
+   if(selected)$('light-score-model').value=selected;
+   const latestModel=models[0]||(profileOf(s.score_model)===$('light-feature-profile').value?s.score_model:null);
    $('light-score-state').textContent=latestModel?`评分模型 · ${latestModel.model_type?.toUpperCase()||'L2'} · ${latestModel.mature_rows??latestModel.row_count??latestModel.artifact?.row_count??'待核验'} 个成熟样本 · ${latestModel.feature_dimensions??'—'} 项输入 · ${models.length} 个候选。历史候选回测与自动账户资格分别核验。`:'尚无评分模型；可训练轻量候选，与结构量价及 Kronos 账户对照。';
    await refreshManifests();
    const running=(s.jobs||[]).find(j=>j.kind!=='incremental'&&['queued','running','cancelling'].includes(j.status));if(running&&active!==running.job_id){active=running.job_id;busy(true);poll();}
    const saved=await api('/saved'), previousSaved=$('light-saved').value;
-   $('light-saved').innerHTML='<option value="">选择结果</option>'+saved.results.filter(r=>r.pin_count>0).map(r=>{const i=r.identity||{}, current=i.version==='agent_mlp_sim_v1', label=i.partial_stage?'部分完成':current?'完整回放':'旧版结果';return `<option value="${esc(r.cache_key)}">${esc(i.start)} → ${esc(i.end)} · ${esc((i.sources||[]).map(x=>x.symbol).join('、'))} · ${label} · ${i.score_model_type==='mlp'?'MLP':'L2'} · 费用${i.configs?.structure_rules?.cost_stress||1}倍 · ${esc(r.cache_key.slice(0,8))}</option>`;}).join('');
+   $('light-saved').innerHTML='<option value="">选择结果</option>'+saved.results.filter(r=>r.pin_count>0).map(r=>{const i=r.identity||{}, current=i.version==='agent_mlp_sim_v1', label=i.partial_stage?'部分完成':current?'完整回放':'旧版结果';return `<option value="${esc(r.cache_key)}">${esc(i.start)} → ${esc(i.end)} · ${esc((i.sources||[]).map(x=>x.symbol).join('、'))} · ${label} · ${profileOf(i)==='ma_trend_v1'?'均线 MLP / 同输入 L2':i.score_model_type==='mlp'?'历史融合 MLP':'L2'} · 费用${i.configs?.structure_rules?.cost_stress||1}倍 · ${esc(r.cache_key.slice(0,8))}</option>`;}).join('');
    if(saved.results.some(r=>r.cache_key===previousSaved&&r.pin_count>0))$('light-saved').value=previousSaved;
    $('light-storage-state').textContent='预览缓存7天 · 可清理缓存上限8 GiB · 保存账户长期保留 · 日更不自动训练';
    const data=await fetch('/api/data/status').then(r=>r.json());const latest=data.latest_date||data.latest||data.data_end||document.getElementById('latest-date')?.textContent;
@@ -44,18 +47,19 @@
   await loadManifest(select.value);
  }
  async function submit(path,spec){$('light-error').hidden=true;busy(true);try{const job=await api(path,spec);active=job.job_id;poll();}catch(e){busy(false);error(e);}}
- async function poll(){clearTimeout(timer);try{const j=await api('/jobs/'+active);const p=j.progress||{};$('light-progress').textContent=`${({queued:'等待计算',running:'计算中',cancelling:'正在取消',succeeded:'已完成',failed:'失败',cancelled:'已取消',partial:'部分完成',blocked:'条件未满足'})[j.status]||j.status} ${['queued','running','cancelling'].includes(j.status)?`${({structure:'结构准备',account:'账户计算',kronos:'Kronos预测',light_daily:'每日续算',simple_score_inputs:'评分样本'})[p.stage]||p.stage||''} ${p.symbol||''} ${p.date||''} ${p.completed!=null?`${p.completed}/${p.total}`:''}`:''}`;
+ async function poll(){clearTimeout(timer);if(document.hidden)return;try{const j=await api('/jobs/'+active);const p=j.progress||{};$('light-progress').textContent=`${({queued:'等待计算',running:'计算中',cancelling:'正在取消',succeeded:'已完成',failed:'失败',cancelled:'已取消',partial:'部分完成',blocked:'条件未满足',interrupted:'服务中断'})[j.status]||j.status} ${['queued','running','cancelling'].includes(j.status)?`${({structure:'结构准备',account:'账户计算',kronos:'Kronos预测',light_daily:'每日续算',simple_score_inputs:'评分样本'})[p.stage]||p.stage||''} ${p.symbol||''} ${p.date||''} ${p.completed!=null?`${p.completed}/${p.total}`:''}`:''}`;
   if(['queued','running','cancelling'].includes(j.status)){timer=setTimeout(poll,1200);return;}busy(false);
-  if(['failed','blocked'].includes(j.status))throw Error(j.error||j.result?.error||j.result?.reason||'条件未满足');if(j.status==='cancelled'){active=null;await refreshManifests();$('light-score-result').textContent=j.error||'本批已取消，已提交清单可在下拉框中选择；只在点击采集后运行新批。';return;}
+  if(['failed','blocked','interrupted'].includes(j.status))throw Error(j.error||j.result?.error||j.result?.reason||'条件未满足');if(j.status==='cancelled'){active=null;await refreshManifests();$('light-score-result').textContent=j.error||'本批已取消，已提交清单可在下拉框中选择；只在点击采集后运行新批。';return;}
   if(j.kind==='prediction')renderPrediction(j.result);else if(j.kind==='score_observations'){observationManifest=j.result;sessionStorage.setItem('khquant_observation_manifest',j.result.manifest_id);await refreshManifests();$('light-score-result').textContent=JSON.stringify({manifest_id:j.result.manifest_id,status:j.result.status,coverage:j.result.coverage,total_calls:j.result.total_calls,batch_count:j.result.batch_count},null,2);$('light-collect').textContent=j.result.status==='completed'?'历史观察采集完成':'继续采集下一批';}else if(j.kind==='simulation'){result=j.result?.saved?await api('/results/'+j.result.result_id):j.result;renderSimulation();}else if(j.kind==='daily'){renderDaily(j.result);refresh();}else{await refresh();if(j.result?.model_id||j.result?.model_ref?.cache_key)$('light-score-model').value=j.result.model_id||j.result.model_ref.cache_key;$('light-score-result').textContent=JSON.stringify({status:j.result.status,model_ref:j.result.model_ref,qualification:j.result.artifact?.qualification,metrics:j.result.artifact?.metrics,validation:j.result.artifact?.validation,reason:j.result.reason},null,2);}
  }catch(e){busy(false);error(e);}}
+ document.addEventListener('visibilitychange',()=>{clearTimeout(timer);if(!document.hidden&&active)poll();});
  function renderDaily(value){
   const accounts=value.accounts||[],pending=accounts.filter(a=>a.status!=='completed');
   const summary=`${value.price_date} · 账户完成 ${accounts.length-pending.length}，待处理 ${pending.length} · 关注 ${value.requested} 项：完成 ${value.succeeded}，失败 ${value.failed}，延后 ${value.deferred} · 未启动训练或全市场补结构`;
   const roles={shadow_research:'影子研究',paper:'纸上账户'},states={blocked:'条件未满足',partial:'部分完成',failed:'失败',cancelled:'已取消',pending:'待处理'};
   $('light-daily-state').innerHTML=`<p>${esc(summary)}</p>`+(pending.length?table(['账户','用途','状态','原因'],pending.map(a=>[
    esc(String(a.account_id||a.result_id||'未记录').slice(0,10)),esc(roles[a.role]||a.role||'用途未记录'),esc(states[a.status]||a.status||'待处理'),
-   esc(a.reason||a.error||(a.dependency_errors||[]).map(d=>d.error||d.reason||d.dependency).filter(Boolean).join('；')||'服务未返回具体原因，请查看任务详情')
+   esc(a.status==='blocked' && /版本改变|版本.*变化|代码身份/.test(a.reason||'') ? '历史结果可查看；算法版本已变化，续算需新建账户分支。' : a.reason||a.error||(a.dependency_errors||[]).map(d=>d.error||d.reason||d.dependency).filter(Boolean).join('；')||'服务未返回具体原因，请查看任务详情')
   ])): '');
  }
  function createChart(id){const node=$(id);node.replaceChildren();return LightweightCharts.createChart(node,{autoSize:true,height:280,layout:{background:{color:'transparent'},textColor:'#55657a'},grid:{vertLines:{color:'#e6ebf2'},horzLines:{color:'#e6ebf2'}},timeScale:{timeVisible:false,borderVisible:false},rightPriceScale:{borderVisible:false}});}
@@ -71,7 +75,7 @@
  }
  function renderSimulation(){if(!result)return;$('light-results').hidden=false;const c=result.prediction_coverage||{};$('light-result-meta').textContent=`${result.symbols.join('、')} · ${result.start} → ${result.scheduler?result.scheduler.complete_through||'尚无完整评估日':result.end}${result.status==='partial'?'（请求至 '+result.end+'，尚未完整评估）':''} · ${result.reused?'复用已核验结果':'新回放'} · ${result.saved?'已保存账户':'预览缓存'}。Kronos请求 ${c.requested}，可用 ${c.succeeded}，无效 ${c.unusable}，失败 ${c.failed}，预算外 ${c.budget_skipped}。`;
   $('light-comparison').innerHTML=table(['独立账户','费用后收益','夏普','最大回撤','成交笔数'],Object.keys(labels).filter(k=>result.comparisons[k]).map(k=>{const v=result.comparisons[k];return [k,v];}).map(([k,v])=>{const m=v.metrics||{};return [esc(accountLabel(k,v)),pct(m.total_return??m.return),num(m.sharpe??m.sharpe_ratio),pct(m.max_drawdown),num(m.trade_count??v.trades?.length,0)];}));
-  const priorAccount=$('light-account').value;$('light-account').innerHTML=Object.keys(labels).filter(k=>result.comparisons[k]).map(k=>`<option value="${k}">${esc(accountLabel(k,result.comparisons[k]))}</option>`).join('');if(result.comparisons[priorAccount])$('light-account').value=priorAccount;
+  const priorAccount=$('light-account').value;$('light-account').innerHTML=Object.keys(labels).filter(k=>result.comparisons[k]).map(k=>`<option value="${k}">${esc(accountLabel(k,result.comparisons[k]))}</option>`).join('');if(desiredAccount&&result.comparisons[desiredAccount]){$('light-account').value=desiredAccount;desiredAccount=null;}else if(result.comparisons[priorAccount])$('light-account').value=priorAccount;
   $('light-limitations').textContent=(result.limitations||[]).join(' ');renderReport();$('light-trade-symbol').innerHTML=result.symbols.map(s=>`<option>${esc(s)}</option>`).join('');$('light-enable-daily').disabled=false;renderAccount();
  }
  function renderReport(){
@@ -112,10 +116,20 @@
  function reason(r){return ({evaluated:'已评估',eligible:'进入委托评估',blocked:'暂不入场',unique_opportunities:'独立机会',orders:'委托',fills:'实际成交',completed_cycles:'完整持仓周期',structure_entry_trend_not_ready:'结构入场趋势尚未确认',add_requires_profit_and_interval:'加仓需满足浮盈与间隔',exit_pending:'退出委托待成交',reentry_cooldown:'离场后冷静期',missing_or_invalid_structure_risk_boundary:'缺少有效结构风险边界',simple_score_below_threshold:'融合评分低于入场阈值',source_candidates:'已确认来源候选',held_reviews:'持仓复核',candidate_reviews:'观察期复核',forecast_requested:'预测请求',forecast_usable:'预测可用',entry_allowed:'可进入交易评估',qualification_blocked:'模型资格待核验',score_blocked:'评分门槛未满足',risk_blocked:'风险条件阻挡',lot_budget_blocked:'资金不足一手',filled:'已成交',expired:'观察期结束',confirmed_structure_entry:'确认结构后建仓',confirmed_structure_sell:'结构卖出：减仓',confirmed_profitable_add:'浮盈且新证据确认后加仓',frozen_stop_gap:'跳空触发冻结保护线',frozen_price_stop:'触发价格保护线',ma_trend_failure:'均线趋势失效',holding_expiry:'到达持仓期限',time_failure_without_one_r:'持仓未达到预期进展',cash_risk_or_lot_budget_insufficient:'资金或风险预算不足一手',simple_score_policy_not_passed:'评分未通过政策资格',forecast_missing_or_unusable:'预测缺失或质量不足',forecast_direction_blocked:'预测方向未满足入场条件',portfolio_drawdown_exit:'组合回撤触发退出',kronos_weakness_reduction:'连续预测转弱：减仓',consecutive_forecast_weakness:'连续预测转弱：减仓',consecutive_fusion_weakness:'连续融合证据转弱：减仓'})[r]||r;}
  function symbols(){return $('light-symbols').value.split(/[\s,，;；]+/).filter(Boolean).map(s=>s.toUpperCase());}
  function download(name,text,type){const url=URL.createObjectURL(new Blob([text],{type})),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+ function updateFeatureControls(){
+  const ma=$('light-feature-profile').value==='ma_trend_v1',variant=$('light-score-variant'),previous=variant.value;
+  variant.innerHTML=ma?'<option value="A">均线趋势 · 20 项数值特征</option>':'<option value="A">A · 结构与量价</option><option value="B">B · 加入 Kronos 摘要</option>';
+  variant.value=ma?'A':previous==='B'?'B':'A';
+  if(ma)$('light-score-type').value='mlp';
+  $('light-score-type').disabled=ma;variant.disabled=ma;$('light-observe-panel').hidden=ma;
+  $('light-feature-help').textContent=ma?'均线模型使用 20 项数值特征，涵盖均线位置、斜率与距离；配对 L2 使用相同训练人口和输入。Kronos 单独提供证据。单次最多10分钟，不训练 Kronos 权重。':'历史融合 A 使用结构量价数值与缺失标记；B 需要冻结的历史预测覆盖，证据不足显示待补齐。单次最多10分钟。';
+ }
+
+ async function openTask(id){const job=await api('/jobs/'+encodeURIComponent(id));if(!job.result)throw Error('该任务没有可读取的结果，可能已过期。');location.hash='simulation';if(job.kind==='simulation'){result=job.result.saved?await api('/results/'+job.result.result_id):job.result;renderSimulation();}else if(job.kind==='prediction')renderPrediction(job.result);else if(job.kind==='daily')renderDaily(job.result);else{$('light-score-result').textContent=JSON.stringify(job.result,null,2);$('light-score-result').closest('details').open=true;}}
  function boot(){if(!$('view-simulation'))return;
-  $('light-predict-form').addEventListener('submit',e=>{e.preventDefault();submit('/predict',{symbol:$('light-symbol').value.toUpperCase(),end:$('light-predict-date').value,lookback:Number($('light-lookback').value),horizon:Number($('light-horizon').value),samples:Number($('light-samples').value),device:$('light-device').value});});
-  $('light-sim-form').addEventListener('submit',e=>{e.preventDefault();submit('/simulate',{symbols:symbols(),start:$('light-start').value,end:$('light-end').value,initial_cash:Number($('light-cash').value),samples:Number($('light-samples').value),lookback:Number($('light-lookback').value),horizon:Number($('light-horizon').value),device:$('light-device').value,save:$('light-save').checked,score_model_id:$('light-score-model').value||null,score_model_type:$('light-score-type').value,research_mode:'historical_candidate',candidate_sessions:Number($('light-candidate-days').value),fusion_mode:$('light-fusion').value,cost_stress:Number($('light-cost-stress').value)});});
-  $('light-train').addEventListener('click',()=>submit('/score/train',{symbols:symbols(),end:$('light-score-end').value,model_type:$('light-score-type').value,variant:$('light-score-variant').value,...($('light-score-variant').value==='B'&&observationManifest?{observation_manifest:observationManifest}:{}),device:'cpu',budget_seconds:600,select:false}));
+  $('light-predict-form').addEventListener('submit',e=>{e.preventDefault();submit('/predict',{symbol:$('light-symbol').value.toUpperCase(),end:$('light-predict-date').value,lookback:Number($('light-lookback').value),horizon:Number($('light-horizon').value),samples:Number($('light-samples').value),device:$('light-device').value,seed:Number($('light-seed').value)});});
+  $('light-sim-form').addEventListener('submit',e=>{e.preventDefault();submit('/simulate',{symbols:symbols(),start:$('light-start').value,end:$('light-end').value,initial_cash:Number($('light-cash').value),samples:Number($('light-samples').value),lookback:Number($('light-lookback').value),horizon:Number($('light-horizon').value),device:$('light-device').value,seed:Number($('light-seed').value),save:$('light-save').checked,score_model_id:$('light-score-model').value||null,score_model_type:$('light-score-type').value,feature_profile:$('light-feature-profile').value,research_mode:'historical_candidate',candidate_sessions:Number($('light-candidate-days').value),fusion_mode:$('light-fusion').value,cost_stress:Number($('light-cost-stress').value)});});
+  $('light-train').addEventListener('click',()=>submit('/score/train',{symbols:symbols(),end:$('light-score-end').value,model_type:$('light-score-type').value,feature_profile:$('light-feature-profile').value,variant:$('light-score-variant').value,...($('light-score-variant').value==='B'&&observationManifest?{observation_manifest:observationManifest}:{}),device:'cpu',budget_seconds:600,select:false}));
   $('light-observe-manifest').addEventListener('change',()=>loadManifest($('light-observe-manifest').value).catch(error));
   $('light-collect').addEventListener('click',()=>submit('/score/observations',observationManifest?{manifest_id:observationManifest.manifest_id}:{symbols:symbols(),start:$('light-observe-start').value,end:$('light-score-end').value,device:$('light-device').value}));
   $('light-score-model').addEventListener('change',async()=>{try{const id=$('light-score-model').value;if(id){const m=await api('/score/models/'+encodeURIComponent(id));$('light-score-result').textContent=JSON.stringify(m,null,2);}}catch(e){error(e);}});
@@ -128,7 +142,19 @@
   $('light-export').addEventListener('click',()=>{if(result)download('KHQuant-'+result.result_id.slice(0,12)+'.json',JSON.stringify(result,null,2),'application/json');});
   $('light-export-trades').addEventListener('click',()=>{if(!result)return;const trades=result.comparisons[$('light-account').value].trades||[],cols=['date','symbol','action','shares','price','fee','position_after','cash_after','reason','share_delta','weight_before','weight_after','trade_weight_delta'],q=x=>'"'+String(x??'').replaceAll('"','""')+'"';download('KHQuant-trades.csv','\ufeff'+[cols,...trades.map(t=>cols.map(c=>t.execution_change?.[c]??t[c]))].map(r=>r.map(q).join(',')).join('\r\n'),'text/csv;charset=utf-8');});
   $('light-account').addEventListener('change',renderAccount);$('light-chart-mode').addEventListener('change',renderAccount);$('light-refresh').addEventListener('click',refresh);
-  $('open-light-analysis').addEventListener('click',()=>{const s=$('analysis-symbol').value.match(/\d{6}\.(SH|SZ)/i);if(s){$('light-symbol').value=s[0];$('light-symbols').value=s[0];}location.hash='simulation';});
+  $('open-light-analysis').addEventListener('click',()=>{try{const context=globalThis.KHQuantMethods.analysisContext();
+    $('light-symbol').value=context.symbol;$('light-symbols').value=context.symbol;
+    if(context.start)$('light-start').value=context.start;if(context.end){$('light-end').value=context.end;$('light-predict-date').value=context.end;}
+    ['lookback','horizon','samples','seed','device'].forEach(key=>{if(context[key]!=null)$('light-'+key).value=String(context[key]);});
+    $('light-feature-profile').value='ma_trend_v1';updateFeatureControls();
+    if(!context.score_model_id)$('light-score-model').value='';
+    if(context.score_model_id){const select=$('light-score-model');if(![...select.options].some(o=>o.value===context.score_model_id))select.innerHTML+=`<option value="${esc(context.score_model_id)}">已绑定均线候选 · ${esc(context.score_model_id)}</option>`;select.value=context.score_model_id;}
+    desiredAccount=({structure:'structure_rules',structure_kronos:'structure_kronos',structure_kronos_ma_mlp:'structure_kronos_score',structure_kronos_ma_l2:'structure_kronos_l2'})[context.analysis_method]||'structure_rules';
+    $('light-transfer-context').hidden=false;$('light-transfer-context').textContent=`已带入 ${context.symbol} · ${context.start||'可用历史'} → ${context.end||'最新行情'} · ${globalThis.KHQuantMethods.label(context.analysis_method)}。点击预测或回测按钮开始计算。`;
+    location.hash='simulation';}catch(e){error(e);location.hash='simulation';}});
+  $('light-feature-profile').addEventListener('change',()=>{$('light-score-model').value='';updateFeatureControls();refresh();});
+  window.addEventListener('khquant:task-history-changed',()=>{if(location.hash==='#simulation')refresh();});
+  updateFeatureControls();
  }
- globalThis.KHQuantLightResearch={refresh};boot();if(location.hash==='#simulation')refresh();
+ globalThis.KHQuantLightResearch={refresh,openTask};boot();if(location.hash==='#simulation')refresh();
 })();

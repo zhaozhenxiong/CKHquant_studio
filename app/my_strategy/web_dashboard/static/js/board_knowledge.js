@@ -79,6 +79,7 @@
     try {
       const j=await api(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
       async function poll() {
+    if(document.hidden){setTimeout(()=>poll().catch(()=>{}),15000);return;}
         const state=await api('/jobs/'+j.job_id), labels={running:path==='/refresh'?'正在更新板块资料…':'正在计算板块特征…',succeeded:'任务完成。',completed:'任务完成。',partial:'部分板块更新成功，失败记录已保存，可继续补采。',interrupted:'本次采集已暂停，已完成快照已保存，可续采。',failed:'任务失败：'+(state.error || '请查看知识库更新记录')};
         text('job',labels[state.status] || state.status);
         if(state.status==='running')setTimeout(()=>poll().catch(e=>{showError(e);unlock();}),3000);

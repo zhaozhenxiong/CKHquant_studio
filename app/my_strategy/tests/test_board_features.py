@@ -230,6 +230,48 @@ def test_market_amount_excludes_b_shares_even_with_valid_quotes(market):
     assert build(market)['boards'][0]['board_market_amount_share']==pytest.approx(.7)
 
 
+def test_mixed_scope_prices_projection_and_content_identity_ignore_excluded_rows(market):
+    excluded=['430001.BJ','920001.BJ','834683.NQ','900901.SH']
+    source=market['snapshot']('industry','111111',members=market['symbols'][:5]+excluded)
+    original=copy.deepcopy(source);market['store']=MemoryStore([source])
+    with sqlite3.connect(market['path']) as conn:
+        for symbol in excluded:
+            conn.executemany('INSERT INTO stock_daily_normalized VALUES(?,?,?,?,?,?,?,?,?,?)',
+                [[symbol,day,10.,11.,9.,10.,1e15,1e18,'tushare',1] for day in market['dates']])
+    mixed=build(market,mode='current_reference');row=mixed['boards'][0]
+    assert market['store'].snapshots[0]==original
+    assert row['snapshot_hash']==original['snapshot_hash']
+    assert row['expected_members']==row['effective_members']==5 and row['coverage']==1
+    assert row['calculation_membership']['source_member_count']==9
+    assert row['calculation_membership']['excluded_members']==sorted(excluded)
+    assert row['board_amount']==5000 and row['board_market_amount_share']==.5
+    assert {r['symbol'] for r in mixed['stocks']}==set(market['symbols'][:5])
+    with sqlite3.connect(market['path']) as conn:
+        conn.executemany('UPDATE stock_daily_normalized SET amount=amount*10 WHERE stock=?',[(s,) for s in excluded])
+    changed=build(market,mode='current_reference',use_cache=False)
+    assert changed==mixed
+    with sqlite3.connect(market['path']) as conn:
+        conn.executemany('DELETE FROM stock_daily_normalized WHERE stock=?',[(s,) for s in excluded])
+    assert build(market,mode='current_reference',use_cache=False)==mixed
+    with sqlite3.connect(market['path']) as conn:
+        conn.execute('DELETE FROM stock_daily_normalized WHERE stock=? AND date=?',
+            (market['symbols'][0],market['dates'][-1]))
+    short=build(market,mode='current_reference')['boards'][0]
+    assert short['expected_members']==5 and short['effective_members']==4 and short['coverage']==.8
+    assert short['board_amount'] is None
+
+
+def test_excluded_only_members_keep_null_and_source_proof(market):
+    source=market['snapshot']('industry','111111',members=['430001.BJ','834683.NQ'])
+    market['store']=MemoryStore([source]);result=build(market,mode='current_reference')
+    row=result['boards'][0]
+    assert row['expected_members']==0 and row['effective_members']==0
+    assert row['calculation_membership']['source_member_count']==2
+    assert 'no_supported_members' in row['reason_codes'] and 'membership_incomplete' not in row['reason_codes']
+    assert all(row[name] is None for name in features.BOARD_FEATURE_COLUMNS)
+    assert not result['stocks'] and not row['training_eligible']
+
+
 def test_actual_knowledge_store_persists_bulk_and_readonly_latest_flat_rows(market,tmp_path):
     from my_strategy.storage.board_knowledge import BoardKnowledgeStore, FORMAT
     path=tmp_path/'basic_kb.db';store=BoardKnowledgeStore(path)

@@ -45,7 +45,8 @@ def test_top30_is_generation_pinned_and_never_calls_math(dashboard, tmp_path, ma
     row = response['rankings'][0]
     detail = client.get('/api/boards/detail/' + row['board_id'], params={'generation_id':generation_id}).json()
     assert detail['features']['board_amount'] == 7000
-    assert detail['membership_matches_generation'] is False and detail['members'] == []
+    assert detail['membership_matches_generation'] is True and detail['members'] == market['symbols']
+    assert detail['source_membership_available'] is False and detail['source_members'] == []
     assert detail['features']['native_structure'] is None
 
 

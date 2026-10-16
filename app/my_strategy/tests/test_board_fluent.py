@@ -47,9 +47,11 @@ def _lease_child(path,ready,stop):
 
 
 def native_result(market,boards):
+    from my_strategy.services.board_calculation_scope import calculation_contract
     day=market['dates'][-1]
+    memberships={board['board_id']:board['calculation_membership'] for board in boards}
     identity={'price_date':day,'mode':'current_reference','training_eligible':False,'source':'fixture',
-              'calendar_hash':stable_hash(market['dates']),'required_symbols':sorted(market['symbols'])}
+              'calendar_hash':stable_hash(market['dates']),**calculation_contract(memberships)}
     rows={}
     for symbol in market['symbols']:
         row={'symbol':symbol,'price_date':day,'mode':'current_reference','training_eligible':False,
@@ -58,6 +60,9 @@ def native_result(market,boards):
     aggregate=[]
     for board in boards:
         row={'board_id':board['board_id'],'price_date':day,'structure_basis':'member_native',
+             'calculation_scope':board['calculation_scope'],'calculation_membership':board['calculation_membership'],
+             'snapshot_hash':board['snapshot_hash'],'source_snapshot_hash':board['snapshot_hash'],
+             'projection_hash':board['calculation_membership']['projection_hash'],'expected_members':board['expected_members'],
              'training_eligible':False,'structure_coverage':1.,'wyckoff_coverage':1.}
         row['row_hash']=stable_hash(row);aggregate.append(row)
     return {'identity':identity,'complete':True,'summaries':rows,'input_refs':[{'entity_id':symbol,'cache_key':'a'*64} for symbol in rows]},aggregate
@@ -227,6 +232,66 @@ def test_no_matching_native_publishes_market_partial_not_full(actual_market,monk
     assert BoardFluentStore(actual_market['fluent']).get_sync(result['sync_id'])['status']=='partial'
 
 
+def _replace_scope_members(store, board, members):
+    from my_strategy.storage.board_knowledge import FORMAT
+    now=pd.Timestamp.now(tz='Asia/Shanghai').isoformat()
+    row={key:board[key] for key in ('board_id','kind','name','source','source_code','taxonomy')}
+    row.update(format=FORMAT,members=members,expected_count=len(members),complete=True,
+        observed_at=now,available_at=now,effective_at=now,
+        source_url='https://q.10jqka.com.cn/thshy/',
+        provenance={'pagination_complete':True,'reported_count':len(members),'unique_members':len(members)})
+    store.import_snapshot(row)
+
+
+def test_scope_latest_date_ignores_bj_future_quote(actual_market):
+    expected=actual_market['dates'][-1]
+    with sqlite3.connect(actual_market['path']) as conn:
+        conn.execute('INSERT INTO stock_daily_normalized VALUES(?,?,?,?,?,?,?,?,?,?)',
+            ['920001.BJ','2099-01-01',10.,11.,9.,10.,100.,1e20,'tushare',1])
+    assert service.latest_qualified_price_date(actual_market['path'])==expected
+    assert build(actual_market)['price_date']==expected
+
+
+def test_native_collector_receives_exact_projected_population(actual_market,monkeypatch):
+    import my_strategy.services.board_native_summary as native
+    from my_strategy.services.board_calculation_scope import calculation_contract
+    board=actual_market['store'].catalog(current=True)[0]
+    _replace_scope_members(actual_market['store'],board,actual_market['symbols'][:5]+['430001.BJ','920001.BJ'])
+    captured=[]
+    def collect(**kwargs):
+        captured.append(kwargs)
+        assert kwargs['symbols']==actual_market['symbols']
+        identity={'price_date':kwargs['price_date'],**calculation_contract(kwargs['calculation_memberships'])}
+        return {'identity':identity,'complete':False,'summaries':{},'diagnostics':{'reason':'fixture_no_native'}}
+    monkeypatch.setattr(native,'collect_native_summaries',collect)
+    value=build(actual_market,with_native=True)
+    assert captured and value['status']=='partial' and not value['full_published']
+    row=BoardFluentStore(actual_market['fluent']).board(board['board_id'])
+    assert row['expected_members']==5 and row['calculation_membership']['source_member_count']==7
+
+
+def test_empty_scope_does_not_collect_or_publish_full(actual_market,monkeypatch):
+    import my_strategy.services.board_native_summary as native
+    for board in actual_market['store'].catalog(current=True):
+        _replace_scope_members(actual_market['store'],board,['430001.BJ'])
+    monkeypatch.setattr(native,'collect_native_summaries',lambda **kwargs:pytest.fail('empty population collected native'))
+    value=build(actual_market,with_native=True)
+    assert value['status']=='partial' and value['market_published'] and not value['full_published']
+    assert value['native_diagnostics']['reason']=='no_supported_members'
+    store=BoardFluentStore(actual_market['fluent'])
+    assert store.current_generation('full') is None
+
+
+@pytest.mark.parametrize('table,column,value',[
+    ('board_membership','symbol','430001.BJ'),('source_payloads','gzip_blob',b'corrupt-source-proof')])
+def test_real_kb_tampered_members_or_source_proof_rejected_before_projection(actual_market,table,column,value):
+    with sqlite3.connect(actual_market['kb']) as conn:
+        conn.execute('DROP TRIGGER immutable_'+table+'_update')
+        conn.execute('UPDATE '+table+' SET '+column+'=? WHERE rowid=(SELECT MIN(rowid) FROM '+table+')',[value])
+    with pytest.raises(ValueError):build(actual_market,with_native=True)
+    assert BoardFluentStore(actual_market['fluent'],readonly=True).current_generation('market') is None
+
+
 def test_indexed_full_warm_revalidates_inputs_without_cold_native_decode(actual_market,monkeypatch):
     import my_strategy.services.board_native_summary as native
     market_bundle=bundle(actual_market)
@@ -285,7 +350,9 @@ def test_independent_native_reuse_refuses_changed_requested_population(actual_ma
     import my_strategy.services.board_native_summary as native
     payload=bundle(actual_market);native_data,_=native_result(actual_market,payload['boards'])
     native_data['identity']['required_symbols']=native_data['identity']['required_symbols'][:-1]
-    build(actual_market,with_native=True,native_result=native_data)
+    with pytest.raises(ValueError,match='calculation projection'):
+        build(actual_market,with_native=True,native_result=native_data)
+    assert BoardFluentStore(actual_market['fluent']).current_generation('full') is None
     contract=service.generation_contract()
     monkeypatch.setattr(service,'generation_contract',lambda:{**contract,'fluent_contract_revision':'new'})
     monkeypatch.setattr(native,'validate_native_reuse',lambda *a,**k:pytest.fail('changed requested population reused'))

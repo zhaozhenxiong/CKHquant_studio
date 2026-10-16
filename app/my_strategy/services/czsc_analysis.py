@@ -359,3 +359,28 @@ def analyze_stock(symbol: str, start: str | None = None, end: str | None = None,
                          f"未核验真实交易价格的bar：{frame.attrs['unverified_trade_price_bars']}。", "as_of截断当前行情库快照；未重建当时的数据修订版本。", "事件为下一交易时点的研究意图，真实成交以回测账本为准。"],
             "warmup": {"required": settings["warmup_bars"], "available": len(frame), "eligible": len(frame) >= settings["warmup_bars"]}}
     return result
+
+
+def native_generation_identity():
+    """Hash the exact structure path, independently of chart/account renderers.
+
+    Symbols are explicit to make added numerical dependencies reviewable. The
+    engine manifest and resolved strategy configuration are bound by callers.
+    """
+    import hashlib
+    import inspect
+    from my_strategy.adapters import czsc_adapter
+    from my_strategy.core import config_loader
+    from my_strategy import runtime_env
+    functions=(strategy_config,_day,_pen_key,_zone_key,IntentSession.__init__,
+               CzscSession.__init__,CzscSession._advance,CzscSession.advance_structure,
+               czsc_adapter.to_raw_bar,czsc_adapter.native_runtime,czsc_adapter.engine_contract,
+               runtime_env.runtime_resource_root,
+               config_loader._resolve_configs_dir,config_loader.get_config_path,
+               config_loader.load_yaml_config,config_loader.load_json_config,config_loader.load_config,
+               config_loader._validate_config,config_loader.apply_env_overrides,
+               config_loader._deep_copy,config_loader._parse_env_value)
+    return {'schema':'native_generation_identity_v2','frequencies':list(FREQUENCIES),
+        'functions':{function.__qualname__:hashlib.sha256(inspect.getsource(function).encode()).hexdigest()
+                     for function in functions},
+        'identity_contract':hashlib.sha256(inspect.getsource(native_generation_identity).encode()).hexdigest()}

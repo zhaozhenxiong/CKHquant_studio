@@ -43,6 +43,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source", type=Path, default=None)
     parser.add_argument("--backup-root", type=Path, default=os.environ.get("KHQUANT_BACKUP_ROOT"), help="Explicit destination or KHQUANT_BACKUP_ROOT; required with --execute")
     parser.add_argument("--execute", action="store_true", help="Perform the backup after policy approval")
+    parser.add_argument("--compression", choices=['gzip'], help="Publish a compressed snapshot after a full restore drill")
     args = parser.parse_args(argv)
     policy = load_policy(_resolve(args.policy))
     source = _resolve(args.source) if args.source else raw_db_path()
@@ -64,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
         raise FileNotFoundError(source)
     if args.backup_root is None:
         parser.error("--backup-root is required for an executed backup")
-    result.update(create_verified_backup(source, _resolve(args.backup_root)))
+    result.update(create_verified_backup(source, _resolve(args.backup_root), compression=args.compression))
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

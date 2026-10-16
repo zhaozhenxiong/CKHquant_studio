@@ -158,16 +158,23 @@ class DailyUpdater:
         bulk_batch = int(self.config.get("tushare", {}).get("bulk_batch_size", 200))
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        old_frames: dict[str, pd.DataFrame] = {}
+        summary_reader = getattr(self.cache, 'stock_daily_update_summaries', None)
+        summaries = summary_reader(codes) if callable(summary_reader) else None
+        # Custom cache adapters may not implement the DB summary contract.
+        if not isinstance(summaries, dict):
+            summaries = {}
+            for code in codes:
+                old_df = self.cache.read_stock_daily(code)
+                summaries[code] = {'last_date': None if old_df.empty else pd.to_datetime(old_df['date']).max(),
+                    'rows': len(old_df), 'has_trade_prices': 'trade_close' in old_df and
+                    bool(pd.to_numeric(old_df['trade_close'], errors='coerce').notna().any())}
         download_start_by_code: dict[str, str] = {}
         skip_codes: list[str] = []
 
         for code in codes:
-            old_df = self.cache.read_stock_daily(code)
-            old_last_date = None if old_df.empty else pd.to_datetime(old_df["date"]).max()
-            old_has_trade_prices = False
-            if "trade_close" in old_df.columns:
-                old_has_trade_prices = pd.to_numeric(old_df["trade_close"], errors="coerce").notna().any()
+            summary = summaries.get(code, {})
+            old_last_date = pd.Timestamp(summary['last_date']) if summary.get('last_date') is not None else None
+            old_has_trade_prices = bool(summary.get('has_trade_prices', False))
 
             download_start = pd.to_datetime(global_start)
             if auto_incremental and old_last_date is not None and old_has_trade_prices:
@@ -175,21 +182,17 @@ class DailyUpdater:
 
             if old_last_date is not None and old_last_date >= end_dt and old_has_trade_prices:
                 skip_codes.append(code)
-                old_frames[code] = old_df
                 continue
             if download_start > end_dt:
                 skip_codes.append(code)
-                old_frames[code] = old_df
                 continue
 
-            old_frames[code] = old_df
             download_start_by_code[code] = download_start.strftime("%Y-%m-%d")
 
         rows: list[dict] = []
         for code in skip_codes:
-            old_df = old_frames[code]
-            last_date = None if old_df.empty else pd.to_datetime(old_df["date"]).max()
-            rows.append(self._status_row(code, last_date, len(old_df), "local_cache", "success", ""))
+            summary = summaries.get(code, {'last_date': None, 'rows': 0})
+            rows.append(self._status_row(code, summary['last_date'], summary['rows'], "local_cache", "success", ""))
 
         # Surface already-up-to-date stocks immediately so live counters show
         # skips before any download begins.
@@ -241,7 +244,9 @@ class DailyUpdater:
             grouped = frame.groupby("code") if "code" in frame.columns else None
             source = result.source if result.ok else ""
             for code in sub_batch:
-                old_df = old_frames[code]
+                # Full-history validation is preserved, but only the currently
+                # resolved stock is resident; up-to-date stocks need no frame.
+                old_df = self.cache.read_stock_daily(code)
                 download_start_dt = pd.to_datetime(download_start_by_code[code])
                 group = grouped.get_group(code) if grouped is not None and code in grouped.groups else pd.DataFrame()
                 if not group.empty:
@@ -306,8 +311,17 @@ class DailyUpdater:
                     batch_cb(batch_rows, processed)
         else:
             with ThreadPoolExecutor(max_workers=self.workers) as executor:
-                future_to_batch = {executor.submit(_download_sub_batch, sb): sb for sb in sub_batches}
-                for future in as_completed(future_to_batch):
+                pending_batches = iter(sub_batches)
+                future_to_batch = {}
+                def refill():
+                    while len(future_to_batch) < self.workers * 2:
+                        batch = next(pending_batches, None)
+                        if batch is None: break
+                        future_to_batch[executor.submit(_download_sub_batch, batch)] = batch
+                refill()
+                while future_to_batch:
+                    future = next(as_completed(future_to_batch))
+                    future_to_batch.pop(future)
                     sub_batch, result = future.result()
                     batch_rows, frames, sources = _resolve(sub_batch, result)
                     rows.extend(batch_rows)
@@ -316,6 +330,7 @@ class DailyUpdater:
                     processed += len(sub_batch)
                     if batch_cb is not None:
                         batch_cb(batch_rows, processed)
+                    refill()
 
         log_rows = []
         for row in rows:

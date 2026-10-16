@@ -335,6 +335,7 @@ def test_standalone_cli_partial_returns_success_and_restores_signal_handlers(mon
 def test_actual_fluent_lease_market_and_full_publication_with_fake_native_producer(actual_market, tmp_path, monkeypatch):
     from my_strategy.core.run_context import stable_hash
     from my_strategy.services import board_native_summary
+    from my_strategy.services.board_calculation_scope import calculation_membership, calculation_contract
     from my_strategy.storage.board_fluent import BoardFluentStore
     value = actual_market
     monkeypatch.setattr(sync, '_calendar', lambda _: (value['dates'], 'calendar-fixture'))
@@ -343,6 +344,9 @@ def test_actual_fluent_lease_market_and_full_publication_with_fake_native_produc
     monkeypatch.setattr(sync, '_validate_cached_native', lambda *args, **kwargs: None)
     monkeypatch.setattr(sync, '_run_native', lambda **_: {'status': 'ready', 'source_native_run_id': 'fake-source', 'training_started': False})
     day = value['dates'][-1]
+    memberships = {snapshot['board_id']: calculation_membership(snapshot)
+        for snapshot in value['store'].catalog(current=True)}
+    scope = calculation_contract(memberships)
     rows = {}
     for symbol in value['symbols']:
         row = {'symbol': symbol, 'price_date': day, 'mode': 'current_reference', 'training_eligible': False,
@@ -350,8 +354,16 @@ def test_actual_fluent_lease_market_and_full_publication_with_fake_native_produc
         row['row_hash'] = stable_hash(row); rows[symbol] = row
     native = {'complete': True, 'summaries': rows, 'input_refs': [],
         'identity': {'price_date': day, 'mode': 'current_reference', 'training_eligible': False,
-            'calendar_hash': stable_hash(value['dates']), 'source': 'fixture'}}
-    monkeypatch.setattr(board_native_summary, 'collect_native_summaries', lambda **_: native)
+            'calendar_hash': stable_hash(value['dates']), 'source': 'fixture', **scope}}
+    native_calls = []
+    def collect(**kwargs):
+        # Match the real collector's frozen scope contract, including the
+        # actual verified source snapshots supplied by the Fluent builder.
+        assert kwargs['calculation_memberships'] == memberships
+        assert kwargs['symbols'] == scope['required_symbols']
+        native_calls.append(kwargs)
+        return native
+    monkeypatch.setattr(board_native_summary, 'collect_native_summaries', collect)
     # Commit the fixture's existing WAL into the main file before taking a
     # physical baseline; later GC of fixture writers must not change it.
     connection = sqlite3.connect(value['kb'])
@@ -367,9 +379,12 @@ def test_actual_fluent_lease_market_and_full_publication_with_fake_native_produc
     assert result['status'] == 'completed' and result['full_published'], result
     store = BoardFluentStore(value['fluent'], readonly=True)
     assert store.get_sync(result['sync_id'])['status'] == 'completed'
-    assert store.verify_generation(result['generation_id'], 'full')['full_published'] is True
+    generation = store.verify_generation(result['generation_id'], 'full')
+    assert generation['full_published'] is True
+    assert all(generation['native_identity'][key] == expected for key, expected in scope.items())
     assert store.current_generation('market')['generation_id'] == store.current_generation('full')['generation_id']
     assert sync.sync_daily_features(**options)['reused'] is True
+    assert len(native_calls) == 1
     assert value['path'].read_bytes() == raw_before and value['kb'].read_bytes() == kb_before
 
 

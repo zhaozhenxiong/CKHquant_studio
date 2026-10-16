@@ -62,7 +62,7 @@ def dump_session(session):
     return value
 
 
-def restore_session(value):
+def restore_session(value, *, cancel_check=None):
     from my_strategy.services.czsc_analysis import CzscSession
     if (value.get('format')!=VERSION or value.get('engine')!=engine_contract() or
         value.get('sha256')!=stable_hash({k:v for k,v in value.items() if k!='sha256'})):
@@ -73,6 +73,10 @@ def restore_session(value):
     session.bg.__setstate__({'market':'A股','freq_bars':{
         freq:[restore_bar(bar) for bar in bars] for freq,bars in value['bg'].items()}})
     for freq,item in value['kas'].items():
+        if cancel_check:
+            if hasattr(cancel_check,'check'):cancel_check.check()
+            elif cancel_check.is_set() if hasattr(cancel_check,'is_set') else cancel_check():
+                raise InterruptedError('原生状态恢复已取消')
         analysis=session.czsc.CZSC([restore_bar(bar) for bar in item['raw']],
             min_bi_len=int(session.config['min_bi_len']),max_bi_num=int(session.config['max_bi_num']))
         if stable_hash(geometry(analysis))!=item['geometry_hash']:

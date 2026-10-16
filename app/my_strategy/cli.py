@@ -31,6 +31,13 @@ DELEGATES = {
 }
 
 
+class ExplicitStart(argparse.Action):
+    """Retain the public default while distinguishing an explicit resume date."""
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        namespace.start_explicit = True
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="KHQuant 参考买卖点与每股仓位")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -38,18 +45,30 @@ def build_parser() -> argparse.ArgumentParser:
         item = commands.add_parser(name)
         item.add_argument("--symbol", help="单股代码，例如 600519.SH")
         item.add_argument("--stocks", default="", help="逗号分隔代码；扫描/批量留空表示本地全部股票")
-        item.add_argument("--start", default="2026-01-01")
+        item.set_defaults(start_explicit=False)
+        item.add_argument("--start", default='2026-01-01', action=ExplicitStart,
+                          help="开始日期；新扫描默认2026-01-01，续算沿用原批次")
         item.add_argument("--end", help="截止日期；留空使用本地最新行情")
         item.add_argument("--as-of", help="分析回放截止日或 Asia/Shanghai 时间")
         item.add_argument("--current-position", type=float, help="仅分析的当前持仓百分比，0到100，不生成资金账户")
         item.add_argument("--device", help="计算设备：auto（优先CUDA/MPS）、cpu、mps、cuda 或 cuda:编号")
-        item.add_argument("--usage-mode", choices=("forward", "historical"), default="historical",
+        item.add_argument("--usage-mode", choices=("forward", "historical"),
                           help="historical 历史研究；forward 按实际训练完成时点的当前研究")
         item.add_argument("--model-run-id", help="显式核验当前模型运行；留空使用生效选择或观察模式")
         item.add_argument("--model-fold", help="显式固定检查点名称")
         item.add_argument("--calendar-run-id", help="已核验交易日历运行")
         item.add_argument("--config", type=Path, help="当前共识参数 JSON 对象")
         item.add_argument("--cpu-workers", type=int, default=4)
+        item.add_argument('--analysis-method', choices=('structure','structure_kronos','structure_kronos_ma_mlp','structure_kronos_ma_l2','legacy_reference'), help='新请求默认历史参考；续算沿用保存的方法')
+        item.add_argument('--score-model-id')
+        item.add_argument('--lookback', type=int, choices=(128,256))
+        item.add_argument('--horizon', type=int, choices=(1,5,10))
+        item.add_argument('--samples', type=int, choices=(8,32,64))
+        item.add_argument('--seed', type=int)
+        item.add_argument('--budget-seconds', type=int, default=300)
+        item.add_argument('--max-predictions', type=int, default=200)
+        item.add_argument('--resume-scan-id')
+        item.add_argument('--save', action='store_true', help='保存组合分析；默认仅生成可清理预览')
         item.add_argument("--json", action="store_true")
     reference = commands.add_parser("train-reference", help="训练参考买卖点与逐股目标仓位，不模拟成交")
     reference.add_argument("--source-native-run-id", help="复用已核验的完整因果结构来源；省略时自动查找")
@@ -112,6 +131,37 @@ def _progress(stage, current, total, failed=0, **details):
     print(f"{stage} {current}/{total} failures={failed}", file=sys.stderr)
 
 
+def _resolve_analysis_arguments(args):
+    """Keep omitted frozen parameters absent so resume can restore their values."""
+    from my_strategy.services.analysis_methods import COMBINED, VERSION
+    if args.resume_scan_id:
+        if not args.start_explicit:
+            args.start = None
+        if args.command != 'scan':
+            raise ValueError('分析不接受扫描续算标识')
+        from my_strategy.storage.czsc_results import ResultStore
+        try:
+            previous = ResultStore().get(args.resume_scan_id)
+        except KeyError as exc:
+            raise ValueError('扫描续算标识不存在') from exc
+        method = (previous.get('method_context') or {}).get('analysis_method')
+        if (previous.get('strategy_version') != VERSION or method not in COMBINED
+                or not previous.get('population') or not previous.get('frozen_identity')):
+            raise ValueError('只有保存的组合方法扫描支持续算')
+        if args.analysis_method is not None and args.analysis_method != method:
+            raise ValueError('续算方法已改变')
+        args.analysis_method = method
+    else:
+        args.analysis_method = args.analysis_method or 'legacy_reference'
+        args.start = args.start or '2026-01-01'
+        args.usage_mode = args.usage_mode or 'historical'
+    if args.analysis_method in COMBINED:
+        unsupported = [name for name in ('model_run_id', 'model_fold', 'calendar_run_id', 'config', 'current_position')
+                       if getattr(args, name) is not None]
+        if unsupported:
+            raise ValueError('组合方法不接受这些历史参考参数：' + ', '.join('--' + name.replace('_', '-') for name in unsupported))
+
+
 def main(argv: list[str] | None = None) -> int:
     configure_utf8_stdio()
     values = list(sys.argv[1:] if argv is None else argv)
@@ -154,6 +204,11 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("analyze 须指定 --symbol")
             if args.as_of and args.command != "analyze":
                 raise ValueError("--as-of 仅用于 analyze；扫描使用 --end")
+            from my_strategy.core.market_scope import require_supported_symbol, new_scan_symbols
+            if args.symbol:
+                args.symbol = require_supported_symbol(args.symbol)
+            args.stocks = ','.join(require_supported_symbol(value) for value in args.stocks.split(',') if value.strip())
+            _resolve_analysis_arguments(args)
             from my_strategy.web_dashboard import trend_strategy
             consensus = json.loads(args.config.read_text(encoding="utf-8")) if args.config else None
             if consensus is not None and not isinstance(consensus, dict):
@@ -162,13 +217,46 @@ def main(argv: list[str] | None = None) -> int:
                     "model_fold": args.model_fold, "usage_mode": args.usage_mode,
                     "calendar_run_id": args.calendar_run_id, "device": args.device or "auto",
                     "cpu_workers": args.cpu_workers, "consensus_config": consensus, "source": "cli"}
-            if args.command == "analyze":
+            from my_strategy.services.analysis_methods import COMBINED
+            if args.analysis_method in COMBINED:
+                from my_strategy.services.analysis_methods import analyze_method
+                from my_strategy.services.method_scan_acceleration import scan_methods
+                from my_strategy.services.light_research import LightResearch
+                from my_strategy.web_dashboard.api import AnalysisRequest, TaskSpec
+                from my_strategy.storage.czsc_results import ResultStore
+                from my_strategy.core.run_context import create_run_context, stable_hash
+                light = LightResearch()
+                method_spec = {key: getattr(args,key) for key in ('analysis_method','score_model_id','start','end','usage_mode',
+                    'lookback','horizon','samples','seed','device','budget_seconds','max_predictions') if getattr(args,key) is not None}
+                try:
+                    if args.command == 'analyze':
+                        if args.resume_scan_id: raise ValueError('分析不接受扫描续算标识')
+                        checked = AnalysisRequest(**method_spec, symbol=args.symbol, as_of=args.as_of).model_dump(mode='json',exclude_none=True)
+                        result = analyze_method(light, checked)
+                        checked.update(result['method_context'])
+                        if args.save:
+                            context = create_run_context(task='method-analysis',as_of_date=result['data_end'],config=checked,
+                                data_version=result['data_version'],stocks=[args.symbol],source='cli',start_date=args.start,end_date=result['data_end'])
+                            result.update(run_id=context.run_id,run_context=context.to_dict(),saved=True)
+                            ResultStore().save('analysis',result)
+                        else:
+                            identity={'kind':'method_analysis_cli','result_sha256':stable_hash(result)}
+                            result.update(saved=False,preview=True)
+                            result['result_ref']=light.store.put(identity,result,namespace='analysis_previews')
+                    else:
+                        stocks=([args.symbol] if args.symbol else [])+[s.strip() for s in args.stocks.split(',') if s.strip()]
+                        checked=TaskSpec(**method_spec,symbols=list(dict.fromkeys(stocks)),cpu_workers=args.cpu_workers,
+                            resume_scan_id=args.resume_scan_id).model_dump(mode='json',exclude_none=True,
+                                exclude_unset=bool(args.resume_scan_id))
+                        result=scan_methods(light,ResultStore(),checked,progress=_progress,invocation_source='cli')
+                finally: light.close()
+            elif args.command == "analyze":
                 from my_strategy.core.run_context import create_run_context
                 from my_strategy.storage.czsc_results import ResultStore
                 spec.update(symbol=args.symbol, as_of=args.as_of)
                 if args.current_position is not None:
                     spec["current_position_fraction"] = args.current_position / 100
-                result = trend_strategy.analyze_trend_consensus(**spec)
+                result = trend_strategy.analyze_trend_consensus(**spec, structure_only=args.analysis_method=='structure')
                 context = create_run_context(task="trend-consensus-analysis", as_of_date=result["data_end"],
                     config=spec, data_version=str(result.get("data_version", result["data_end"])),
                     stocks=[args.symbol], source="cli", start_date=args.start, end_date=result["data_end"])
@@ -176,8 +264,8 @@ def main(argv: list[str] | None = None) -> int:
                 ResultStore().save("analysis", result)
             else:
                 stocks = ([args.symbol] if args.symbol else []) + [s.strip() for s in args.stocks.split(",") if s.strip()]
-                spec.update(symbols=list(dict.fromkeys(stocks)) or None, progress=_progress)
-                result = trend_strategy.scan_trend_consensus(**spec)
+                spec.update(symbols=new_scan_symbols(stocks), progress=_progress)
+                result = trend_strategy.scan_trend_consensus(**spec, structure_only=args.analysis_method=='structure')
         from my_strategy.services.czsc_trend_support import _json
         output = result if getattr(args, "json", False) or args.command == "model-diagnostics" else {
             k: result[k] for k in ("status", "run_id", "symbol", "data_end", "coverage", "metrics") if k in result}

@@ -245,3 +245,57 @@ def test_prepared_runtime_binds_warmup_evidence_on_days_without_prices(change):
         run_position_simulation(frames,events,state=unchanged['state'],prepared_runtime=runtime,
             **{**options,'end':days[12]})
 
+
+def test_private_append_runtime_parses_each_observation_once_and_preserves_callbacks(monkeypatch):
+    from my_strategy.services import light_daily_scheduler as scheduler
+    from my_strategy.services.position_simulation import PreparedSimulationRuntime
+    days, frames, events, configs = fixture()
+    runtimes = []
+    def make(*args, **kwargs):
+        runtime = PreparedSimulationRuntime(*args, **kwargs)
+        runtimes.append(runtime)
+        return runtime
+    monkeypatch.setattr(scheduler, 'PreparedSimulationRuntime', make)
+    snapshots = []
+    value = run(days, frames, events, configs, checkpoint_callback=snapshots.append,
+                checkpoint_stages={'day_committed', 'completed', 'cancelled'})
+    assert runtimes[0].stats['evidence_rows_parsed'] == len(value['evidence'][S])
+    assert len(snapshots) == len(days) + 1
+    assert all(s['stage'] != 'observing' for s in snapshots)
+    saved = copy.deepcopy(snapshots[10])
+    value['comparisons']['structure_rules']['state']['daily'][0]['cash'] = -1
+    value['evidence'][S][0]['side'] = 'SELL'
+    assert snapshots[10] == saved
+    assert events[S][0]['side'] == 'BUY'
+
+
+def test_cancel_checkpoint_is_complete_even_without_callback_stages():
+    days, frames, events, configs = fixture()
+    stop = threading.Event()
+    def cancel(symbol, day):
+        stop.set()
+        return predict(symbol, day)
+    with pytest.raises(ScheduleCancelled) as error:
+        run(days, frames, events, configs, prediction=cancel, stop=stop, checkpoint_stages=set())
+    stop.clear()
+    resumed = run(days, frames, events, configs, checkpoint=error.value.checkpoint)
+    complete = run(days, frames, events, configs)
+    assert resumed['comparisons'] == complete['comparisons']
+
+
+def test_metrics_materialize_only_at_public_checkpoint(monkeypatch):
+    from my_strategy.services import position_simulation as engine
+    days, frames, events, configs = fixture()
+    original = engine._simulation_summary
+    calls = []
+    def materialize(*args):
+        calls.append(args[0]['last_date'])
+        return original(*args)
+    monkeypatch.setattr(engine, '_simulation_summary', materialize)
+    result = run(days, frames, events, configs)
+    assert calls == [days[-1]] * len(configs)
+    # Neither internal deferred markers nor mutable private state is published.
+    assert '_deferred_summary' not in repr(result)
+    resumed = run(days, frames, events, configs, checkpoint=result['checkpoint'])
+    assert resumed['comparisons'] == result['comparisons']
+

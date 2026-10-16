@@ -53,11 +53,11 @@ def test_gc_sha_query_uses_index_and_preserves_pin_lease_orphan_rules(tmp_path):
         preview = store.gc()
         store.connection.set_trace_callback(None)
         # Explain the actual production query captured above, not a test-only
-        # approximation of its correlated pin/lease/shared-object predicates.
-        query = next(sql for sql in statements if 'MAX(r.expires_at) AS expires_at' in sql)
+        # approximation of its transactional pin/lease/shared-object metadata.
+        query = next(sql for sql in statements if 'MAX(expires_at,lease_until)<=' in sql)
         plan = [row[3] for row in store.connection.execute('EXPLAIN QUERY PLAN ' + query)]
-        assert any('SEARCH x USING INDEX research_results_sha256 (sha256=?)' in step for step in plan)
-        assert not any(step == 'SCAN x' for step in plan)
+        assert any('SEARCH object_usage USING INDEX research_usage_expiry' in step for step in plan)
+        assert not any('SCAN object_usage' in step for step in plan)
         assert {row['sha256'] for row in preview['candidates']} == {expired['sha256'], sha}
         assert {row['reason'] for row in preview['candidates']} == {'expired', 'uncommitted_orphan'}
         assert path.exists() and store._path(expired['sha256']).exists()
@@ -305,3 +305,164 @@ def test_crash_between_file_write_and_index_commit_recovers_orphan(tmp_path):
         assert path.exists()
         assert store.gc(False)['deleted_bytes']==len(content)
         assert not path.exists()
+
+
+def _write_orphan(store, content=b'{"uncommitted":true}'):
+    payload = gzip.compress(content, mtime=0)
+    sha = hashlib.sha256(payload).hexdigest()
+    path = store._path(sha)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    return sha, path, len(payload)
+
+
+def test_bulk_puts_scan_orphans_once_but_explicit_gc_remains_complete(tmp_path, monkeypatch):
+    now = [100.]
+    with ResearchStore(tmp_path, clock=lambda: now[0]) as store:
+        scans = []
+        original = store._unindexed_objects
+        def counted():
+            scans.append(now[0])
+            yield from original()
+        monkeypatch.setattr(store, '_unindexed_objects', counted)
+        for index in range(100):
+            store.put({'input': index}, {'value': index})
+        assert scans == [100.]
+        sha, path, size = _write_orphan(store)
+        # Even a dry run requested with auto must inspect freshly orphaned files.
+        preview = store.gc(scan_orphans='auto')
+        assert preview['orphan_scan_performed']
+        assert {row['sha256'] for row in preview['candidates']} == {sha}
+        assert path.exists()
+        actual = store.gc(False)
+        assert actual['orphan_scan_performed'] and actual['deleted_bytes'] == size
+        assert not path.exists()
+        assert len(scans) == 3
+        assert len(store.list(limit=1000)) == 100
+
+
+def test_full_gc_batches_known_sha_checks_and_still_checks_unknown_paths(tmp_path, monkeypatch):
+    with ResearchStore(tmp_path) as store:
+        for index in range(30):
+            store.put({'input': index}, {'value': index})
+        sha, path, size = _write_orphan(store)
+        resolved = []
+        original = store._path
+        def counted(value):
+            resolved.append(value)
+            return original(value)
+        statements = []
+        monkeypatch.setattr(store, '_path', counted)
+        store.connection.set_trace_callback(statements.append)
+        preview = store.gc()
+        store.connection.set_trace_callback(None)
+        assert resolved == [sha]
+        assert not any('SELECT 1 FROM objects WHERE sha256=' in sql for sql in statements)
+        assert preview['candidate_bytes'] == size and path.exists()
+
+
+def test_auto_orphan_scan_deadline_clock_rollback_pressure_and_new_instance(tmp_path):
+    now = [100.]
+    with ResearchStore(tmp_path, clock=lambda: now[0], orphan_scan_interval_seconds=60) as store:
+        store.put({'n': 1}, {'value': 1})
+        sha, path, _ = _write_orphan(store)
+        now[0] = 159.
+        assert not store.gc(False, scan_orphans='auto')['orphan_scan_performed']
+        assert path.exists()
+        now[0] = 160.
+        assert store.gc(False, scan_orphans='auto')['orphan_scan_performed']
+        assert not path.exists()
+        _, rollback_path, _ = _write_orphan(store, b'{"rollback":true}')
+        now[0] = 159.
+        assert store.gc(False, scan_orphans='auto')['orphan_scan_performed']
+        assert not rollback_path.exists()
+        _, pressure_path, _ = _write_orphan(store, b'{"pressure":true}')
+        assert store.gc(False, scan_orphans='auto', required_bytes=store.quota_bytes)['orphan_scan_performed']
+        assert not pressure_path.exists()
+        _, restart_path, _ = _write_orphan(store, b'{"restart":true}')
+    with ResearchStore(tmp_path, clock=lambda: now[0]) as reopened:
+        assert reopened.gc(False, scan_orphans='auto')['orphan_scan_performed']
+        assert not restart_path.exists()
+
+
+def test_auto_gc_still_expires_indexed_objects_and_retries_pending_unlink(tmp_path, monkeypatch):
+    now = [100.]
+    with ResearchStore(tmp_path, ttl_seconds=5, clock=lambda: now[0]) as store:
+        expired = store.put({'n': 1}, {'value': 1})
+        pinned = store.put({'n': 2}, {'value': 2}, pin='saved')
+        leased = store.put({'n': 3}, {'value': 3})
+        store.acquire_lease(leased['cache_key'], 'reader', ttl_seconds=100)
+        original = Path.unlink
+        def denied(path, *args, **kwargs):
+            if path.name == expired['sha256'] + '.json.gz':
+                raise PermissionError('interrupted deletion')
+            return original(path, *args, **kwargs)
+        monkeypatch.setattr(Path, 'unlink', denied)
+        now[0] = 106.
+        first = store.gc(False, scan_orphans='auto')
+        assert not first['orphan_scan_performed'] and first['deleted_bytes'] == 0
+        assert store.get({'n': 1}) is None
+        assert store.get({'n': 2}) and store.get({'n': 3})
+        assert store.connection.execute("SELECT state FROM gc_journal").fetchone()[0] == 'pending'
+        monkeypatch.setattr(Path, 'unlink', original)
+        second = store.gc(False, scan_orphans='auto')
+        assert not second['orphan_scan_performed']
+        assert second['deleted_bytes'] == expired['size_bytes']
+        assert store.is_pinned(pinned['cache_key'])
+
+
+def test_auto_put_still_rejects_capacity_held_by_another_store_lease(tmp_path):
+    now = [100.]
+    with ResearchStore(tmp_path, quota_bytes=100, clock=lambda: now[0]) as first:
+        first.gc(False)
+        with ResearchStore(tmp_path, quota_bytes=100, clock=lambda: now[0]) as second:
+            item = second.put({'n': 1}, {'value': 'first protected payload'})
+            second.acquire_lease(item['cache_key'], 'other-process')
+            with pytest.raises(CacheCapacityError):
+                first.put({'n': 2}, {'value': 'a distinct result which cannot fit alongside the protected payload'})
+            assert second.get({'n': 1}) is not None
+            assert first.connection.execute('SELECT SUM(size_bytes) FROM objects').fetchone()[0] <= 100
+
+
+def test_full_gc_refuses_external_symlink_shards_without_traversing_them(tmp_path, monkeypatch):
+    import os
+    with ResearchStore(tmp_path / 'cache') as store:
+        outside = tmp_path / 'outside'
+        outside.mkdir()
+        payload = gzip.compress(b'{"outside":true}', mtime=0)
+        sha = hashlib.sha256(payload).hexdigest()
+        external = outside / (sha + '.json.gz')
+        external.write_bytes(payload)
+        (store.objects / sha[:2]).symlink_to(outside, target_is_directory=True)
+        original = os.scandir
+        visited = []
+        def counted(path):
+            visited.append(Path(path))
+            return original(path)
+        monkeypatch.setattr(os, 'scandir', counted)
+        with pytest.raises(ValueError, match='escaped store'):
+            store.gc(False)
+        assert visited == [store.objects]
+        assert external.read_bytes() == payload
+        assert store.connection.execute('SELECT count(*) FROM objects').fetchone()[0] == 0
+
+
+def test_auto_put_and_reads_refuse_objects_root_replaced_after_maintenance(tmp_path):
+    with ResearchStore(tmp_path / 'cache', clock=lambda: 100.) as store:
+        item = store.put({'n': 1}, {'value': 1})
+        original_objects = store.objects.with_name('original-objects')
+        store.objects.rename(original_objects)
+        outside = tmp_path / 'outside'
+        outside.mkdir()
+        store.objects.symlink_to(outside, target_is_directory=True)
+        with pytest.raises(ValueError, match='escaped store'):
+            store.put({'n': 2}, {'value': 2})
+        with pytest.raises(ValueError, match='escaped store'):
+            store.get_by_key(item['cache_key'])
+        assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize('interval', [0, -1, float('inf'), float('nan')])
+def test_orphan_scan_interval_must_be_finite_and_positive(tmp_path, interval):
+    with pytest.raises(ValueError, match='interval'):
+        ResearchStore(tmp_path, orphan_scan_interval_seconds=interval)

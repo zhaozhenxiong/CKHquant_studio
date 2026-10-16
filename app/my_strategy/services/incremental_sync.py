@@ -7,9 +7,11 @@ import sqlite3
 import time
 import uuid
 
-from my_strategy.adapters.czsc_adapter import normalize_symbol, latest_market_date
+from my_strategy.adapters.czsc_adapter import normalize_symbol
+from my_strategy.core.market_scope import require_supported_symbol
 from my_strategy.core.run_context import stable_hash
 from my_strategy.services.incremental_source import IncrementalSource, code_identity, _stop
+from my_strategy.services.board_calculation_scope import CALCULATION_SCOPE,calculation_membership,is_calculation_symbol
 
 SCOPES={'current_board','selected','watch','held','full'}
 PLAN_TTL=7*86400
@@ -28,26 +30,34 @@ def _prune_plan_states(store):
 
 def _catalog(kb_db_path):
     from my_strategy.storage.board_knowledge import BoardKnowledgeStore
-    return BoardKnowledgeStore(kb_db_path,readonly=True).catalog(current=True)
+    return [{**row,'calculation_membership':calculation_membership(row)}
+            for row in BoardKnowledgeStore(kb_db_path,readonly=True).catalog(current=True)]
+
+
+def _members(row):
+    return row['calculation_membership']['eligible_members']
 
 
 def _scope_symbols(store,scope,symbols,board_id,catalog):
     if scope not in SCOPES:raise ValueError('invalid incremental scope')
     if scope=='selected':
         if not symbols or len(symbols)>50:raise ValueError('explicit selected pool requires 1..50 symbols')
-        return sorted({normalize_symbol(s) for s in symbols})
+        selected=sorted({require_supported_symbol(s) for s in symbols})
+        if not all(is_calculation_symbol(s) for s in selected):raise ValueError('板块结构补齐仅支持沪深 A 股')
+        return selected
     if symbols:raise ValueError('symbols are only accepted for selected scope')
     if scope=='current_board':
         board=next((row for row in catalog if row['board_id']==board_id),None)
         if not board:raise ValueError('selected board is missing from current verified catalog')
-        return sorted(board['members'])
+        return sorted(_members(board))
     if board_id:raise ValueError('board_id requires current_board scope')
-    if scope=='full':return sorted({s for row in catalog for s in row['members']})
+    if scope=='full':return sorted({s for row in catalog for s in _members(row)})
     if scope=='watch':
         path=store.root.parent/'personal_portfolio.db'
         if not path.is_file():return []
         with sqlite3.connect(path.as_uri()+'?mode=ro',uri=True) as connection:
-            return sorted({normalize_symbol(row[0]) for row in connection.execute('SELECT symbol FROM watchlist')})
+            return sorted({normalize_symbol(row[0]) for row in connection.execute('SELECT symbol FROM watchlist')
+                           if is_calculation_symbol(row[0])})
     found=set()
     source=IncrementalSource(store=store)
     for account in (source._setting('enabled_accounts') or {}).values():
@@ -60,20 +70,23 @@ def _scope_symbols(store,scope,symbols,board_id,catalog):
             daily=comparison.get('daily',[])
             for symbol,position in (daily[-1].get('positions',{}) if daily else {}).items():
                 if position.get('shares',0)>0 or position.get('receivable_shares',0)>0:found.add(symbol)
-    return sorted(found)
+    return sorted(s for s in found if is_calculation_symbol(s))
 
 
 def _contract(store,raw_db_path,kb_db_path,scope,symbols,board_id,price_date):
-    from my_strategy.services.board_fluent import source_witness,generation_contract
+    from my_strategy.services.board_fluent import source_witness,generation_contract,latest_qualified_price_date
     from my_strategy.services.czsc_trend_support import _calendar
-    day=price_date or latest_market_date(db_path=raw_db_path)
-    if day!=latest_market_date(db_path=raw_db_path):raise ValueError('补齐只允许真实最新行情日，不以旧日替代')
+    latest=latest_qualified_price_date(raw_db_path=raw_db_path)
+    day=price_date or latest
+    if day!=latest:raise ValueError('补齐只允许真实最新行情日，不以旧日替代')
     dates,_=_calendar(None);dates=[d for d in dates if d<=day]
     if not dates or dates[-1]!=day:raise ValueError('补齐目标日不在已核验日历')
     catalog=_catalog(kb_db_path)
     population=_scope_symbols(store,scope,symbols,board_id,catalog)
     if scope=='full' and not catalog:raise ValueError('full scope requires a verified current board catalog')
     contract={'scope':scope,'board_id':board_id,'symbols':population,'price_date':day,
+        'calculation_scope':CALCULATION_SCOPE,
+        'projection_hashes':{r['board_id']:r['calculation_membership']['projection_hash'] for r in catalog},
         'catalog':{r['board_id']:r['snapshot_hash'] for r in catalog},
         'calendar_hash':stable_hash(dates),'producer':code_identity(),'fluent':generation_contract(),
         # Catalog content hashes above prove membership. A readonly catalog
@@ -97,7 +110,7 @@ def create_plan(*,store,raw_db_path=None,kb_db_path=None,fluent_db_path=None,sco
             row={'symbol':symbol,'action':'failed','reason':str(exc),'price_date':contract['price_date']}
         rows.append(row)
     counts={name:sum(row['action']==name for row in rows) for name in ('reuse','append','rebuild','missing_price','failed')}
-    requested=set(contract['symbols']);global_population={s for row in catalog for s in row['members']}
+    requested=set(contract['symbols']);global_population={s for row in catalog for s in _members(row)}
     now=store.clock();plan_id=uuid.uuid4().hex
     _prune_plan_states(store)
     plan={'plan_id':plan_id,'format':'incremental_gap_plan_v1','status':'planned','created_at':now,'expires_at':now+PLAN_TTL,
@@ -105,7 +118,7 @@ def create_plan(*,store,raw_db_path=None,kb_db_path=None,fluent_db_path=None,sco
         'estimated_compute':counts['append']+counts['rebuild'],'estimated_deferred':max(0,counts['append']+counts['rebuild']-max_symbols),
         'max_symbols':max_symbols,'budget_seconds':budget_seconds,'contract':contract,
         'publication':{'full_scope':scope=='full','global_population':len(global_population),
-            'affected_boards':sum(bool(requested.intersection(r['members'])) for r in catalog)},
+            'affected_boards':sum(bool(requested.intersection(_members(r))) for r in catalog)},
         'training_started':False,'legacy_tasks_resumed':False}
     # This is a small expiring plan, not a numerical output or permanent run.
     store.put({'plan_id':plan_id},plan,namespace='incremental_plans',ttl_seconds=PLAN_TTL)
@@ -182,6 +195,7 @@ def execute_plan(*,store,plan_id,raw_db_path=None,kb_db_path=None,fluent_db_path
             old_identity=(old or {}).get('native_identity') or {}
             inherited_complete=False
             if (old and old_identity.get('format')=='incremental_native_summary_collection_v1' and
+                old_identity.get('calculation_scope')==CALCULATION_SCOPE and
                 old_identity.get('producer')==contract['producer'] and old_identity.get('price_date')==plan['price_date'] and
                 old_identity.get('calendar_hash')==contract['calendar_hash'] and
                 old.get('publication_inputs',{}).get('source_witness',{}).get('raw')==contract['witness']['raw']):
@@ -190,12 +204,13 @@ def execute_plan(*,store,plan_id,raw_db_path=None,kb_db_path=None,fluent_db_path
                 # Membership changes affect aggregation only; verified same-day
                 # stock observations retain their exact numerical identity.
                 for symbol in old_identity.get('completed_symbols',[]):
-                    if symbol not in summaries:summaries[symbol]=prior['summaries'][symbol]
-            all_symbols=sorted({s for board in catalog for s in board['members']})
+                    if is_calculation_symbol(symbol) and symbol not in summaries:summaries[symbol]=prior['summaries'][symbol]
+            all_symbols=sorted({s for board in catalog for s in _members(board)})
             native_rows={s:summaries.get(s) or _unavailable(s,plan['price_date'],'outside_completed_plan_scope') for s in all_symbols}
             refs=[{'entity_id':s,'source_identity':r['identity'],'row_hash':r['row_hash']} for s,r in sorted(native_rows.items()) if r.get('identity')]
             complete=(plan['scope']=='full' or inherited_complete) and all(s in summaries for s in all_symbols)
             identity={'format':'incremental_native_summary_collection_v1','price_date':plan['price_date'],
+                'calculation_scope':CALCULATION_SCOPE,'projection_hashes':contract['projection_hashes'],
                 'mode':'current_reference','training_eligible':False,'required_symbols':all_symbols,'input_refs_hash':stable_hash(refs),
                 'calendar_hash':stable_hash(dates),'producer':code_identity(),'scope':plan['scope'],
                 'completed_symbols':sorted(summaries),'catalog_hash':stable_hash(contract['catalog'])}

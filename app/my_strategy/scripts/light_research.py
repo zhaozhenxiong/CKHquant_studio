@@ -17,6 +17,7 @@ def main():
     parser.add_argument('--save',action='store_true')
     parser.add_argument('--model-type',choices=['mlp','l2'],default='mlp')
     parser.add_argument('--variant',choices=['A','B'],default='A')
+    parser.add_argument('--feature-profile',choices=['mixed_v1','ma_trend_v1'])
     parser.add_argument('--score-model-id')
     parser.add_argument('--candidate-sessions',type=int,choices=[1,3],default=3)
     parser.add_argument('--fusion-mode',choices=['evidence','hard_filters'],default='evidence')
@@ -24,8 +25,14 @@ def main():
     parser.add_argument('--budget-seconds',type=int,default=300)
     parser.add_argument('--validation-dates',default='2025-09-01,2025-09-15')
     parser.add_argument('--test-dates',default='2025-10-09,2025-10-20')
-    args=parser.parse_args();service=LightResearch()
+    args=parser.parse_args()
     symbols=[s.strip() for s in args.symbols.split(',') if s.strip()]
+    from my_strategy.core.market_scope import require_supported_symbol
+    try:
+        symbols=list(dict.fromkeys(require_supported_symbol(s) for s in symbols))
+    except ValueError as exc:
+        parser.error(str(exc))
+    service=LightResearch()
     try:
         if args.action=='status':
             from my_strategy.services.kronos_prediction import asset_status
@@ -38,11 +45,12 @@ def main():
             manifest=service._read_checkpoint({'manifest_id':args.manifest_id},'score_observation_manifests') if args.manifest_id else None
             if args.manifest_id and not manifest:raise ValueError('冻结观察清单不存在')
             result=service.train_score(symbols,args.end or '2025-12-31',model_type=args.model_type,
-                variant=args.variant,device=args.device,budget_seconds=min(args.budget_seconds,600),select=False,observation_manifest=manifest)
+                variant=args.variant,feature_profile=args.feature_profile or 'mixed_v1',device=args.device,
+                budget_seconds=min(args.budget_seconds,600),select=False,observation_manifest=manifest)
         elif args.action=='simulate':
             from my_strategy.adapters.czsc_adapter import latest_market_date
             result=service.backtest(symbols,args.start,args.end or latest_market_date(),device=args.device,samples=args.samples,save=args.save,
-                score_model_id=args.score_model_id,score_model_type=args.model_type,candidate_sessions=args.candidate_sessions,
+                score_model_id=args.score_model_id,score_model_type=args.model_type,feature_profile=args.feature_profile,candidate_sessions=args.candidate_sessions,
                 fusion_mode=args.fusion_mode,research_mode=args.research_mode,budget_seconds=args.budget_seconds,cost_stress=args.cost_stress)
         else:
             from my_strategy.services.light_daily import sync_light_daily

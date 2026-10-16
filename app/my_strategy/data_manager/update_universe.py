@@ -42,5 +42,5 @@ def filter_update_pool(pool: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     return out.loc[~excluded_mask].reset_index(drop=True), {
         "policy": "exclude_beijing_exchange", "requested": len(out),
         "eligible": int((~excluded_mask).sum()), "excluded": len(excluded),
-        "excluded_stocks": excluded, "reason": "北交所不参与每日行情更新；已存历史保留",
+        "excluded_stocks": excluded, "reason": "北交所不参与每日行情更新；历史清理由维护流程单独处理",
     }

@@ -3,6 +3,7 @@
   'use strict';
   const $ = id => document.getElementById(id);
   const active = new Set(['queued','running','cancelling']);
+  const calculationScope='sh_sz_a_v1';
   const names = {queued:'等待',running:'运行中',cancelling:'取消中',cancelled:'已取消',succeeded:'完成',completed:'完成',partial:'部分完成',failed:'失败',interrupted:'中断'};
   let loaded = false, sequence = 0, job = null, timer = null, detailSequence = 0;
   let fillPlan=null,fillJob=null,fillTimer=null,fillResult=null;
@@ -20,6 +21,11 @@
     return result;
   }
   function error(exc) { $('board-status').textContent=exc.message || String(exc); $('board-status').classList.add('task-error'); }
+  function showStock() {
+    const target=new URL(location.href);target.searchParams.delete('board');
+    history.replaceState(history.state,'',target.pathname+target.search+target.hash);
+    selectTab(false);
+  }
   function selectTab(board) {
     $('scan-stock-panel').hidden=board; $('scan-board-panel').hidden=!board; $('start-scan').hidden=board;
     $('scan-stock-tab').setAttribute('aria-selected',String(!board)); $('scan-board-tab').setAttribute('aria-selected',String(board));
@@ -29,13 +35,26 @@
   function renderStatus(status) {
     $('board-status').classList.remove('task-error');
     const data=status.fluent || status, market=data.market, full=data.full;
-    const pieces=[market ? `行情 ${market.price_date} · 成员 ${market.membership_date || '—'} · ${market.board_count} 个板块` : '尚无已发布特征'];
+    const pieces=[market ? `${data.scope_label || '历史原范围'} · 行情 ${market.price_date} · 成员 ${market.membership_date || '—'} · ${market.board_count} 个板块` : '沪深 A 股板块尚未生成，待补齐；历史原范围可从发布版本中查看'];
+    if(data.historical_view)pieces.push('显式历史版本，仅查看已保存结果；补齐操作请先切回当前沪深 A 股');
     if(market)pieces.push(market.full_ready && full?.generation_id===market.generation_id ? '结构与量价摘要已发布' : '行情特征已发布，结构摘要待同步');
-    const reasonNames={raw_date_or_revision_changed:'行情日期或内容变化',membership_source_changed:'成员来源变化',schema_policy_or_generating_code_changed:'特征计算版本变化',no_published_market:'尚未计算'};
+    const reasonNames={raw_date_or_revision_changed:'行情日期或内容变化',membership_source_changed:'成员来源变化',schema_policy_or_generating_code_changed:'特征计算版本变化',no_published_market:'尚未计算',no_valid_scope_publication:'沪深 A 股版本待补齐',invalid_scope_publication:'沪深 A 股版本核验未通过'};
     if(data.native_stale && !data.stale)pieces.push('原生结构来源需要重新核验，点击同步');
     if(data.stale)pieces.push(`需要更新：${(data.stale_reasons || []).map(x=>reasonNames[x] || '来源待核验').join('、') || '来源已变化'}`);
     $('board-status').textContent=pieces.join(' · ');
   }
+  function renderGenerations(status,selected) {
+    if(!Array.isArray(status.generations))return;
+    const host=$('board-generation');host.replaceChildren();
+    const current=node('option','当前沪深 A 股');current.value='';host.append(current);
+    status.generations.forEach(row=>{const option=node('option',`${row.price_date || '—'} · ${row.scope_label} · ${row.generation_id.slice(0,10)}`);option.value=row.generation_id;host.append(option);});
+    if(selected && !status.generations.some(row=>row.generation_id===selected)){
+      const data=status.fluent || status,option=node('option',`${data.market?.price_date || '—'} · ${data.scope_label || '历史版本'} · ${selected.slice(0,10)}`);option.value=selected;host.append(option);
+    }
+    host.value=selected;
+  }
+  const historySelected=()=>!!$('board-generation')?.value;
+  function requireCurrentScope(){if(historySelected())throw Error('正在查看历史版本，请先切回“当前沪深 A 股”再创建计算或补齐任务。');}
   function renderRows(result) {
     const rows=result.rankings || result.rows || [];
     $('board-count').textContent=`${rows.length} 个合格板块 · Top30 · 行情 ${result.price_date || rows[0]?.price_date || '—'}`;
@@ -140,12 +159,20 @@
   }
   async function refresh() {
     const current=++sequence;
+    const selected=$('board-generation')?.value || '';
     const kind=$('board-kind').value,rankingType=$('board-ranking').value,sortBy=$('capital-sort').value;
     // Pin all reads to the publication observed by status. A newer publication
     // may arrive between requests; its immutable predecessor remains readable.
-    const status=await request('/api/boards/status');
+    const status=await request('/api/boards/status'+(selected?'?generation_id='+encodeURIComponent(selected):''));
     if(current!==sequence)return;
-    const market=(status.fluent || status).market,generation=market?.generation_id || null;
+    const state=status.fluent || status;
+    // A current request cannot adopt an old mixed-scope publication, even from a stale server.
+    if(!selected && state.market && state.market.calculation_scope!==calculationScope){
+      state.market=null;state.full=null;state.available=false;state.stale=true;
+      state.stale_reasons=['no_valid_scope_publication'];state.scope_label='沪深 A 股 · 待补齐';
+    }
+    const market=state.market,generation=market?.generation_id || null;
+    if(selected && generation!==selected)throw Error('指定历史版本核验失败，未切换到其他版本。');
     let ranking={rankings:[],generation_id:null,price_date:null},visual={rows:[],increases:[],decreases:[],generation_id:null,
       price_date:null,board_count:0,available_board_count:0,market_amount:null};
     if(generation) {
@@ -165,7 +192,7 @@
     if(displayedGeneration!==generation) {clearFillPlan();++detailSequence;$('board-detail').hidden=true;}
     $('capital-tooltip').hidden=true;
     // Commit status, table and charts together only after every pinned read is ready.
-    loaded=true;displayedGeneration=generation;renderStatus(status);renderRows(ranking);renderCapital(visual);
+    loaded=true;displayedGeneration=generation;renderGenerations(status,selected);renderStatus(status);renderRows(ranking);renderCapital(visual);
     if(!fillJob){
       const light=await request('/api/light/status');if(current!==sequence)return;
       const fills=(light.jobs||[]).filter(x=>x.kind==='incremental').sort((a,b)=>fillTime(b).localeCompare(fillTime(a)));
@@ -191,7 +218,7 @@
       else if(saved.length)renderJob(saved[0]);
       else {
         if(fillResult)renderJob(fillResult);else $('board-job').hidden=true;
-        ['board-calculate','board-sync','board-refresh-members'].forEach(id=>$(id).disabled=!!fillJob);
+        ['board-calculate','board-sync','board-refresh-members'].forEach(id=>$(id).disabled=!!fillJob||historySelected());
       }
     }
   }
@@ -201,7 +228,10 @@
     const result=await request(`/api/boards/detail/${encodeURIComponent(id)}?generation_id=${encodeURIComponent(generation || '')}`);
     if(current!==detailSequence)return;
     const row=result.features || {}, host=$('board-detail-content');host.replaceChildren();$('board-detail').hidden=false;$('board-detail-title').textContent=row.name || id;
-    host.append(node('p',`行情 ${row.price_date || '—'} · 当前成员 ${row.membership_date || '—'}`,'subtle'));
+    host.append(node('p',`${result.scope_label || '历史原范围'} · 行情 ${row.price_date || '—'} · 成员 ${row.membership_date || '—'}`,'subtle'));
+    const membership=result.calculation_membership;
+    if(membership)host.append(node('p',`计算成员 ${membership.eligible_count} · 快照成员 ${membership.source_member_count} · 本次范围排除 ${membership.excluded_members.length}。覆盖率按计算成员计。`,'subtle'));
+    else host.append(node('p','历史原范围：成员与统计保持原发布版本，不按当前范围改写。','subtle'));
     metrics(host,[['涨跌 1 / 5 / 20 日',`${percent(row.board_return_1)} / ${percent(row.board_return_5)} / ${percent(row.board_return_20)}`],['上涨成员',percent(row.board_advance_ratio)],['站上 MA20',percent(row.board_above_ma20_ratio)],['20 日突破',percent(row.board_breakout20_ratio)],['成交额',amount(row.board_amount)],['相对成交额 20 日',numeric(row.board_relative_amount20)],['20 日波动',percent(row.board_volatility20)]]);
     const structures=row.native_structure || [];
     host.append(node('h4','结构与威科夫量价'));
@@ -222,7 +252,10 @@
     if(row.reason_codes?.length)host.append(node('p',`可用性：${row.reason_codes.join('、')}`,'subtle'));
     host.append(node('h4',result.membership_matches_generation?`该版本成员 · ${result.members?.length || 0}`:'成员证明暂不可用'));
     if(!result.membership_matches_generation)host.append(node('p','该特征版本的成员快照缺失，请更新并重新计算。','task-error'));
-    const list=node('div','', 'board-members');(result.members || []).forEach(member=>{const symbol=typeof member==='string'?member:member.symbol;const button=node('button',typeof member==='string'?member:`${symbol} ${member.name || ''}`);button.type='button';button.addEventListener('click',()=>window.dispatchEvent(new CustomEvent('khquant:board-stock',{detail:{symbol,price_date:row.price_date}})));list.append(button);});host.append(list);
+    const list=node('div','', 'board-members');(result.members || []).forEach(member=>{const symbol=typeof member==='string'?member:member.symbol;const label=typeof member==='string'?member:`${symbol} ${member.name || ''}`;
+      if(!/^\d{6}\.(SH|SZ)$/.test(symbol)){list.append(node('span',`${label}（历史成员，不提供新分析）`,'subtle'));return;}
+      const button=node('button',label);button.type='button';button.addEventListener('click',()=>window.dispatchEvent(new CustomEvent('khquant:board-stock',{detail:{symbol,price_date:row.price_date}})));list.append(button);});host.append(list);
+    if(membership){const evidence=node('details');evidence.append(node('summary','来源与计算范围证明'),node('p',`来源 SHA ${membership.source_snapshot_hash}`),node('p',`投影 SHA ${membership.projection_hash}`),node('p',`排除成员：${membership.excluded_members.join('、') || '无'}`));host.append(evidence);}
   }
   function renderJob(value) {
     $('board-job').hidden=false;const host=$('board-job');host.replaceChildren();const d=value.progress_detail || value.progress || {};
@@ -235,18 +268,19 @@
       const result=fillResult.result || {},counts=result.counts || {};
       host.append(node('p',`最近增量补齐 · ${names[result.status||fillResult.status]||result.status||fillResult.status} · ${result.price_date||'—'} · 复用 ${counts.reused??'未记录'} · 追加 ${counts.appended??'未记录'} · 重建 ${counts.rebuilt??'未记录'} · 失败 ${counts.failed??'未记录'} · 延后 ${counts.deferred??'未记录'}`));
       if(value.job_id!==fillResult.job_id){const history=node('details');history.append(node('summary',`历史板块任务：${names[value.status]||value.status}${value.status==='cancelled'?'（保持终止）':''}`),node('p',`${d.stage||''} ${d.current??d.completed??''}${d.total?` / ${d.total}`:''}${value.error?' · '+value.error:''}`));host.append(history);}
-      ['board-calculate','board-sync','board-refresh-members'].forEach(id=>$(id).disabled=!!fillJob);return;
+      ['board-calculate','board-sync','board-refresh-members'].forEach(id=>$(id).disabled=!!fillJob||historySelected());return;
     }
     host.append(node('p',`${names[value.status] || value.status} · ${d.stage || ''} ${d.current ?? d.completed ?? ''}${d.total ? ` / ${d.total}` : ''}${value.error ? ` · ${value.error}` : ''}`));
     if(active.has(value.status)) {const cancel=node('button','取消');cancel.type='button';cancel.disabled=value.status==='cancelling';cancel.addEventListener('click',async()=>{try{job=await request(`/api/boards/jobs/${encodeURIComponent(value.job_id)}/cancel`,{method:'POST',body:'{}'});renderJob(job);}catch(exc){error(exc);}});host.append(cancel);}
     else if(['partial','failed','interrupted'].includes(value.status) && ['board_knowledge','board_features'].includes(value.kind)) {const retry=node('button','重试未完成阶段');retry.type='button';retry.addEventListener('click',()=>{const path=value.kind==='board_knowledge'?'/refresh':value.kind==='board_features'?'/features/build':'/sync';const body=value.kind==='board_knowledge'?{...value.spec,resume:value.result?.knowledge_run_id || value.knowledge_run_id || value.progress_detail?.knowledge_run_id || value.spec?.resume || null}:value.kind==='board_features'?value.spec:{resume_sync_id:value.result?.sync_id || value.progress_detail?.sync_id || value.spec?.resume_sync_id || null};start(path,body).catch(error);});host.append(retry);}
-    ['board-calculate','board-sync','board-refresh-members'].forEach(id=>$(id).disabled=active.has(value.status)||!!fillJob);
+    ['board-calculate','board-sync','board-refresh-members'].forEach(id=>$(id).disabled=active.has(value.status)||!!fillJob||historySelected());
   }
   async function poll() {
+    if(document.hidden){clearTimeout(timer);timer=setTimeout(()=>poll().catch(()=>{}),15000);return;}
     clearTimeout(timer);if(!job)return;const value=await request(`/api/boards/jobs/${encodeURIComponent(job.job_id)}`);job=value;renderJob(value);
     if(active.has(value.status))timer=setTimeout(()=>poll().catch(error),2000);else {job=null;await refresh();}
   }
-  async function start(path,body={}) {job=await request(`/api/boards${path}`,{method:'POST',body:JSON.stringify(body)});renderJob(job);await poll();}
+  async function start(path,body={}) {requireCurrentScope();job=await request(`/api/boards${path}`,{method:'POST',body:JSON.stringify(body)});renderJob(job);await poll();}
   function fillTime(value){return value?.finished_at||value?.updated_at||value?.created_at||'';}
   function renderFillResult(value){
     $('board-fill-execute').hidden=true;$('board-fill-cancel').hidden=true;
@@ -265,6 +299,7 @@
     (plan.rows||[]).forEach(row=>details.append(node('p',`${row.symbol} · ${names[row.status||row.action]||row.status||row.action} · ${row.reason||''}${row.first_changed_date?' · 最早变化 '+row.first_changed_date:''}`)));host.append(details);
   }
   async function previewFill(){
+    requireCurrentScope();
     if(fillJob)return;
     const scope=$('board-fill-scope').value;
     if(scope==='current_board'&&!selectedCapital)throw Error('先从资金图选择一个板块。');
@@ -273,6 +308,7 @@
     describeFill(fillPlan);$('board-fill-execute').hidden=false;
   }
   async function pollFill(){
+    if(document.hidden){clearTimeout(fillTimer);fillTimer=setTimeout(()=>pollFill().catch(()=>{}),15000);return;}
     clearTimeout(fillTimer);if(!fillJob)return;
     const j=await request('/api/light/jobs/'+encodeURIComponent(fillJob));
     $('board-fill-plan').replaceChildren(node('p',`${names[j.status]||j.status} · ${j.progress?.stage||''} ${j.progress?.completed??''} / ${j.progress?.total??''}`));
@@ -282,6 +318,7 @@
     await refresh();
   }
   async function executeFill(){if(!fillPlan||fillJob)return;
+    requireCurrentScope();
     if(fillPlan.scope==='current_board'&&fillPlan.board_id!==selectedCapital?.board_id){clearFillPlan();throw Error('选定板块已变化，请重新预览缺口。');}
     const j=await request('/api/boards/incremental/execute',{method:'POST',body:JSON.stringify({plan_id:fillPlan.plan_id})});
     fillJob=j.job_id;$('board-fill-execute').hidden=true;$('board-fill-cancel').hidden=false;$('board-sync').disabled=true;await pollFill();
@@ -291,13 +328,14 @@
   setupCapital();
   window.addEventListener('resize',()=>{if(capitalData && !$('scan-board-panel').hidden){$('capital-tooltip').hidden=true;renderCapital(capitalData);}});
   window.addEventListener('keydown',event=>{if(event.key==='Escape')$('capital-tooltip').hidden=true;});
-  $('scan-stock-tab').addEventListener('click',()=>selectTab(false));$('scan-board-tab').addEventListener('click',()=>{const alreadyLoaded=loaded;selectTab(true);if(alreadyLoaded)refresh().catch(error);});
+  $('scan-stock-tab').addEventListener('click',showStock);$('scan-board-tab').addEventListener('click',()=>{const alreadyLoaded=loaded;selectTab(true);if(alreadyLoaded)refresh().catch(error);});
   ['board-kind','board-ranking'].forEach(id=>$(id).addEventListener('change',()=>refresh().catch(error)));
+  $('board-generation').addEventListener('change',()=>{clearFillPlan();++detailSequence;$('board-detail').hidden=true;refresh().catch(error);});
   $('board-refresh-view').addEventListener('click',()=>refresh().catch(error));$('board-calculate').addEventListener('click',()=>run('/features/build',{with_native:true}));$('board-sync').addEventListener('click',()=>previewFill().catch(error));
   $('board-fill-execute').addEventListener('click',()=>executeFill().catch(error));
   $('board-fill-cancel').addEventListener('click',()=>{if(fillJob)request('/api/light/jobs/'+encodeURIComponent(fillJob)+'/cancel',{method:'POST',body:'{}'}).catch(error);});
   $('board-fill-scope').addEventListener('change',clearFillPlan);
   $('board-refresh-members').addEventListener('click',()=>run('/refresh'));$('board-detail-close').addEventListener('click',()=>{++detailSequence;$('board-detail').hidden=true;});
-  const panel={onRoute(){const wasLoaded=loaded;const desired=new URLSearchParams(location.search).get('board')==='1' || sessionStorage.getItem('khquant_scan_tab')==='board';selectTab(desired);if(desired && wasLoaded)refresh().catch(error);},refresh,async retryTask(id){const value=await request(`/api/boards/jobs/${encodeURIComponent(id)}`);selectTab(true);location.hash='scan';renderJob(value);},showResult(result){selectTab(true);refresh().catch(error);request('/api/boards/jobs').then(async data=>{const saved=(data.jobs || []).find(x=>x.run_id===result.run_id);if(saved)renderJob(await request(`/api/boards/jobs/${encodeURIComponent(saved.job_id)}`));}).catch(error);}};
+  const panel={showStock,onRoute(){const wasLoaded=loaded;const desired=new URLSearchParams(location.search).get('board')==='1' || sessionStorage.getItem('khquant_scan_tab')==='board';selectTab(desired);if(desired && wasLoaded)refresh().catch(error);},refresh,async retryTask(id){const value=await request(`/api/boards/jobs/${encodeURIComponent(id)}`);selectTab(true);location.hash='scan';renderJob(value);},showResult(result){selectTab(true);refresh().catch(error);request('/api/boards/jobs').then(async data=>{const saved=(data.jobs || []).find(x=>x.run_id===result.run_id);if(saved)renderJob(await request(`/api/boards/jobs/${encodeURIComponent(saved.job_id)}`));}).catch(error);}};
   globalThis.KHQuantBoardPanel=panel;panel.onRoute();
 })();

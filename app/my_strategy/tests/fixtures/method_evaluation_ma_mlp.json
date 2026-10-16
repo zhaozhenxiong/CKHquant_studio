@@ -1,0 +1,52 @@
+{
+  "method": "structure_kronos_ma_mlp",
+  "label": "结构与量价 + Kronos + 均线模型 MLP",
+  "as_of": "2000-12-29",
+  "status": "complete",
+  "direction": "WAIT",
+  "model_id": "64963ef05012c1c1bf7adb2a4f6eeb3a859ef07d9e06a82097bc9db776ec449d",
+  "feature_profile": "ma_trend_v1",
+  "missing_reasons": [],
+  "kronos": {
+    "status": "completed",
+    "summary": {
+      "interval_semantics": "empirical_sample_quantiles_not_calibrated_confidence",
+      "probability_semantics": "uncalibrated_model_sample_frequency",
+      "return_basis": "as_of_close_to_forecast_close_not_executable_profit",
+      "terminal_return_median": -0.0125,
+      "terminal_return_p10": -0.04,
+      "terminal_return_p90": 0.025,
+      "terminal_return_std": 0.02,
+      "up_path_fraction": 0.375,
+      "worst_path_low_return": -0.06
+    },
+    "quality": {
+      "prediction_usable": true,
+      "valid_samples": 24,
+      "requested_samples": 32
+    }
+  },
+  "score": {
+    "status": "scored",
+    "score": 60.0,
+    "probabilities": {
+      "down": 0.3,
+      "flat": 0.2,
+      "up": 0.5
+    },
+    "qualification": {
+      "mode": "historical_candidate",
+      "research_only": true,
+      "research_trial_eligible": true,
+      "paper_allocation_eligible": false,
+      "allow_increase": true,
+      "positive_allocation_eligible": true,
+      "policy_passed": false,
+      "independent_forward_status": "pending",
+      "qualification_event_id": null,
+      "reason": "historical_candidate_evaluation_only"
+    },
+    "model_type": "torch_mlp",
+    "reason": "scored"
+  }
+}

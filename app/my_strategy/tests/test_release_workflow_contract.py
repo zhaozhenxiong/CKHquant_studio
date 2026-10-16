@@ -209,11 +209,11 @@ def test_embedded_python_and_isolated_probes_compile():
 def test_windows_final_probe_uses_selected_source_and_exact_installed_bytes(tmp_path, monkeypatch, portable):
     script = next(item['run'] for item in steps('windows-release-check.yml', 'windows')
                   if item.get('name') == 'Verify the selected installed release with its matching probe')
-    wheel = tmp_path / '.scratch/release-wheels/khquant-1.0.0-py3-none-any.whl'
+    wheel = tmp_path / '.scratch/release-wheels/khquant-1.0.1-py3-none-any.whl'
     wheel.parent.mkdir(parents=True)
     wheel.write_bytes(b'verified final wheel')
     digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
-    source = tmp_path / '.scratch/portable-release/extracted/KHQuant-1.0.0' if portable else tmp_path
+    source = tmp_path / '.scratch/portable-release/extracted/KHQuant-1.0.1' if portable else tmp_path
     verifier = source / 'app/verify_installation.py'
     verifier.parent.mkdir(parents=True)
     verifier.write_text('# frozen verifier', encoding='utf-8')

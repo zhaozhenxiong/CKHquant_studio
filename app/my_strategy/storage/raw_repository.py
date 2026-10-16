@@ -341,6 +341,30 @@ class RawMarketRepository:
                     }
         return out
 
+    def stock_daily_update_summaries(self, stocks: list[str]) -> dict[str, dict[str, Any]]:
+        """Bounded metadata for ingestion planning, without retaining price frames.
+
+        Count the normalized source itself rather than securities.raw_rows (which
+        counts raw audit rows). Price presence matches read_stock_daily's
+        trade_close alias and does not grant downstream model eligibility.
+        """
+        if not self.db_path.exists() or not stocks:
+            return {}
+        result = {}
+        with self.read_connection() as conn:
+            for offset in range(0, len(stocks), 500):
+                chunk = stocks[offset:offset + 500]
+                marks = ','.join('?' for _ in chunk)
+                query = f'''SELECT c.stock,c.last_date,c.rows,
+                    EXISTS(SELECT 1 FROM stock_daily_normalized n
+                           WHERE n.stock=c.stock AND n.close IS NOT NULL) AS has_trade_prices
+                    FROM (SELECT stock,MAX(date) AS last_date,COUNT(*) AS rows
+                          FROM stock_daily_normalized WHERE stock IN ({marks}) GROUP BY stock) c'''
+                for row in conn.execute(query, chunk):
+                    result[row['stock']] = {'last_date': row['last_date'],
+                        'rows': int(row['rows']), 'has_trade_prices': bool(row['has_trade_prices'])}
+        return result
+
     def upsert_stock_daily(self, code: str, df: pd.DataFrame, *, source: str = "unknown") -> int:
         """Upsert only the supplied daily bars into the canonical raw database."""
         if df is None or df.empty:

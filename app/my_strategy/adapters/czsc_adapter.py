@@ -121,7 +121,7 @@ def load_bars(symbol: str, start: str | None = None, end: str | None = None,
         required = {"stock", "date", "open", "high", "low", "close", "volume", "amount"}
         if not required <= columns:
             raise ValueError("原始行情库 schema 缺少字段：" + ",".join(sorted(required - columns)))
-        extras = [x for x in ("source", "has_trade_price", "pct_chg") if x in columns]
+        extras = [x for x in ("source", "has_trade_price", "pct_chg", "available_at") if x in columns]
         selected = "stock AS symbol,date,open,high,low,close,volume,amount"
         if extras:
             selected += "," + ",".join(extras)
@@ -180,19 +180,23 @@ def latest_market_date(end: str | None = None, *, db_path: str | Path | None = N
         return connection.execute("SELECT MAX(date) FROM stock_daily_normalized WHERE date <= ?", (cutoff.date().isoformat(),)).fetchone()[0]
 
 
-def data_status(*, db_path: str | Path | None = None) -> dict[str, Any]:
+def data_status(*, db_path: str | Path | None = None, refresh: bool = False) -> dict[str, Any]:
     path = raw_path(db_path)
     if not path.is_file():
         return {"available": False, "raw_db": str(path), "reason": "请设置 KHQUANT_RAW_DB 到已有原始行情库"}
-    with _connection(path) as connection:
-        columns = {row[1] for row in connection.execute("PRAGMA table_info(stock_daily_normalized)")}
-        legacy = "SUM(CASE WHEN source LIKE '%fuyao%' AND source <> 'fuyao_unadjusted_v1' THEN 1 ELSE 0 END)" if "source" in columns else "0"
-        unverified = "SUM(CASE WHEN has_trade_price IS NULL OR has_trade_price <> 1 THEN 1 ELSE 0 END)" if "has_trade_price" in columns else "COUNT(*)"
-        summary = dict(connection.execute(f"SELECT MIN(date) AS start,MAX(date) AS end,COUNT(*) AS rows,COUNT(DISTINCT stock) AS symbols,{legacy} AS legacy_fuyao_bars,{unverified} AS unverified_trade_price_bars FROM stock_daily_normalized").fetchone())
-        latest = connection.execute("SELECT COUNT(*) FROM stock_daily_normalized WHERE date=?", (summary["end"],)).fetchone()[0]
-    return {"available": True, "raw_db": str(path), **summary, "data_end": summary["end"], "latest_date": summary["end"], "stocks": summary["symbols"],
-            "source": "本地 SQLite 原始行情", "latest_symbols": latest,
-            "price_basis": "mixed_legacy_adjustment_unverified" if summary["legacy_fuyao_bars"] else "unadjusted", "volume_unit": "shares", "amount_unit": "CNY", "frequencies": ["日线", "周线", "月线"]}
+    from my_strategy.storage.status_summary import read_status
+    def compute():
+        with _connection(path) as connection:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(stock_daily_normalized)")}
+            legacy = "SUM(CASE WHEN source LIKE '%fuyao%' AND source <> 'fuyao_unadjusted_v1' THEN 1 ELSE 0 END)" if "source" in columns else "0"
+            unverified = "SUM(CASE WHEN has_trade_price IS NULL OR has_trade_price <> 1 THEN 1 ELSE 0 END)" if "has_trade_price" in columns else "COUNT(*)"
+            summary = dict(connection.execute(f"SELECT MIN(date) AS start,MAX(date) AS end,COUNT(*) AS rows,COUNT(DISTINCT stock) AS symbols,{legacy} AS legacy_fuyao_bars,{unverified} AS unverified_trade_price_bars FROM stock_daily_normalized").fetchone())
+            latest = connection.execute("SELECT COUNT(*) FROM stock_daily_normalized WHERE date=?", (summary["end"],)).fetchone()[0]
+        return {"available": True, "raw_db": str(path), **summary, "data_end": summary["end"], "latest_date": summary["end"], "stocks": summary["symbols"],
+                "source": "本地 SQLite 原始行情", "latest_symbols": latest,
+                "price_basis": "mixed_legacy_adjustment_unverified" if summary["legacy_fuyao_bars"] else "unadjusted", "volume_unit": "shares", "amount_unit": "CNY", "frequencies": ["日线", "周线", "月线"]}
+
+    return read_status(path, compute, refresh=refresh)
 
 
 @lru_cache(maxsize=1)

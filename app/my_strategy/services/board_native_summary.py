@@ -25,6 +25,8 @@ import pyarrow.parquet as pq
 
 from my_strategy.core.paths import PROJECT_ROOT, DATA_ROOT
 from my_strategy.core.run_context import stable_hash
+from my_strategy.services.board_calculation_scope import (CALCULATION_SCOPE, calculation_membership,
+    calculation_contract, is_calculation_symbol)
 from my_strategy.adapters.czsc_adapter import normalize_symbol, raw_path
 from my_strategy.services.czsc_liquidity import RAW_IDENTITY_COLUMNS, daily_eligibility, liquidity_policy
 from my_strategy.services.czsc_native_cache import (_RAW_KEYS, _LIQUIDITY_KEYS, _OUTPUT_KEYS,
@@ -35,9 +37,9 @@ NATIVE_CODE_FILES = tuple('services/' + name for name in (
     'czsc_price_volume_features.py', 'czsc_price_volume_events.py', 'czsc_native_evidence.py',
     'czsc_analysis.py', 'czsc_trend_support.py', 'czsc_liquidity.py')) + (
     'adapters/czsc_adapter.py', 'configs/czsc_strategy.json')
-SUMMARY_SCHEMA = dict(version='member_native_summary_v1', sources=['structure', 'wyckoff'],
+SUMMARY_SCHEMA = dict(version='member_native_summary_v2', calculation_scope=CALCULATION_SCOPE, sources=['structure', 'wyckoff'],
     basis='verified_member_native_target_close', missing='null_not_zero', training_eligible=False,
-    aggregation='equal_weight_eligible_current_members;each_source_separate;all_members_denominator')
+    aggregation='equal_weight_eligible_current_members;each_source_separate;SH_SZ_A_projection_denominator')
 SUMMARY_SCHEMA_HASH = stable_hash(SUMMARY_SCHEMA)
 _ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,179}')
 _SOURCES = ('structure', 'wyckoff')
@@ -400,21 +402,27 @@ def _unavailable(symbol, day, reason):
 
 def collect_native_summaries(*, price_date, symbols=None, cache_db_path=None, source_native_run_id=None,
         raw_source_run_id=None, source_root=None, artifacts_root=None, raw_db_path=None, config=None,
-        progress=None, check_cancel=None):
+        progress=None, check_cancel=None, calculation_memberships=None):
     """Cold, complete dependency validation; no reads initialize or alter any DB.
 
     ``complete`` describes a completed requested population scan, not market
     coverage. Ineligible/missing rows remain explicit unavailable references.
     """
     _close(price_date); requested = sorted({normalize_symbol(value) for value in symbols}) if symbols is not None else None
+    scope = calculation_contract(calculation_memberships or {})
+    if requested is not None and any(not is_calculation_symbol(symbol) for symbol in requested):
+        raise ValueError('native board collection requires SH/SZ A-share symbols')
+    if calculation_memberships is not None and requested != scope['required_symbols']:
+        raise ValueError('native requested population differs from calculation projections')
     summaries = {}; refs = []; failures = Counter(); contract = None; integrity_failures=Counter()
     base_identity = dict(format='native_summary_collection_v1', schema_hash=SUMMARY_SCHEMA_HASH,
+        **scope,
         price_date=price_date, mode='current_reference', training_eligible=False,
         reader_code_sha256=_file_sha(Path(__file__)))
     try:
         if check_cancel: check_cancel()
         contract = _load_contract(source_root, artifacts_root, source_native_run_id, raw_source_run_id, price_date, config)
-        requested = requested if requested is not None else sorted(contract['records'])
+        requested = requested if requested is not None else sorted(symbol for symbol in contract['records'] if is_calculation_symbol(symbol))
         base_identity.update(generation_contract_hash=contract['generation']['contract_hash'],
             generation_contract=contract['generation'], source_native_run_id=contract['native_id'],
             raw_source_run_id=contract['raw_id'], native_report_sha256=contract['native_report_sha256'],
@@ -478,13 +486,17 @@ def collect_native_summaries(*, price_date, symbols=None, cache_db_path=None, so
 
 
 def aggregate_board_native(snapshot, native_result, *, min_members=5, min_coverage=.8):
-    """Equal-weight source evidence of all current members; each source gates itself."""
+    """Aggregate the immutable SH/SZ calculation projection of a source snapshot."""
     if type(min_members) is not int or min_members<5 or isinstance(min_coverage, bool) or not isinstance(min_coverage,(int,float)) or not math.isfinite(min_coverage) or not .8<=min_coverage<=1:
         raise ValueError('native board minimum is five members and eighty-percent coverage')
-    members = [normalize_symbol(value) for value in snapshot.get('members', [])]
-    if len(set(members)) != len(members) or snapshot.get('complete') is not True or snapshot.get('expected_count') != len(members) or not snapshot.get('snapshot_hash'):
+    projection=calculation_membership(snapshot); members=projection['eligible_members']
+    if not projection['source_complete'] or projection['source_expected_count']!=projection['source_member_count']:
         raise ValueError('native aggregate requires a complete unique current member snapshot')
     identity=native_result['identity']; day=identity['price_date']; _close(day); rows=native_result['summaries']
+    if (identity.get('calculation_scope')!=CALCULATION_SCOPE or
+            identity.get('projection_hashes',{}).get(snapshot['board_id'])!=projection['projection_hash'] or
+            not set(members)<=set(identity.get('required_symbols',[]))):
+        raise ValueError('native aggregate calculation projection identity drift')
     for symbol in members:
         row=rows.get(symbol)
         if row is not None:
@@ -492,10 +504,12 @@ def aggregate_board_native(snapshot, native_result, *, min_members=5, min_covera
             if row.get('row_hash')!=stable_hash(body) or row.get('symbol')!=symbol or row.get('price_date')!=day or row.get('training_eligible') is not False:
                 raise ValueError('native per-stock summary row identity drift')
     result=dict(board_id=snapshot['board_id'],price_date=day,mode='current_reference',training_eligible=False,
+        calculation_scope=CALCULATION_SCOPE,calculation_membership=projection,
+        source_snapshot_hash=snapshot['snapshot_hash'],projection_hash=projection['projection_hash'],
         structure_basis='member_native',snapshot_hash=snapshot['snapshot_hash'],membership_available_at=snapshot['available_at'],
         expected_members=len(members),native_members=sum(rows.get(symbol,{}).get('status')=='available' for symbol in members),
         native_identity_hash=stable_hash(identity),schema_hash=SUMMARY_SCHEMA_HASH,
-        policy=dict(min_members=min_members,min_coverage=min_coverage),reason_codes=[])
+        policy=dict(min_members=min_members,min_coverage=min_coverage),reason_codes=[] if members else ['no_supported_members'])
     for source in _SOURCES:
         eligible=[rows[symbol][source] for symbol in members if rows.get(symbol,{}).get('status')=='available' and
             isinstance(rows[symbol].get(source),dict) and rows[symbol][source].get('input_eligible') is True]

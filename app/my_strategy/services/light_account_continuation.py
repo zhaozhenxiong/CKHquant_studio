@@ -7,6 +7,7 @@ immutable successor. It never changes a previous result or current-score pointer
 from __future__ import annotations
 
 from copy import deepcopy
+from bisect import bisect_left, bisect_right
 import hashlib
 import json
 import time
@@ -39,7 +40,9 @@ def _timestamp(event):
 
 def _decision_day(event, dates):
     available = _timestamp(event)
-    return next((day for day in dates if pd.Timestamp(day+"T15:00:00+08:00") >= available), None)
+    day = available.date().isoformat()
+    index = bisect_right(dates, day) if available > pd.Timestamp(day+'T15:00:00+08:00') else bisect_left(dates, day)
+    return dates[index] if index < len(dates) else None
 
 
 def _canonical(value):
@@ -359,7 +362,8 @@ def _continue_agent_account(service,account,previous_result,end,*,stop=None,dead
         prediction=predict,score=scorer,
         max_predictions_per_day=previous['identity']['max_predictions'],
         deadline=deadline,stop=stop,progress=progress,
-        checkpoint_callback=save_checkpoint,corporate_actions=previous.get('corporate_actions'),execution_mode=mode)
+        checkpoint_callback=save_checkpoint,corporate_actions=previous.get('corporate_actions'),execution_mode=mode,
+        checkpoint_stages={'day_committed','cancelled','interrupted','completed','partial'})
     identity={**deepcopy(previous['identity']),'kind':'agent-simulation-continuation-v1','sources':sources,
         'calendar':cal,'end':end,'parent_result_id':previous['result_id'],
         'observation_scope':_hash(scheduled['evidence']),

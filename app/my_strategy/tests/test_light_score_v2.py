@@ -285,6 +285,7 @@ def test_features_use_confirmation_time_and_labels_use_verified_sessions():
     dates=pd.bdate_range('2020-01-01',periods=80)
     frame=pd.DataFrame(dict(date=dates,symbol='TEST.SZ',open=np.arange(80)+100.,close=np.arange(80)+101.,
         high=np.arange(80)+102.,low=np.arange(80)+99.,volume=np.arange(80)+1000.,
+        amount=100000.,source="tushare",has_trade_price=1,
         native_w_demand_score=.5,native_w_supply_score=.2))
     event=dict(symbol='TEST.SZ',date=str(dates[10].date()),available_at=str(dates[20].date())+'T15:01:00+08:00',
         side='BUY',confirmed=True,input_eligible=True,risk_boundary=100.)

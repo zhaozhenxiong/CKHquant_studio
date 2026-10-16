@@ -21,6 +21,39 @@ from my_strategy.web_dashboard.api import compute_submission, submit_compute
 router = APIRouter(prefix='/api/boards', tags=['board-knowledge'])
 
 
+def _scope_metadata(generation=None, *, explicit=False):
+    from my_strategy.services.board_calculation_scope import CALCULATION_SCOPE
+    scope = (generation or {}).get('calculation_scope')
+    return {'calculation_scope': scope, 'required_calculation_scope': CALCULATION_SCOPE,
+        'scope_label': '沪深 A 股' if scope == CALCULATION_SCOPE else '历史原范围' if generation else '沪深 A 股 · 待补齐',
+        'historical_view': bool(explicit), 'availability': 'available' if generation else 'pending',
+        'needs_rebuild': generation is None}
+
+
+def _selected_generation(store, generation_id=None):
+    """A bad current publication is unavailable; explicit history never falls back."""
+    try:
+        generation = store.get_generation(generation_id) if generation_id else store.current_generation()
+        if generation_id and (not generation or not generation.get('market_ready')):
+            raise HTTPException(404, '该板块历史发布版本不存在或尚未完成')
+        if generation_id: generation = store.verify_calculation_scope(generation_id)
+        return generation
+    except ValueError as exc:
+        if generation_id: raise HTTPException(409, '该板块版本核验失败，保持不可用') from exc
+        return None
+
+
+def _generation_catalog(store):
+    fields = ('generation_id', 'price_date', 'membership_date', 'created_at', 'board_count',
+        'market_ready', 'full_ready', 'market_published', 'full_published')
+    try:
+        rows = store.list_generations(limit=50)
+    except ValueError:
+        # A damaged history index must not make its entries selectable or trigger a fallback.
+        return []
+    return [{**{key: row.get(key) for key in fields}, **_scope_metadata(row, explicit=True)} for row in rows]
+
+
 @contextmanager
 def _store(request):
     yield BoardKnowledgeStore(getattr(request.app.state, 'board_db_path', None), readonly=True)
@@ -28,9 +61,12 @@ def _store(request):
 
 def _fluent_stale(request, row):
     from my_strategy.services.board_fluent import freshness_status
-    state = freshness_status(fluent_db_path=request.app.state.board_fluent_db_path,
-        raw_db_path=request.app.state.board_raw_db_path, kb_db_path=request.app.state.board_db_path,
-        source_root=PROJECT_ROOT)
+    try:
+        state = freshness_status(fluent_db_path=request.app.state.board_fluent_db_path,
+            raw_db_path=request.app.state.board_raw_db_path, kb_db_path=request.app.state.board_db_path,
+            source_root=PROJECT_ROOT)
+    except ValueError:
+        return True
     return bool(state['stale'] or state.get('native_stale') or
         row.get('generation_id') != (state.get('market') or {}).get('generation_id'))
 
@@ -123,7 +159,7 @@ def _start_job_guarded(request, kind, work, summarize):
 
 
 @router.get('/status')
-def status(request: Request):
+def status(request: Request, generation_id: str | None = None):
     if not getattr(request.app.state, 'board_integrated', False):
         with _store(request) as store: return store.status()
     # Main-panel status is an indexed hint, not a membership eligibility proof.
@@ -136,9 +172,39 @@ def status(request: Request):
                 latest = connection.execute('SELECT run_id,status,finished_at FROM board_refresh_runs ORDER BY started_at DESC,run_id DESC LIMIT 1').fetchone()
                 knowledge['latest_run'] = dict(latest) if latest else None
     from my_strategy.services.board_fluent import freshness_status
-    return {**knowledge, 'fluent': freshness_status(fluent_db_path=request.app.state.board_fluent_db_path,
-        raw_db_path=request.app.state.board_raw_db_path, kb_db_path=request.app.state.board_db_path,
-        source_root=PROJECT_ROOT)}
+    from my_strategy.storage.board_fluent import BoardFluentStore
+    fluent = BoardFluentStore(request.app.state.board_fluent_db_path, readonly=True)
+    generation = _selected_generation(fluent, generation_id)
+    if generation_id:
+        state = {'available': True, 'market': generation,
+            'full': generation if generation.get('full_ready') else None, 'stale': False,
+            'stale_reasons': [], 'native_stale': False}
+    elif generation is None:
+        state = {'available': False, 'market': None, 'full': None, 'stale': True,
+            'stale_reasons': ['no_valid_scope_publication'], 'native_stale': False}
+    else:
+        try:
+            state = freshness_status(fluent_db_path=request.app.state.board_fluent_db_path,
+                raw_db_path=request.app.state.board_raw_db_path, kb_db_path=request.app.state.board_db_path,
+                source_root=PROJECT_ROOT)
+            generation = state.get('market')
+        except ValueError:
+            generation = None
+            state = {'available': False, 'market': None, 'full': None, 'stale': True,
+                'stale_reasons': ['invalid_scope_publication'], 'native_stale': False}
+    scope = _scope_metadata(generation, explicit=bool(generation_id))
+    return {**knowledge, 'fluent': {**state, **scope,
+        'needs_rebuild': bool(state.get('stale') or scope['needs_rebuild'])},
+        'generations': _generation_catalog(fluent)}
+
+
+@router.get('/generations')
+def generations(request: Request):
+    from my_strategy.storage.board_fluent import BoardFluentStore
+    store = BoardFluentStore(request.app.state.board_fluent_db_path, readonly=True)
+    current = _selected_generation(store)
+    return {'generations': _generation_catalog(store), 'current_generation_id': (current or {}).get('generation_id'),
+        **_scope_metadata(current)}
 
 
 @router.get('/catalog')
@@ -151,12 +217,15 @@ def catalog(request: Request, kind: str | None = None, current: bool = True, as_
             fields = ('board_id', 'name', 'kind', 'source', 'taxonomy', 'observed_at', 'available_at',
                 'snapshot_hash', 'expected_count', 'membership_scope', 'source_member_count', 'excluded_source_members')
             return {'boards': [{**{key: row.get(key) for key in fields}, 'member_count': len(row['members'])} for row in rows],
-                'current': current, 'as_of': as_of}
+                'current': current, 'as_of': as_of, 'source_evidence_only': True,
+                'membership_basis': 'immutable_source_snapshot'}
         except ValueError as exc: raise HTTPException(422, str(exc)) from exc
 
 
 @router.get('/stocks/{symbol}')
-def stock_boards(symbol: str, request: Request, current: bool = True, as_of: str | None = None):
+def stock_boards(symbol: str, request: Request, current: bool = True, as_of: str | None = None,
+                 generation_id: str | None = None):
+    if generation_id and not current: raise HTTPException(422, '历史发布版本不能与因果日期查询混用')
     if getattr(request.app.state, 'board_integrated', False) and current:
         if as_of is not None: raise HTTPException(422, '当前成员与历史 as_of 不能混用')
         from my_strategy.storage.board_knowledge import normalize_stock
@@ -164,12 +233,15 @@ def stock_boards(symbol: str, request: Request, current: bool = True, as_of: str
         try: symbol = normalize_stock(symbol.upper())
         except ValueError as exc: raise HTTPException(422, str(exc)) from exc
         fluent = BoardFluentStore(request.app.state.board_fluent_db_path, readonly=True)
-        row = fluent.stock(symbol)
+        generation = _selected_generation(fluent, generation_id)
+        row = fluent.stock(symbol, generation_id=generation['generation_id']) if generation else None
         identifiers = set((row or {}).get('board_ids', (row or {}).get('concept_ids', [])))
         if row and row.get('industry_id'): identifiers.add(row['industry_id'])
         boards = [fluent.board(identifier, generation_id=row['generation_id'], include_structure=False) for identifier in sorted(identifiers)]
         return {'symbol': symbol, 'boards': [b for b in boards if b], 'features': row,
-            'needs_rebuild': row is None or _fluent_stale(request, row), 'current': True, 'feature_reference': 'basic_fluent', 'price_date_is_frozen': True}
+            **_scope_metadata(generation, explicit=bool(generation_id)),
+            'needs_rebuild': row is None or (not generation_id and _fluent_stale(request, row)),
+            'current': not bool(generation_id), 'feature_reference': 'basic_fluent', 'price_date_is_frozen': True}
     with _store(request) as store:
         try:
             result = store.stock_boards(symbol.upper(), as_of=as_of, current=current)
@@ -188,13 +260,19 @@ def stock_boards(symbol: str, request: Request, current: bool = True, as_of: str
 
 
 @router.get('/features/{board_id}')
-def board_features(board_id: str, request: Request, date: str | None = None, current: bool = True):
+def board_features(board_id: str, request: Request, date: str | None = None, current: bool = True,
+                   generation_id: str | None = None):
+    if generation_id and not current: raise HTTPException(422, '历史发布版本不能与因果日期查询混用')
     if getattr(request.app.state, 'board_integrated', False) and current:
         from my_strategy.storage.board_fluent import BoardFluentStore
-        row = BoardFluentStore(request.app.state.board_fluent_db_path, readonly=True).board(board_id)
+        store = BoardFluentStore(request.app.state.board_fluent_db_path, readonly=True)
+        generation = _selected_generation(store, generation_id)
+        row = store.board(board_id, generation_id=generation['generation_id']) if generation else None
         if date and row and row['price_date'] != _feature_cutoff(date)[1]: row = None
         return {'board_id': board_id, 'features': row, 'available': row is not None,
-            'needs_rebuild': row is None or _fluent_stale(request, row), 'feature_reference': 'basic_fluent', 'price_date_is_frozen': True}
+            **_scope_metadata(generation, explicit=bool(generation_id)),
+            'needs_rebuild': row is None or (not generation_id and _fluent_stale(request, row)),
+            'feature_reference': 'basic_fluent', 'price_date_is_frozen': True}
     with _store(request) as store:
         try:
             cutoff, day = _feature_cutoff(date) if date else (None, None)
@@ -246,16 +324,14 @@ async def build_features(spec: FeatureBuildSpec, request: Request):
         if spec.symbols: raise HTTPException(422, '板块发布须完整股票池，不能限定个股')
         return submit_compute(request, 'legacy', 'board_features', spec.model_dump(exclude={'symbols'}))
     def work(progress):
-        from my_strategy.adapters.czsc_adapter import _connection
-        from my_strategy.services.czsc_trend_support import _calendar, VERIFIED_SOURCES
+        from my_strategy.services.czsc_trend_support import _calendar
+        from my_strategy.services.board_fluent import latest_qualified_price_date
         from my_strategy.services.board_features import build_board_features
         calendar, calendar_id = _calendar(None)
         raw_path = getattr(request.app.state, 'board_raw_db_path', None)
         day = spec.price_date
         if day is None:
-            with _connection(raw_path) as connection:
-                day = connection.execute('SELECT MAX(date) FROM stock_daily_normalized WHERE has_trade_price=1 AND source IN (' +
-                    ','.join('?' for _ in VERIFIED_SOURCES) + ')', sorted(VERIFIED_SOURCES)).fetchone()[0]
+            day = latest_qualified_price_date(raw_path)
         if not day: raise ValueError('没有已核验的本地行情日期')
         if day not in calendar: raise ValueError('行情日期不在已核验交易日历中')
         progress({'status': 'running', 'completed': 0, 'total': 1})
@@ -298,11 +374,11 @@ def rankings(request: Request, kind: Literal['industry', 'concept'] = 'industry'
              generation_id: str | None = None):
     from my_strategy.storage.board_fluent import BoardFluentStore
     store = BoardFluentStore(request.app.state.board_fluent_db_path, readonly=True)
-    generation = store.get_generation(generation_id) if generation_id else store.current_generation()
+    generation = _selected_generation(store, generation_id)
     rows = store.rankings(kind, ranking_type, min(30, max(1, limit)), generation_id=generation['generation_id']) if generation else []
     return {'rankings': rows, 'generation_id': (generation or {}).get('generation_id'),
         'price_date': (generation or {}).get('price_date'), 'training_eligible': False,
-        'capital_basis': 'turnover_amount_proxy'}
+        'capital_basis': 'turnover_amount_proxy', **_scope_metadata(generation, explicit=bool(generation_id))}
 
 
 @router.get('/capital-visualization')
@@ -312,13 +388,14 @@ def capital_visualization(request: Request, kind: Literal['industry', 'concept']
     """Visualize stored rows only; no price reads, rebuilds or network fetches."""
     from my_strategy.storage.board_fluent import BoardFluentStore
     store=BoardFluentStore(request.app.state.board_fluent_db_path,readonly=True)
-    generation=store.get_generation(generation_id) if generation_id else store.current_generation()
+    generation=_selected_generation(store,generation_id)
     population=store.boards(kind,generation['generation_id']) if generation else []
     def finite(value):
         return isinstance(value,(int,float)) and not isinstance(value,bool) and math.isfinite(value)
     fields=('board_id','name','kind','board_amount','board_return_1','board_market_amount_share',
         'board_relative_amount20','coverage','expected_members','effective_members','price_date',
-        'membership_date','snapshot_hash','generation_id','capital_visualization')
+        'membership_date','snapshot_hash','generation_id','capital_visualization','calculation_scope',
+        'calculation_membership')
     available=[row for row in population if finite(row.get('board_amount')) and row['board_amount']>=0]
     def change(row):return (row.get('capital_visualization') or {}).get('amount_change_1')
     def rank_value(row):
@@ -339,7 +416,8 @@ def capital_visualization(request: Request, kind: Literal['industry', 'concept']
         'generation_id':(generation or {}).get('generation_id'),'price_date':(generation or {}).get('price_date'),
         'membership_date':(generation or {}).get('membership_date'),'kind':kind,'sort_by':sort_by,
         'board_count':len(population),'available_board_count':len(available),'prepared_board_count':prepared,
-        'market_amount':market_amount,'needs_rebuild':bool(available and prepared<len(available)),
+        **_scope_metadata(generation, explicit=bool(generation_id)),
+        'market_amount':market_amount,'needs_rebuild':generation is None or bool(available and prepared<len(available)),
         'capital_basis':'turnover_amount_proxy','training_eligible':False,
         'membership_basis':'fixed_current_snapshot_historical_price_comparison',
         'comparison_basis':'same_verified_members_on_both_days',
@@ -349,7 +427,12 @@ def capital_visualization(request: Request, kind: Literal['industry', 'concept']
 @router.get('/detail/{board_id}')
 def detail(board_id: str, request: Request, generation_id: str | None = None):
     from my_strategy.storage.board_fluent import BoardFluentStore
-    row = BoardFluentStore(request.app.state.board_fluent_db_path, readonly=True).board(board_id, generation_id or None)
+    from my_strategy.services.board_calculation_scope import CALCULATION_SCOPE, verify_calculation_membership
+    fluent = BoardFluentStore(request.app.state.board_fluent_db_path, readonly=True)
+    generation = _selected_generation(fluent, generation_id)
+    if generation is None:
+        return {'features': None, 'members': [], 'membership_matches_generation': False, **_scope_metadata()}
+    row = fluent.board(board_id, generation['generation_id'])
     if row is None: raise HTTPException(404, '该发布版本没有此板块')
     with _store(request) as store:
         # Exact stored membership SHA ties details to the selected immutable generation.
@@ -357,8 +440,18 @@ def detail(board_id: str, request: Request, generation_id: str | None = None):
             snapshot_row = connection.execute('SELECT * FROM board_snapshots WHERE snapshot_hash=?',
                 (row['snapshot_hash'],)).fetchone() if connection else None
             snapshot = store._verified_snapshot(connection, snapshot_row) if snapshot_row else None
-    return {'features': row, 'members': snapshot['members'] if snapshot else [],
-        'membership_matches_generation': snapshot is not None}
+    projection = None
+    if row.get('calculation_scope') == CALCULATION_SCOPE:
+        try:
+            projection = verify_calculation_membership(row.get('calculation_membership'), snapshot=snapshot)
+            if projection['source_snapshot_hash'] != row['snapshot_hash'] or projection['board_id'] != board_id:
+                raise ValueError('projection does not match stored row')
+        except (ValueError, TypeError, KeyError) as exc:
+            raise HTTPException(409, '该版本的计算成员投影核验失败，保持不可用') from exc
+    return {'features': row, 'members': projection['eligible_members'] if projection else snapshot['members'] if snapshot else [],
+        'membership_matches_generation': projection is not None or snapshot is not None,
+        'source_members': snapshot['members'] if snapshot else [], 'source_membership_available': snapshot is not None,
+        'calculation_membership': projection, **_scope_metadata(generation, explicit=bool(generation_id))}
 
 
 class SyncSpec(BaseModel):

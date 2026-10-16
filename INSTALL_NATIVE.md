@@ -1,6 +1,6 @@
-# KHQuant v1.0.0 原生安装
+# KHQuant v1.0.1 原生安装
 
-安装 Python 3.12，下载本版 `KHQuant-1.0.0.zip`，按 `SHA256SUMS.txt` 核验并解压。不要把上一版本的安装证明用于本版。
+安装 Python 3.12，下载本版 `KHQuant-1.0.1.zip`，按 `SHA256SUMS.txt` 核验并解压。不要把上一版本的安装证明用于本版。
 
 Windows x64：`py -3.12 install.py --device auto`，随后 `.\khquant-native.bat dashboard`。
 Apple Silicon macOS / Linux x64：`python3.12 install.py --device auto`，随后 `./khquant-native.sh dashboard`。
@@ -32,6 +32,8 @@ khquant light-research status
 上面的Python须来自已安装虚拟环境。原始行情、核验日历、个人账户及必要模型按原业务目录迁移，升级前保留 `.env`。普通代码打包排除这些状态。需要私有迁移时明确选择数据范围，不能将私有迁移包作为公开Release资产。
 
 ## 本版安装验证
+
+本版最终发行资产的 Windows、Linux 与 macOS 安装验证目前待完成；CPU/MPS 分别记录实际结果，不能沿用 v1.0.0 或开发机的通过状态。公开验证门槛见 [RELEASE_VALIDATION.md](RELEASE_VALIDATION.md)。
 
 最终安装probe从site-packages导入应用，验证本版版本、wheel SHA、原生来源、五个主入口、轻量API和隔离合成账户。它实际训练小MLP、验证同输入L2、原生跨日等价、风险卖出与续算；不会读取真实行情或业务模型。
 

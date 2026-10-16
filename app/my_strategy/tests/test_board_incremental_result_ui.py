@@ -36,7 +36,7 @@ const completed={job_id:'new-fill',kind:'incremental',status:'succeeded',created
 const cancelled={job_id:'old-sync',kind:'board_sync',status:'cancelled',updated_at:'2026-10-15T10:23:00+08:00',progress_detail:{stage:'raw_identity',current:2600960},error:'用户取消任务'};
 const summary=job=>Object.fromEntries(Object.entries(job).filter(([k])=>k!=='result'));
 const response=value=>({ok:true,status:200,json:async()=>value});
-const status=g=>({fluent:{market:{generation_id:g,price_date:'2026-10-14'}}});
+const status=g=>({fluent:{market:{generation_id:g,calculation_scope:'sh_sz_a_v1',price_date:'2026-10-14'}}});
 let generation='g2',lightJobs=[summary(completed)],oldJobs=[cancelled];
 async function defaults(path,options={}){
  calls.push({path,method:options.method||'GET'});
