@@ -188,6 +188,44 @@ def verify_v101_api(base: str) -> dict:
         maintenance_routes=sorted(required))
 
 
+
+def verify_v102_views(report: dict) -> dict:
+    """Fail closed on missing or contradictory installed read-only evidence."""
+    expected = dict(schema='readonly_method_views_installation_v1', status='passed',
+        fixture='synthetic_installation_only', production_state_touched=False,
+        work_submitted=False, inference_calls=0, readonly_state_unchanged=True,
+        navigation=dict(status='passed', accounts_in_watchlist=True, simulation_in_watchlist=True,
+            prediction_history_controls=True, separate_method_source_layers=True, board_method_panel=True),
+        prediction_chart=dict(status='passed', history_rows=128, forecast_rows=5, requested_samples=32,
+            retained_diagnostic_samples=8, outer_ref_required=True, full_sample_summary_preserved=True,
+            cutoff_preserved=True, revised_history_unavailable=True, low_quality_preserved=True, expired_ref_rejected=True),
+        method_display=dict(status='passed', methods=list(COMBINED_METHODS), cutoff_only=True,
+            invalid_direction_null=True, legacy_semantics_preserved=True),
+        board_summary=dict(status='passed', population=6, counts=dict(expected=6, matched=6, complete=3, buy=1, sell=1, wait=1,
+            unavailable=1, failed=1, deferred=1, not_in_scan=0), board_expected=7,
+            board_not_in_scan=1, excluded_members=1, full_population_pagination=True, exact_filters=True,
+            mismatched_binding_rejected=True, historical_membership_verified=False))
+    def match(actual, wanted, location):
+        if type(actual) is not type(wanted):
+            raise RuntimeError('Installed v1.0.2 evidence type differs: '+location)
+        if isinstance(wanted, dict):
+            for key, value in wanted.items():
+                if key not in actual: raise RuntimeError('Installed v1.0.2 evidence is missing: '+location+'.'+key)
+                match(actual[key], value, location+'.'+key)
+        elif actual != wanted:
+            raise RuntimeError('Installed v1.0.2 evidence differs: '+location)
+    match(report, expected, 'v102_views')
+    return report
+
+
+def verify_v102_navigation(html: str) -> dict:
+    from importlib.util import module_from_spec, spec_from_file_location
+    path=Path(__file__).with_name('verify_views_installation.py').resolve()
+    spec=spec_from_file_location('_khquant_installed_view_navigation',path)
+    module=module_from_spec(spec);spec.loader.exec_module(module)
+    return module.navigation_probe(html)
+
+
 def model_probe(device: str) -> dict:
     """Exercise the current numeric model without creating a qualified registry entry."""
     current = reference_model_probe(device)
@@ -494,6 +532,7 @@ print(json.dumps({'version':distribution.version,'package_path':str(path),'prefi
     model = command(str(Path(__file__).resolve()), "--internal-probe", "--device", device)
     lightweight = verify_lightweight_probe(command(str(Path(__file__).with_name('verify_agent_installation.py').resolve()),
         '--internal-probe','--device',device),device)
+    v102_views = command(str(Path(__file__).with_name('verify_views_installation.py').resolve()))
     command("-m", "my_strategy.cli", "update-data", "--help", json_output=False)
     command("-m", "my_strategy.cli", "train-reference", "--help", json_output=False)
     command("-m", "my_strategy.cli", "light-research", "--help", json_output=False)
@@ -530,6 +569,8 @@ print(json.dumps({'version':distribution.version,'package_path':str(path),'prefi
                     if "<html" not in request(base, "/" + page).lower():
                         raise RuntimeError(f"Missing installed dashboard page: {page}")
                 navigation = verify_primary_navigation(request(base,'/'))
+                v102_views['navigation'] = verify_v102_navigation(request(base, '/'))
+                verify_v102_views(v102_views)
                 lightweight_api = verify_lightweight_api(base)
                 v101_api = verify_v101_api(base)
                 for path, method, body in retired_routes:
@@ -551,7 +592,7 @@ print(json.dumps({'version':distribution.version,'package_path':str(path),'prefi
     report = {"status": "passed", "python": sys.executable, "state": str(state), "device": device,
               "application_identity": identity, "doctor": doctor, "model": model,
               "lightweight_v1": lightweight, "lightweight_api":lightweight_api,
-              "v101_api": v101_api,
+              "v101_api": v101_api, "v102_views": v102_views,
               "primary_navigation":navigation, "lightweight_entrypoint":True,
               "training_center": training_center, "dashboard_pages": list(pages), "watchlist_restart": True,
               "retired_routes_rejected": [f"{method} {path}" for path, method, _ in retired_routes],

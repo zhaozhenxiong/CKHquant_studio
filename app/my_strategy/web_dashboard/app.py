@@ -28,7 +28,7 @@ def create_app(task_manager: TaskManager | None = None, personal_store: Personal
         await asyncio.to_thread(app.state.light.close)
         await asyncio.to_thread(manager.close)
 
-    app = FastAPI(title="KHQuant CZSC 结构研究", version="1.0.1", lifespan=lifespan)
+    app = FastAPI(title="KHQuant CZSC 结构研究", version="1.0.2", lifespan=lifespan)
     app.state.tasks = manager
     app.state.compute_submit_lock = threading.Lock()
     app.state.training = manager.training

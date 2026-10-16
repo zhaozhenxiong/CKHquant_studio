@@ -105,11 +105,12 @@ const lightSource=fs.readFileSync(path.join(process.argv[1],'light_research.js')
 vm.runInThisContext(lightSource);
 element('light-feature-profile').value='ma_trend_v1';element('light-score-type').value='l2';element('light-score-variant').value='B';lightUI.updateFeatureControls();
 assert.equal(element('light-score-type').value,'mlp');assert.equal(element('light-score-variant').value,'A');assert(element('light-score-type').disabled);assert(element('light-observe-panel').hidden);
-element('light-symbols').value='002436.SZ';element('light-score-end').value='2025-12-31';
+element('light-training-symbols').value='002436.SZ';element('light-score-end').value='2025-12-31';
 await fire('light-train','click');assert.equal(submitted[0].spec.feature_profile,'ma_trend_v1');assert.equal(submitted[0].spec.model_type,'mlp');assert.equal(submitted[0].spec.variant,'A');
 element('analysis-mode').value='structure_kronos_ma_l2';element('analysis-symbol').value='002436.SZ';element('analysis-start').value='2026-01-01';element('analysis-end').value='2026-10-12';element('analysis-score-model').value='frozen-ma';
 for(const [key,value] of Object.entries({lookback:'256',horizon:'10',samples:'32',seed:'7',device:'cpu',budget:'120','max-predictions':'1'}))element('analysis-'+key).value=value;
 const before=submitted.length;await fire('open-light-analysis','click');assert.equal(submitted.length,before);assert.equal(location.hash,'simulation');
+await fire('open-account-analysis','click');assert.equal(submitted.length,before);assert.equal(location.hash,'watchlist?tab=accounts');
 assert.equal(element('light-symbols').value,'002436.SZ');assert.equal(element('light-start').value,'2026-01-01');assert.equal(element('light-end').value,'2026-10-12');assert.equal(element('light-predict-date').value,'2026-10-12');assert.equal(element('light-score-model').value,'frozen-ma');assert.equal(element('light-seed').value,'7');
 assert(lightUI.accountLabel('structure_kronos_score',{lineage:{feature_profile:'ma_trend_v1'}}).includes('均线模型 MLP'));
 assert(lightUI.accountLabel('structure_kronos_score',{}).includes('历史融合'));
@@ -174,9 +175,9 @@ let submitted;global.fetch=async(url,options)=>{assert.equal(url,'/api/analysis'
 await workbench.analyze(KHQuantMethods.analysisContext());assert.equal(submitted.score_model_id,undefined);assert.equal(workbench.state.query.score_model_id,actualId);
 assert.equal(KHQuantMethods.analysisContext().score_model_id,actualId);
 vm.runInThisContext(fs.readFileSync(path.join(process.argv[1],'light_research.js'),'utf8'));
-await fire('open-light-analysis','click');assert.equal(element('light-score-model').value,actualId);
+await fire('open-account-analysis','click');assert.equal(element('light-score-model').value,actualId);
 element('analysis-end').value='2026-10-13';assert.equal(KHQuantMethods.analysisContext().score_model_id,undefined);
-await fire('open-light-analysis','click');assert.equal(element('light-score-model').value,'','edited context must clear the previously transferred model');
+await fire('open-account-analysis','click');assert.equal(element('light-score-model').value,'','edited context must clear the previously transferred model');
 element('analysis-end').value='2026-10-14';element('analysis-symbol').value='600519.SH';assert.equal(KHQuantMethods.analysisContext().score_model_id,undefined);
 ''')
 

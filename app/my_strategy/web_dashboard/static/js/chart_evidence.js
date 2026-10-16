@@ -15,6 +15,19 @@
   const isTrendConsensus = (row, config = null, version = '') => ['trend_consensus','reference_position_v1'].includes(consensusVersion(row,config,version));
   const referenceMode = (...records) => records.some((item) => item?.analysis_mode === 'reference' || item?.reference_only === true || item?.account_scope === 'none');
   const agentKeys = (row, consensus) => referenceMode(row,consensus) ? ['ma','structure','wyckoff'] : Object.keys(labels);
+  function methodMarkerInputs(result, symbol = result?.symbol) {
+    const view=result?.method_view, cutoff=date(result?.as_of || result?.data_end);
+    if(view?.schema!=='method_display_v1' || view.valid!==true || view.status!=='complete'
+        || view.method!==result.analysis_method || !view.method?.startsWith('structure_kronos')
+        || view.as_of!==cutoff || !['BUY','SELL'].includes(view.direction))return [];
+    return (view.method_reference_points || []).filter(point=>point.symbol===symbol && point.method===view.method
+      && point.reference_layer==='method' && point.action===view.direction && date(point.date)===cutoff
+      && finite(point.reference_price) && Number(point.reference_price)>0
+      && date(point.market_cutoff_at)===cutoff).slice(0,1).map(point=>({...point,
+        source:'method',source_frequency:'日线',reference_only:true,evidence_date:cutoff,
+        reference_display_label:`${view.label} · 方法 ${point.action==='BUY'?'B':'S'}`,
+        reference_price_date:cutoff,method_view:view}));
+  }
   function referenceMarkerInputs(result, symbol = result?.symbol) {
     if (!referenceMode(result)) return {events:[],valid:false};
     const cutoff = result?.as_of || result?.data_end;
@@ -30,7 +43,7 @@
     };
     const sources = (result.source_reference_points || []).filter((item) => visible(item,'source')).map((item) => ({...item,action:item.action || item.side,reference_layer:'source',source_frequency:'日线',evidence_date:date(item.first_available_at || item.available_at)}));
     const finals = (result.reference_points || []).filter((item) => visible(item,'consensus')).map((item) => ({...item,reference_layer:'consensus',source:'reference_consensus',source_frequency:item.source_frequency || '日线',evidence_date:date(item.first_available_at || item.available_at)}));
-    return {events:[...sources,...finals].sort((a,b) => String(a.first_available_at || a.available_at).localeCompare(String(b.first_available_at || b.available_at))),valid:true};
+    return {events:[...sources,...finals,...methodMarkerInputs(result,symbol)].sort((a,b) => String(a.first_available_at || a.available_at || a.market_cutoff_at).localeCompare(String(b.first_available_at || b.available_at || b.market_cutoff_at))),valid:true};
   }
   function trendProbabilities(item = {}) {
     item = item || {};
@@ -513,6 +526,8 @@
   function popupHtml({evidence,consensus,groups = [],barDate,frequency,selectedDate,profileAsOf}) {
     const context = {evidence,consensus,groups,barDate,selectedDate};
     const {dates,selected,row,decision,entries} = popupSelection(context), reference = referenceSelection(context);
+    const methodEntry=entries.find(entry=>entry.row?.reference_layer==='method'), methodView=methodEntry?.row?.method_view;
+    if(methodView) {const others=groups.filter(group=>!(group.entries||[]).some(entry=>entry.row?.reference_layer==='method'));return `<h3>${esc(methodView.label)} · 方法 ${methodView.direction==='BUY'?'B':'S'}</h3><p>${esc(methodView.as_of)} 截止日方向参考；不是首次触发、目标仓位或实际成交。</p><p>参考收盘价 ${num(methodEntry.row.reference_price)} · 输入截止 ${esc(methodEntry.row.market_cutoff_at)}</p><p>${methodView.score_valid ? `评分 ${num(methodView.score_value)} / 100` : '未使用可用评分'}${methodView.model?.model_id?` · 模型 ${esc(methodView.model.model_id)}`:''}</p><p class="subtle">按当日输入重建；实际发布时间 ${esc(methodView.timing?.actual_available_at||'未记录')}。未逐日生成的方法历史不回填。</p>${others.length?`<details><summary>同日来源与其他已选证据</summary>${popupHtml({evidence,consensus,groups:others,barDate,frequency,selectedDate,profileAsOf})}</details>`:''}`;}
     const inspection = groups.some((group) => group.kind === 'inspection');
     const sourceOnly = evidence?.structure_only === true || row?.structure_only === true;
     const visible = groups.filter((group) => group.visible !== false);
@@ -706,7 +721,7 @@
     return `<section class="source-reference-details"><h3>已确认来源 B/S ${sources.length} 条</h3>${sources.map(({row:event}) => `<p><strong>${esc(event.source_label || event.source)} ${event.action === 'SELL' || event.side === 'SELL' ? 'S · 卖方参考' : 'B · 买方参考'}${event.label ? ` · ${esc(event.label)}` : ''}</strong><br>首次可用 ${esc(event.first_available_at || event.available_at)}<br>参考价 ${num(event.reference_price)} 元 · ${esc(event.reference_price_date)}${finite(event.invalidation_price) ? `<br>来源失效价 ${num(event.invalidation_price)} 元` : ''}<br>${esc(event.source_relationship_text || (event.consensus_qualified ? '同日最终共识通过；来源与最终点分别记录' : '同日最终共识未通过；已确认来源参考独立保留'))}</p>`).join('')}</section>`;
   }
 
-  const api = {referenceMode,referenceMarkerInputs,esc,date,finite,probability,ruleScore,supportScore,consensusVersion,weightedConsensus,currentEvidenceConsensus,isTrendConsensus,trendProbabilities,referenceEvidence,positionHtml,positionSummaryHtml,referencePositionSummary,referencePositionBasis,referenceQualityView,referenceQualityHtml,referenceQualitySummaryHtml,sourcePointsHtml,rowAt,agentView,currentAgentView,riskDetails,structureFacts,highReturnState,agentsHtml,agentOverviewHtml,judgmentLabel,opinionReasons,opinionHtml,consensusAt,mergeEvidenceRows,finalSide,consensusHtml,diagnosticsHtml,popupSelection,referenceSelection,rawEventsHtml,referenceHtml,groupDates,popupHtml,historyPage,historyHtml,statisticsHtml,selectionTransition};
+  const api = {referenceMode,referenceMarkerInputs,methodMarkerInputs,esc,date,finite,probability,ruleScore,supportScore,consensusVersion,weightedConsensus,currentEvidenceConsensus,isTrendConsensus,trendProbabilities,referenceEvidence,positionHtml,positionSummaryHtml,referencePositionSummary,referencePositionBasis,referenceQualityView,referenceQualityHtml,referenceQualitySummaryHtml,sourcePointsHtml,rowAt,agentView,currentAgentView,riskDetails,structureFacts,highReturnState,agentsHtml,agentOverviewHtml,judgmentLabel,opinionReasons,opinionHtml,consensusAt,mergeEvidenceRows,finalSide,consensusHtml,diagnosticsHtml,popupSelection,referenceSelection,rawEventsHtml,referenceHtml,groupDates,popupHtml,historyPage,historyHtml,statisticsHtml,selectionTransition};
   api.highReturnTargetText = highReturnTargetText;
   root.KHQuantChartEvidence = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

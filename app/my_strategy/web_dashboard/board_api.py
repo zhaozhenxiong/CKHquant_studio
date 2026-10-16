@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 import math
 import re
+import sqlite3
 import threading
 from typing import Literal
 import uuid
@@ -528,3 +529,77 @@ def cancel(job_id: str, request: Request):
     result = request.app.state.tasks.get(job_id)
     if not result['kind'].startswith('board_'): raise HTTPException(404, '找不到板块任务')
     return request.app.state.tasks.cancel(job_id)
+
+
+# These display endpoints read complete saved method reports. They do not invoke
+# board feature/native producers, initialize an index or start a compute task.
+_Method = Literal['structure_kronos', 'structure_kronos_ma_mlp', 'structure_kronos_ma_l2']
+_MethodCategory = Literal['all', 'buy', 'sell', 'wait', 'unavailable', 'failed', 'deferred', 'not_in_scan']
+_method_readers_lock = threading.Lock()
+
+
+def _method_reader(request):
+    from my_strategy.services.board_method_summary import BoardMethodSummary
+    from my_strategy.core.paths import ARTIFACT_RUNS_ROOT, PROCESSED_DATA_ROOT
+    manager = getattr(request.app.state, 'tasks', None)
+    results = getattr(manager, 'results', None)
+    db = getattr(results, 'db_path', PROCESSED_DATA_ROOT / 'czsc' / 'results.db')
+    runs = getattr(results, 'runs_root', ARTIFACT_RUNS_ROOT)
+    kb = getattr(request.app.state, 'board_db_path', None)
+    key = (str(db), str(runs), str(kb))
+    with _method_readers_lock:
+        existing = getattr(request.app.state, 'board_method_reader', None)
+        if existing is None or existing[0] != key:
+            existing = (key, BoardMethodSummary(db, runs, kb))
+            request.app.state.board_method_reader = existing
+        return existing[1]
+
+
+def _method_read(call):
+    try:
+        return call()
+    except (KeyError, FileNotFoundError) as exc:
+        raise HTTPException(404, {'code': 'saved_method_result_missing', 'message': '所选保存结果或板块成员不存在'}) from exc
+    except (ValueError, TypeError, sqlite3.DatabaseError, OSError) as exc:
+        raise HTTPException(409, {'code': 'saved_method_identity_invalid', 'message': '保存结果或成员身份核验失败，未执行计算'}) from exc
+
+
+def _method_symbols(value):
+    if value is None:
+        return None
+    parts = value.split(',') if value else []
+    if any(re.fullmatch(r'(?:6\d{5}\.SH|[03]\d{5}\.SZ)', item) is None for item in parts):
+        raise HTTPException(422, '股票筛选必须使用规范沪深 A 股代码')
+    return set(parts)
+
+
+@router.get('/method-scans')
+def method_scans(request: Request, method: _Method, as_of: str = Query(pattern=r'^\d{4}-\d{2}-\d{2}$'),
+                 page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100)):
+    return _method_read(lambda: _method_reader(request).list_runs(method=method, as_of=as_of, page=page, page_size=page_size))
+
+
+@router.get('/method-scans/{run_id}/stocks')
+def method_scan_stocks(request: Request, run_id: str, method: _Method,
+                       as_of: str = Query(pattern=r'^\d{4}-\d{2}-\d{2}$'), page: int = Query(default=1, ge=1),
+                       page_size: int = Query(default=40, ge=1, le=100), q: str = Query(default='', max_length=200),
+                       category: _MethodCategory = 'all', symbols: str | None = Query(default=None, max_length=120000)):
+    selected = _method_symbols(symbols)
+    return _method_read(lambda: _method_reader(request).stocks(run_id, method=method, as_of=as_of,
+        page=page, page_size=page_size, query=q, category=category, symbols=selected))
+
+
+@router.get('/method-scans/{run_id}/members')
+def method_scan_members(request: Request, run_id: str, method: _Method, board_id: str = Query(min_length=1, max_length=100),
+                        as_of: str = Query(pattern=r'^\d{4}-\d{2}-\d{2}$'), page: int = Query(default=1, ge=1),
+                        page_size: int = Query(default=40, ge=1, le=100), q: str = Query(default='', max_length=200),
+                        category: _MethodCategory = 'all', symbols: str | None = Query(default=None, max_length=120000)):
+    selected = _method_symbols(symbols)
+    return _method_read(lambda: _method_reader(request).summary(run_id, method=method, as_of=as_of,
+        board_id=board_id, page=page, page_size=page_size, query=q, category=category, symbols=selected))
+
+
+@router.get('/method-scans/{run_id}')
+def method_scan_summary(request: Request, run_id: str, method: _Method,
+                        as_of: str = Query(pattern=r'^\d{4}-\d{2}-\d{2}$')):
+    return _method_read(lambda: _method_reader(request).summary(run_id, method=method, as_of=as_of))

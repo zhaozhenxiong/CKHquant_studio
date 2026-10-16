@@ -512,7 +512,9 @@ async def analysis(spec: AnalysisRequest, request: Request):
     def calculate():
         with compute_submission(request):
             return calculate_guarded()
-    return await asyncio.to_thread(calculate)
+    result = await asyncio.to_thread(calculate)
+    from my_strategy.services.method_display import with_method_view
+    return with_method_view(result)
 
 
 @router.get("/tasks")
@@ -576,7 +578,11 @@ def run(run_id: str, request: Request, view: Literal["scan"] | None = None,
     if indexed[0] not in {"analysis", "scan", "update", "model_training", "model_validation", "current_train", "current_validation", "board_features", "board_sync", "board_knowledge"}:
         raise HTTPException(status_code=404, detail="运行不存在")
     if view is None:
-        return store.get(run_id)
+        result = store.get(run_id)
+        if indexed[0] == 'analysis':
+            from my_strategy.services.method_display import with_method_view
+            return with_method_view(result)
+        return result
     if indexed[0] != "scan":
         raise HTTPException(status_code=422, detail="紧凑扫描视图仅适用于扫描运行")
     return store.get_scan_page(run_id,page=page,page_size=page_size,query=q,category=category,

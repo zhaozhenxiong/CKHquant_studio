@@ -30,6 +30,7 @@
     $('scan-stock-panel').hidden=board; $('scan-board-panel').hidden=!board; $('start-scan').hidden=board;
     $('scan-stock-tab').setAttribute('aria-selected',String(!board)); $('scan-board-tab').setAttribute('aria-selected',String(board));
     sessionStorage.setItem('khquant_scan_tab',board?'board':'stock');
+    globalThis.KHQuantBoardMethods?.onRoute(board);
     if(board && !loaded)refresh().catch(error);
   }
   function renderStatus(status) {

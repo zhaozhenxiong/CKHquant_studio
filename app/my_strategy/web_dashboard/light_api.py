@@ -170,6 +170,17 @@ def status(request:Request):
 def predict(spec:PredictionSpec,request:Request):
     return submit_compute(request,'light','prediction',spec.model_dump(mode='json',exclude_none=True))
 
+@router.get('/predictions/{prediction_ref}/chart')
+def prediction_chart(prediction_ref:str,request:Request):
+    from my_strategy.services.prediction_chart import (
+        prediction_chart as read_chart, PredictionChartNotFound, PredictionChartIntegrityError)
+    try:
+        return read_chart(request.app.state.light,prediction_ref)
+    except PredictionChartNotFound:
+        raise HTTPException(404,{'code':'prediction_not_found','message':'预测结果不存在、引用类型不正确或已过留存期；未重新计算。'})
+    except PredictionChartIntegrityError as exc:
+        raise HTTPException(409,{'code':'prediction_integrity_failed','message':str(exc)})
+
 @router.post('/simulate',status_code=202)
 def simulate(spec:SimulationSpec,request:Request):
     return submit_compute(request,'light','simulation',spec.model_dump(mode='json'))

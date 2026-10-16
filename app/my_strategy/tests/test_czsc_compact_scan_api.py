@@ -84,7 +84,12 @@ def test_position_and_source_projection_does_not_invent_recommendations():
 def test_compact_view_only_projects_scans(client, kind):
     client, store = client; source = {"run_id": "other-run", "rows": [{"raw": [1., 2.]}]}
     store.save(kind, source)
-    assert client.get("/api/runs/other-run").json() == source
+    result = client.get("/api/runs/other-run").json()
+    if kind == "analysis":
+        assert result.pop("method_view")["status"] == "not_applicable"
+        assert result.pop("method_reference_points") == []
+    assert result == source
+    assert store.get("other-run") == source
     assert client.get("/api/runs/other-run?view=scan").status_code == 422
 
 

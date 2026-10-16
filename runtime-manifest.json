@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "application_version": "1.0.1",
+  "application_version": "1.0.2",
   "method": "CZSC",
   "version": "1.0.1",
   "source_manifest": "app/czsc-source-manifest.json",
@@ -62,7 +62,12 @@
     "indexed-hot-data-status",
     "paged-saved-scan-view",
     "bounded-shared-source-scheduling",
-    "protected-backup-and-restore"
+    "protected-backup-and-restore",
+    "watchlist-account-workspace",
+    "verified-history-and-forecast-chart",
+    "cutoff-method-direction-layer",
+    "full-population-method-screening",
+    "saved-scan-board-method-summary"
   ],
   "python": "3.12",
   "devices": [
@@ -71,12 +76,12 @@
     "cuda"
   ],
   "platform_verification": {
-    "macos_arm64_cpu": "pending_1_0_1_exact_installed_asset_verification",
-    "macos_arm64_mps": "pending_1_0_1_exact_installed_asset_verification",
-    "windows_x64_cpu": "pending_1_0_1_exact_installed_asset_verification",
-    "linux_x64_cpu": "pending_1_0_1_exact_installed_asset_verification",
-    "windows_x64_cuda": "not_verified_1_0_1",
-    "linux_x64_cuda": "not_verified_1_0_1",
+    "macos_arm64_cpu": "pending_1_0_2_exact_installed_asset_verification",
+    "macos_arm64_mps": "pending_1_0_2_exact_installed_asset_verification",
+    "windows_x64_cpu": "pending_1_0_2_exact_installed_asset_verification",
+    "linux_x64_cpu": "pending_1_0_2_exact_installed_asset_verification",
+    "windows_x64_cuda": "not_verified_1_0_2",
+    "linux_x64_cuda": "not_verified_1_0_2",
     "macos_x64": "not_in_release_matrix"
   },
   "verification_report": "release-validation.json",
@@ -87,16 +92,16 @@
   "runs": "artifacts/runs",
   "legacy_compatibility": false,
   "previous_release_verification": {
-    "application_version": "1.0.0",
-    "release_url": "https://github.com/zhaozhenxiong/CKHquant_studio/releases/tag/v1.0.0"
+    "application_version": "1.0.1",
+    "release_url": "https://github.com/zhaozhenxiong/CKHquant_studio/releases/tag/v1.0.1"
   },
   "verification_scope": {
     "financial_certification": false,
     "source_commit_binding": "release_manifest_generated_from_actual_release_checkout",
-    "version_1_0_1": "pending_exact_installed_asset_and_platform_validation"
+    "version_1_0_2": "pending_exact_installed_asset_and_platform_validation"
   },
   "software_release": {
-    "version": "1.0.1",
+    "version": "1.0.2",
     "status": "pending_exact_merged_source_and_installed_asset_validation",
     "authorized_by": "user",
     "parameter_policy": "frozen_research_candidates_no_automatic_promotion",
@@ -126,7 +131,7 @@
   "model_qualification": {
     "research_only": true,
     "independent_forward_validation_complete": false,
-    "ordinary_routes": "structure_sources_and_explicit_simulation",
+    "ordinary_routes": "structure_sources_method_forecasts_and_explicit_watchlist_accounts",
     "production_qualification": "pending",
     "publication_allowed": false,
     "training_models_published": false,
@@ -141,7 +146,7 @@
     "contains_trained_models": false,
     "contains_personal_data": false,
     "local_model_baseline_published": false,
-    "tag": "v1.0.1",
+    "tag": "v1.0.2",
     "source_commit_binding": "release.json.git_revision_generated_from_exact_release_checkout",
     "contains_research_ledgers": false
   },
