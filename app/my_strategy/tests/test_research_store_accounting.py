@@ -151,7 +151,10 @@ def test_open_descriptor_preserves_complete_verified_bytes_after_gc_unlink(tmp_p
 def test_missing_active_file_is_corruption_not_hidden_as_gc_miss(tmp_path):
     with ResearchStore(tmp_path) as store:
         receipt = store.put({'n': 1}, {'value': 2})
-        store._path(receipt['sha256']).unlink()
+        path = store._path(receipt['sha256'])
+        # Deliberately corrupt the fixture; Windows cannot unlink a read-only CAS object.
+        path.chmod(path.stat().st_mode | 0o200)
+        path.unlink()
         with pytest.raises(FileNotFoundError):
             store.get_by_key(receipt['cache_key'], touch=False)
 

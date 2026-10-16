@@ -110,16 +110,30 @@ def safe_source_path(path: Path) -> bool:
 
 def stable_source_bytes(path: Path) -> bytes:
     if not safe_source_path(path): raise ValueError('linked or external source path')
-    fd = os.open(path, os.O_RDONLY | getattr(os,'O_NOFOLLOW',0))
+    flags = os.O_RDONLY | getattr(os,'O_NOFOLLOW',0)
+    identity = lambda value: (value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
+    path_identity = lambda value: (value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns)
+    fd = os.open(path, flags)
     with os.fdopen(fd,'rb') as handle:
         before = os.fstat(handle.fileno())
         if before.st_size > SOURCE_MAX_BYTES: raise ValueError('source exceeds snapshot size bound')
         content = handle.read(SOURCE_MAX_BYTES + 1)
         after = os.fstat(handle.fileno())
-    current = path.stat(follow_symlinks=False)
-    identity = lambda value: (value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
-    if not safe_source_path(path) or len(content) > SOURCE_MAX_BYTES or identity(before) != identity(after) or identity(after) != identity(current):
-        raise ValueError('source changed during snapshot read')
+        if (not safe_source_path(path) or len(content) > SOURCE_MAX_BYTES
+                or identity(before) != identity(after)
+                or path_identity(after) != path_identity(path.stat(follow_symlinks=False))):
+            raise ValueError('source changed during snapshot read')
+        # CPython 3.12 Windows path stat exposes creation time as st_ctime,
+        # while fstat exposes metadata ChangeTime. Compare ctime only between
+        # handles; retain the original handle so a replaced path cannot recycle
+        # its identity. Recheck links before and after the read-only reopen.
+        if not safe_source_path(path): raise ValueError('linked or external source path')
+        verification_fd = os.open(path, flags)
+        with os.fdopen(verification_fd,'rb') as verification:
+            current = os.fstat(verification.fileno())
+            if (identity(after) != identity(current) or not safe_source_path(path)
+                    or path_identity(current) != path_identity(path.stat(follow_symlinks=False))):
+                raise ValueError('source changed during snapshot read')
     return content
 
 

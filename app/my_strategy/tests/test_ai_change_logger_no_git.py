@@ -1,5 +1,6 @@
 """No-Git auditing must capture source changes without reading private trees."""
 import gzip
+import errno
 import importlib.util
 import json
 from pathlib import Path
@@ -60,18 +61,38 @@ def write(root,name,text):
     path=root/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text(text);return path
 
 
+def capture_diagnostic(value):
+    return json.dumps({key:value.get(key) for key in ('source_baseline','change_capture','changed_files')},
+                      ensure_ascii=False,indent=2)
+
+
+def complete_baseline(logger,session,expected):
+    baseline=json.loads(gzip.decompress((logger.PROJECT_ROOT/session['source_baseline']['snapshot_path']).read_bytes()))
+    assert baseline['complete'],capture_diagnostic(session)
+    assert set(baseline['files'])==set(expected),capture_diagnostic(session)
+    return baseline
+
+
+class StatView:
+    """Override one observed field without hiding any real stat fields."""
+    def __init__(self,value,**changes):
+        self.value=value;self.changes=changes
+    def __getattr__(self,name):
+        return self.changes[name] if name in self.changes else getattr(self.value,name)
+
+
 def test_real_no_git_start_finish_records_added_modified_deleted_redacted_diff(logger):
     root=logger.PROJECT_ROOT
     changed=write(root,'my_strategy/services/example.py','value = 1\napi_key = "old secret with spaces"\n')
     deleted=write(root,'my_strategy/docs/retired.md','old page\n')
     session=logger.start_session(agent='test',task='source audit')
     assert session['git_available'] is False and session['baseline_commit']=='NO_GIT'
-    baseline=json.loads(gzip.decompress((root/session['source_baseline']['snapshot_path']).read_bytes()))
-    assert baseline['complete'] and 'old secret with spaces' not in json.dumps(baseline)
+    baseline=complete_baseline(logger,session,{'my_strategy/services/example.py','my_strategy/docs/retired.md'})
+    assert 'old secret with spaces' not in json.dumps(baseline)
     changed.write_text('value = 2\napi_key = "new secret with spaces"\n')
     deleted.unlink();write(root,'my_strategy/storage/added.py','new = True\n')
     final=logger.finish_session(sid=session['session_id'],summary='done')
-    assert final['change_capture']['status']=='available'
+    assert final['change_capture']['status']=='available',capture_diagnostic(final)
     assert {item['path']:item['change'] for item in final['change_capture']['changes']}=={'my_strategy/services/example.py':'modified','my_strategy/docs/retired.md':'deleted','my_strategy/storage/added.py':'added'}
     note=(root/final['note_path']).read_text()
     assert '-value = 1' in note and '+value = 2' in note and 'secret with spaces' not in note
@@ -120,10 +141,11 @@ def test_snapshot_corruption_or_missing_source_is_not_zero_changes(logger):
 def test_source_read_failure_is_explicit_partial_not_false_complete(logger,monkeypatch):
     source=write(logger.PROJECT_ROOT,'my_strategy/services/good.py','x=1\n')
     session=logger.start_session(agent='test',task='partial')
+    complete_baseline(logger,session,{'my_strategy/services/good.py'})
     monkeypatch.setattr(logger,'SOURCE_MAX_BYTES',1)
     final=logger.finish_session(sid=session['session_id'])
-    assert final['change_capture']['status']=='partial' and final['change_capture']['errors']
-    assert not final['changed_files'] and final['change_capture']['unverifiable_paths']==['my_strategy/services/good.py']
+    assert final['change_capture']['status']=='partial' and final['change_capture']['errors'],capture_diagnostic(final)
+    assert not final['changed_files'] and final['change_capture']['unverifiable_paths']==['my_strategy/services/good.py'],capture_diagnostic(final)
     assert 'unknown files' in logger.CHANGELOG.read_text()
 
 
@@ -144,10 +166,11 @@ def test_source_replaced_with_symlink_is_unverifiable_and_never_read(logger):
     source=write(logger.PROJECT_ROOT,'my_strategy/services/good.py','x=1\n')
     private=write(logger.PROJECT_ROOT,'.env','PRIVATE_SECRET')
     session=logger.start_session(agent='test',task='replaced')
+    complete_baseline(logger,session,{'my_strategy/services/good.py'})
     source.unlink();source.symlink_to(private)
     final=logger.finish_session(sid=session['session_id'])
-    assert final['change_capture']['status']=='partial'
-    assert final['change_capture']['unverifiable_paths']==['my_strategy/services/good.py']
+    assert final['change_capture']['status']=='partial',capture_diagnostic(final)
+    assert final['change_capture']['unverifiable_paths']==['my_strategy/services/good.py'],capture_diagnostic(final)
     assert 'PRIVATE_SECRET' not in (logger.PROJECT_ROOT/final['note_path']).read_text()
 
 
@@ -193,7 +216,76 @@ def test_native_vendor_and_type_stub_changes_are_in_source_scope(logger):
     rust=write(logger.PROJECT_ROOT,'vendor/czsc/src/lib.rs','pub const VALUE: i32 = 1;\n')
     stub=write(logger.PROJECT_ROOT,'my_strategy/core/example.pyi','value: int\n')
     session=logger.start_session(agent='test',task='native source')
+    complete_baseline(logger,session,{'vendor/czsc/src/lib.rs','my_strategy/core/example.pyi'})
     rust.write_text('pub const VALUE: i32 = 2;\n');stub.write_text('value: float\n')
     final=logger.finish_session(sid=session['session_id'])
-    assert final['change_capture']['status']=='available'
+    assert final['change_capture']['status']=='available',capture_diagnostic(final)
     assert set(final['changed_files'])=={'vendor/czsc/src/lib.rs','my_strategy/core/example.pyi'}
+
+
+def test_windows_path_creation_time_differs_from_fstat_change_time(logger,monkeypatch):
+    source=write(logger.PROJECT_ROOT,'my_strategy/services/good.py','x=1\n')
+    original=Path.stat
+    def windows_path_stat(path,*args,**kwargs):
+        value=original(path,*args,**kwargs)
+        # CPython 3.12 Windows path stat reports creation time in st_ctime_ns;
+        # fstat reports ChangeTime. They can differ on a stable edited file.
+        return StatView(value,st_ctime_ns=value.st_ctime_ns-1_000_000) if path==source else value
+    monkeypatch.setattr(Path,'stat',windows_path_stat)
+    session=logger.start_session(agent='test',task='Windows timestamp semantics')
+    complete_baseline(logger,session,{'my_strategy/services/good.py'})
+    source.write_text('x=2\n')
+    final=logger.finish_session(sid=session['session_id'])
+    assert final['change_capture']['status']=='available',capture_diagnostic(final)
+    assert final['changed_files']==['my_strategy/services/good.py']
+    assert final['change_capture']['changes'][0]['change']=='modified'
+
+
+@pytest.mark.parametrize('failure,descriptor_count',[
+    (None,2),('read_ctime_changed',1),('reopen_denied',1),
+    ('reopened_identity_changed',2),('link_before_reopen',1),('link_after_reopen',2),
+    ('size_bound',1),('initial_stat_failed',1),('verification_stat_failed',2),
+    ('reopened_ctime_changed',2),
+])
+def test_stable_read_keeps_identity_checks_and_closes_all_descriptors(logger,monkeypatch,failure,descriptor_count):
+    source=write(logger.PROJECT_ROOT,'my_strategy/services/good.py','x=1\n')
+    real_open,real_fstat,real_safe=logger.os.open,logger.os.fstat,logger.safe_source_path
+    opened=[];stats=[]
+    def tracked_open(path,*args,**kwargs):
+        assert Path(path)==source
+        if failure=='reopen_denied' and opened:raise PermissionError('fixture reopen denied')
+        fd=real_open(path,*args,**kwargs);opened.append(fd);return fd
+    def observed_stat(fd):
+        value=real_fstat(fd);stats.append(value)
+        if (failure=='initial_stat_failed' and len(stats)==1
+                or failure=='verification_stat_failed' and len(stats)==3):
+            raise OSError('fixture stat failed')
+        # Simulate metadata-only mutation: common identity, size and mtime
+        # stay unchanged, so discarding ctime would wrongly accept this read.
+        if failure=='read_ctime_changed' and len(stats)==2:
+            return StatView(value,st_ctime_ns=value.st_ctime_ns+1)
+        if failure=='reopened_identity_changed' and len(stats)==3:
+            return StatView(value,st_ino=value.st_ino+1)
+        if failure=='reopened_ctime_changed' and len(stats)==3:
+            return StatView(value,st_ctime_ns=value.st_ctime_ns+1)
+        return value
+    def observed_boundary(path):
+        # Simulate an ancestor/leaf link appearing between the OS calls without
+        # requiring Windows to unlink a file while its read handle is open.
+        if failure=='link_before_reopen' and len(opened)==1:return False
+        if failure=='link_after_reopen' and len(opened)==2:return False
+        return real_safe(path)
+    monkeypatch.setattr(logger.os,'open',tracked_open)
+    monkeypatch.setattr(logger.os,'fstat',observed_stat)
+    monkeypatch.setattr(logger,'safe_source_path',observed_boundary)
+    if failure=='size_bound':monkeypatch.setattr(logger,'SOURCE_MAX_BYTES',1)
+    if failure:
+        with pytest.raises((ValueError,OSError)):
+            logger.stable_source_bytes(source)
+    else:
+        assert logger.stable_source_bytes(source)==source.read_bytes()
+    assert len(opened)==descriptor_count
+    assert len(set(opened))==len(opened),'Original fd must remain open until path verification finishes'
+    for fd in opened:
+        with pytest.raises(OSError) as error:real_fstat(fd)
+        assert error.value.errno==errno.EBADF
