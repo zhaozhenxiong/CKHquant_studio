@@ -27,7 +27,13 @@
   let methodStatus=null, methodStatusSequence=0;
   let analysisTransfer=null, methodDraftDirty=false;
   function methodEvidenceResult() { return methodDraftDirty && state.analysis ? {...state.analysis,method_view:null,method_reference_points:[]} : state.analysis; }
-  function prepareMethodLayers(result) { methodDraftDirty=false; const combo=Boolean(methodDefinitions[resultMethod(result)]?.prediction); if($('layer-method'))$('layer-method').checked=combo; if($('layer-sources'))$('layer-sources').checked=!combo; }
+  function prepareMethodLayers(result) {
+    methodDraftDirty=false;
+    const combo=Boolean(methodDefinitions[resultMethod(result)]?.prediction);
+    const validMethod=result?.method_view?.valid===true && result.method_view.status==='complete';
+    if($('layer-method'))$('layer-method').checked=combo;
+    if($('layer-sources'))$('layer-sources').checked=!combo || !validMethod;
+  }
   function invalidateMethodPresentation() { updateChartSelection('clear');if(!methodDefinitions[resultMethod(state.analysis)]?.prediction&&!methodDefinitions[selectedMethod('analysis')]?.prediction)return;methodDraftDirty=true;analysisTransfer=null;++state.analysisSequence;++openRunSequence;globalThis.KHQuantMethodPresentation?.clearAnalysis();if(analysisLoading){analysisLoading=false;$('analysis-form').querySelector('[type=submit]').disabled=false;}if(state.analysis){renderAnalysis(false);renderEvents();} }
   function analysisFormContext() { return {symbol:getSymbol($('analysis-symbol').value),...dateSpec('analysis'),...researchSpec('analysis')}; }
   function analysisContext() {
@@ -37,25 +43,7 @@
   }
   function methodReason(value) { return ({batch_budget_deferred:'本批预算已用尽，等待续批',kronos_assets_missing:'本地 Kronos 资源未就绪',kronos_prediction_unusable:'Kronos 预测未通过可用性检查',ma_score_model_missing:'缺少兼容的均线评分候选',ma_score_unavailable:'均线评分不可用',same_input_l2_missing:'该候选缺少同输入 L2 对照',scored:'已评分'})[value]||globalThis.KHQuantMethodPresentation?.reason(value)||display(value); }
   function methodEvaluationHtml(value, compact=false, view=null) {
-    if(!value) return '';
-    const score=value.score || {}, kronos=value.kronos || {};
-    const probabilities=Array.isArray(score.probabilities)?score.probabilities:score.probabilities?['down','flat','up'].map(key=>score.probabilities[key]):null;
-    const reasons=[...(value.missing_reasons || []), ...(score.reason ? [score.reason] : []), ...(kronos.reason ? [kronos.reason] : [])]
-      .filter(item=>item!=='scored').map(methodReason);
-    const direction=view ? globalThis.KHQuantMethodPresentation?.label(view)||'方法视图未核验' : {BUY:'买方参考',SELL:'卖方参考',WAIT:'观察'}[value.direction] || '方向待核验';
-    const scoreValue=score.score ?? score.scores?.[0];
-    const scoreName=({torch_mlp:'MLP',mlp:'MLP',l2:'L2'})[score.model_type] || (value.method?.endsWith('l2')?'L2':'MLP');
-    const probabilityText=Array.isArray(probabilities) && probabilities.length===3 ? `下跌 ${percent(probabilities[0])} · 平稳 ${percent(probabilities[1])} · 上涨 ${percent(probabilities[2])}` : '';
-    const summary=kronos.summary || {}, quality=kronos.quality || {};
-    const forecast=[['terminal_return_median','中位涨跌'],['terminal_return_p10','P10'],['terminal_return_p90','P90'],['up_path_fraction','上涨采样比例']]
-      .filter(([key])=>typeof summary[key]==='number'&&Number.isFinite(summary[key]))
-      .map(([key,label])=>`${label} ${percent(summary[key])}`);
-    if(typeof quality.valid_samples==='number'&&Number.isFinite(quality.valid_samples))forecast.push(`有效路径 ${number(quality.valid_samples)}${typeof quality.requested_samples==='number'&&Number.isFinite(quality.requested_samples)?` / ${number(quality.requested_samples)}`:''}`);
-    const qualification=score.qualification || {};
-    const purpose=qualification.mode==='historical_candidate'?'历史研究候选':qualification.mode==='paper'?'自动模拟用途':qualification.research_only===true?'仅研究用途':'用途未记录';
-    const forward=({pending:'独立前瞻资格待验证',qualified:'独立前瞻资格已通过',failed:'独立前瞻资格未通过'})[qualification.independent_forward_status] || '独立前瞻资格未记录';
-    const qualificationText=score.qualification ? `${purpose}；${forward}` : '';
-    return `<div class="method-summary"><strong>${esc(value.label || methodLabel(value.method))}</strong><span class="badge">${({complete:'已完成',partial:'部分可用',deferred:'预算延后',failed:'评估失败'})[value.status]||'待核验'}</span><span>${esc(direction)}</span></div>${compact?'':`<p class="subtle">信息截止 ${esc(value.as_of || '—')} · ${value.model_id ? `模型 ${esc(String(value.model_id).slice(0,12))}${String(value.model_id).length>12?'…':''}` : '未使用评分候选'}${value.feature_profile ? ` · ${esc(value.feature_profile==='ma_trend_v1'?'均线趋势输入':value.feature_profile)}` : ''}</p>`}<p>${scoreValue!=null ? `${esc(scoreName)} ${score.status==='scored'?'已评分':'评分'} ${number(scoreValue,2)} / 100` : methodDefinitions[value.method]?.score ? '评分不可用' : '结构与量价来源独立保留'}${probabilityText?` · ${esc(probabilityText)}`:''}</p>${qualificationText?`<p class="subtle">${esc(qualificationText)}</p>`:''}${forecast.length?`<p>Kronos：${esc(forecast.join(' · '))}</p><p class="subtle">采样分位数与上涨比例未经校准；预测涨跌不等于实际收益。</p>`:''}${reasons.length?`<p class="method-missing">${[...new Set(reasons.map(display))].map(esc).join('；')}</p>`:''}${compact?'':`<details><summary>查看预测、评分与资格依据</summary><pre>${esc(JSON.stringify({model_id:value.model_id,feature_profile:value.feature_profile,kronos,score,missing_reasons:value.missing_reasons},null,2))}</pre></details><p class="subtle">预测与评分为模型参考；不代表模拟成交或目标仓位。</p>`}`;
+    return globalThis.KHQuantAnalysisMethodView?.evaluationHtml(value,compact,view) || '';
   }
   function renderMethodResult(prefix,result) {
     const host=$(`${prefix}-method-result`); if(!host)return;
@@ -96,7 +84,7 @@
     location.hash='analysis';showView('analysis');notice(`已带入保存扫描 ${runId} 的方法与参数；点击分析后才计算。`);
   }
   globalThis.KHQuantMethods={definitions:methodDefinitions,normalize:normalizeMethod,label:methodLabel,evaluationHtml:methodEvaluationHtml,analysisContext,scanSelection,chooseScanMethod,draftAnalysis,adoptScanContext(context,date){applyResearchContext('scan',context);$('scan-start').value=context.start??'';$('scan-end').value=date;setDateMode('scan','historical');}};
-  const PAGE_SIZE = 100;
+  const PAGE_SIZE = 20;
   const state = {analysis:null, query:null, frequency:'日线', dates:[], replayIndex:0, scan:null, scanPage:0, tasks:[], delivered:new Set(), tracked:{}, favorites:new Set(), symbolCatalog:new Map(), analysisSequence:0, taskSequence:0, pollTimer:null, watchlist:null, personalLoaded:false, watchlistBusy:false, watchlistSequence:0,research:null,pendingResearchContexts:{},archive:false,resultCreatedAt:null};
   let chart, candles, volume;
   let penSeries = [];
@@ -114,7 +102,6 @@
   let markerMappings = [];
   let markerGroups = [];
   let chartMarkers = [], sellFocus = null;
-  let chartRangeDraft = null, chartRangeObserved = null;
   let chartSelection = {hover:null,pinned:null,selectedDate:null,popupOpen:false};
   let popupAnchor = null;
   let selectedReferenceLine = null, selectedReferenceSeries = null, selectedReferenceKey = null;
@@ -191,6 +178,9 @@
   }
   let priceOverlayFrame = null;
   const computeSequences = {analysis:0,scan:0,data:0};
+  let tasksRequest = null, runsRequest = null;
+  let recentRuns = [], runPage = 0, runsSequence = 0;
+  const RUN_PAGE_SIZE = 6;
   const usageNames = {historical:'历史滚动研究',forward:'当前时点研究'};
 
 
@@ -233,7 +223,7 @@
     if(selected==='data'){refreshTasks().catch(showError);refreshRuns().catch(showError);}
     if(['analysis','scan'].includes(selected)){if(selectedMethod(selected)==='legacy_reference')refreshResearch().catch(showError);else if(methodDefinitions[selectedMethod(selected)].prediction)refreshMethodModels().catch(showError);}
     if(selected==='scan')globalThis.KHQuantBoardPanel?.onRoute();else globalThis.KHQuantBoardMethods?.onRoute(false);
-    globalThis.KHQuantMethodPresentation?.onRoute();globalThis.KHQuantLightResearch?.onRoute(context);
+    globalThis.KHQuantMethodPresentation?.onRoute();globalThis.KHQuantLightResearch?.onRoute(context);globalThis.KHQuantMarketList?.onRoute();
   }
   globalThis.KHQuantNavigation={parse:parseRoute,go:goRoute};
   globalThis.KHQuantWatchlist={selected:selectedWatchlistSymbols};
@@ -273,7 +263,7 @@
     const c = colors();
     if (chart) { chart.applyOptions(chartOptions($('analysis-chart'))); candles.applyOptions({upColor:c.up,downColor:c.down,borderUpColor:c.up,borderDownColor:c.down,wickUpColor:c.up,wickDownColor:c.down}); renderAnalysis(false); }
   }
-  function emptyChart(message, detail) { resetChartSelection(); clearIndicators(); $('chip-profile').hidden = true; $('chip-profile-caption').hidden = true; $('chip-profile-overlay').replaceChildren(); syncChartRange(); $('divergence-details').hidden = true; $('divergence-list').replaceChildren(); $('analysis-empty').hidden = false; $('analysis-empty').querySelector('strong').textContent = message; $('analysis-empty').querySelector('span').textContent = detail; $('marker-summary').textContent = '尚无可展示的买卖标记'; markerMappings = []; markerGroups = []; renderMarkerScope(); renderResultIdentity(); $('marker-details').textContent = state.analysis?.structure_only ? '点击来源 B/S 或对应 K 线查看结构与量价依据；悬浮切换指标与筹码。' : KHQuantMarkers.describe(markerMappings,null,state.frequency); $('zone-overlay').replaceChildren(); }
+  function emptyChart(message, detail) { resetChartSelection(); clearIndicators(); $('chip-profile').hidden = true; $('chip-profile-caption').hidden = true; $('chip-profile-overlay').replaceChildren(); syncChartRange(); $('divergence-details').hidden = true; $('divergence-list').replaceChildren(); $('analysis-empty').hidden = false; $('analysis-empty').querySelector('strong').textContent = message; $('analysis-empty').querySelector('span').textContent = detail; $('marker-summary').textContent = '尚无可展示的买卖标记'; markerMappings = []; markerGroups = []; renderMarkerScope(); renderResultIdentity();  $('zone-overlay').replaceChildren(); }
   function normalizeBars(rows) {
     return (rows || []).map((bar) => ({time:day(bar.time), open:Number(bar.open), high:Number(bar.high), low:Number(bar.low), close:Number(bar.close), volume:Number(bar.volume ?? bar.vol ?? 0), is_closed:bar.is_closed !== false}));
   }
@@ -315,7 +305,6 @@
     $('indicator-chips').textContent = profile ? `70%估算下 ${number(profile.chip70_low,2)} · 上 ${number(profile.chip70_high,2)} · 中位价 ${number(profile.chip50,2)} · 日线截至 ${profile.as_of ? day(profile.as_of) : '—'}` : `70%估算下 ${number(row.chip70_low,2)} · 上 ${number(row.chip70_high,2)} · 中位价 ${number(row.chip50,2)} · 日线截至 ${row.chip_as_of ? day(row.chip_as_of) : '—'}`;
   }
   function renderAnalysis(fit = true) {
-    if (fit) chartRangeDraft = null;
     if (!state.analysis) { clearIndicators(); $('chip-profile').hidden = true; $('chip-profile-caption').hidden = true; $('chip-profile-overlay').replaceChildren(); syncChartRange(); return; }
     renderMethodResult('analysis',state.analysis);
     const sourceOnly = state.analysis.structure_only === true, methodMode=Boolean(methodDefinitions[resultMethod(state.analysis)]?.prediction);
@@ -331,7 +320,8 @@
     const data = state.analysis.frequencies?.[state.frequency];
     const bars = normalizeBars(data?.bars);
     $('chart-symbol').textContent = `${state.analysis.symbol || state.query?.symbol || ''} ${state.analysis.name || state.symbolCatalog.get(state.analysis.symbol)?.name || ''}`.trim();
-    renderDiagnostics('analysis-caveats',state.analysis.warnings);
+    const visibleWarnings = (Array.isArray(state.analysis.warnings) ? state.analysis.warnings : [state.analysis.warnings]).filter(row => row && diagnostic(row).replace(/\s/g,'') !== 'as_of截断当前行情库快照；未重建当时的数据修订版本。');
+    renderDiagnostics('analysis-caveats',visibleWarnings);
     $('analysis-caveats').open = false;
     if (!bars.length) { if (candles) candles.setData([]); $('chart-information').textContent = `${state.frequency} · 0 根 · ${basisLabel(state.analysis.price_basis)}`; $('structure-list').innerHTML = '<div class="empty-copy">该周期暂无可展示结构。</div>'; $('analysis-state').textContent = '该周期暂无K线'; emptyChart('该周期没有可用行情', '请检查日期范围和数据覆盖，或切换周期。'); return; }
     ensureChart();
@@ -386,7 +376,7 @@
 
     markerMappings = referenceMarkersBuilt.mappings;
     markerGroups = [...(referenceMarkersBuilt.groups || []),...wyckoff.groups];
-    $('marker-details').textContent = state.analysis?.structure_only ? '点击来源 B/S 或对应 K 线查看结构与量价依据；悬浮切换指标与筹码。' : KHQuantMarkers.describe(markerMappings,null,state.frequency);
+    
     const methodEvents=referenceMarkersBuilt.mappings.filter(event=>event.reference_layer==='method'&&event.displayed);
     const sourceEvents = referenceMarkersBuilt.mappings.filter((event) => event.reference_layer === 'source' && event.displayed), finalEvents = referenceMarkersBuilt.mappings.filter((event) => !['source','method'].includes(event.reference_layer) && event.displayed);
     const count = (items,side) => items.filter((item) => item.action === side).length;
@@ -432,16 +422,17 @@
     const ui = evidenceUI();
     if (analysisLoading || referenceMutationDepth > 0) return;
     if (type === 'clear' || type === 'pin') clearSellFocus();
-    if (!ui) { $('marker-details').textContent = KHQuantMarkers.describe(markerMappings,time,state.frequency); renderIndicatorReadout(time); return; }
+    if (!ui) {  renderIndicatorReadout(time); return; }
     const previous = chartSelection;
     const canOpen = type === 'pin' && popupGroupsAt(time).length > 0;
     chartSelection = ui.selectionTransition(chartSelection,{type:type === 'locate' ? 'pin' : type,time,date:selectedDate,popupOpen:canOpen});
     if (chartSelection.pinned && (type === 'hover' || type === 'leave')) return;
     if (point) { const rect = $('analysis-chart').getBoundingClientRect(); popupAnchor = {x:rect.left + point.x,y:rect.top + point.y}; }
     const active = chartSelection.pinned || chartSelection.hover;
-    $('marker-details').textContent = state.analysis?.structure_only && !active ? '点击来源 B/S 或对应 K 线查看结构与量价依据；悬浮切换指标与筹码。' : KHQuantMarkers.describe(markerMappings,active,state.frequency);
+    
     $('chart-evidence-reset').hidden = !chartSelection.pinned;
-    $('chart-selection-status').textContent = active ? `${chartSelection.pinned ? '已固定' : '所指 K 线'} ${active} · ${state.frequency} · 筹码截至 ${selectedChipProfile()?.as_of || active}` : '悬浮 K 线切换筹码分布；点击固定日期。';
+    $('chart-selection-controls').hidden = !chartSelection.pinned;
+    
     renderIndicatorReadout(active);
     if (previous.hover !== chartSelection.hover || previous.pinned !== chartSelection.pinned || previous.selectedDate !== chartSelection.selectedDate || type === 'clear') { drawChipProfile(); syncChartRange(); }
     renderChartPopup();
@@ -486,8 +477,8 @@
     chartSelection = {hover:null,pinned:null,selectedDate:null,popupOpen:false}; popupAnchor = null;
     clearSellFocus();
     clearSelectedReference();
-    $('chart-evidence-popup').hidden = true; $('chart-evidence-popup').replaceChildren(); $('chart-evidence-reset').hidden = true;
-    $('chart-selection-status').textContent = '悬浮 K 线切换筹码分布；点击固定日期。';
+    $('chart-evidence-popup').hidden = true; $('chart-evidence-popup').replaceChildren(); $('chart-evidence-reset').hidden = true; $('chart-selection-controls').hidden = true;
+    
   }
   function renderChartPopup() {
     const ui = evidenceUI(), host = $('chart-evidence-popup'), active = chartSelection.pinned;
@@ -654,55 +645,14 @@
     if ($('event-target-option')) $('event-target-option').textContent = `${targetLabel} B/S`;
     $('analysis-result-caption').textContent = `${state.archive ? '只读归档' : result.preview ? '限时预览 · 未创建永久运行' : '当前参考结果'} · ${resultSchema(result)} · 生成 ${state.resultCreatedAt || result.run_context?.created_at || '未记录'} · 行情 ${result.data_end || '—'} · ${usageNames[source.usage_mode || research.usage_mode] || source.usage_mode || '结构规则'} · 检查点 ${source.model_fold || identity.checkpoint || '自动按日期'}`;
     if(result.structure_only) $('analysis-result-caption').textContent = `${result.preview ? '限时预览 · ' : ''}${methodLabel(resultMethod(result))} · 行情 ${result.data_end || '—'} · 仅使用截止日可知输入`;
-    if ($('replay-mode-caption')) $('replay-mode-caption').textContent = result.structure_only ? '按历史时点查看结构与量价来源' : state.archive ? '只读历史记录 · 原保存参考价与评分' : '按历史时点重新判断 · 历史参考价与 agent 评分';
+    if ($('replay-mode-caption')) $('replay-mode-caption').textContent = state.archive ? '历史参考记录 · 只读' : '历史参考记录';
     if ($('history-evidence-hint')) $('history-evidence-hint').textContent = state.archive ? '点击日期查看原保存的当日证据' : '点击日期按当时可见信息重新判断';
     $('analysis-archive-note').hidden = !state.archive;
     $('analysis-current-recompute').hidden = !state.archive;
   }
   function syncChartRange() {
-    const bars = state.analysis?.frequencies?.[state.frequency]?.bars || [];
-    const available = !!chart && bars.length > 0;
-    ['chart-range-start','chart-range-end','chart-range-apply','chart-zoom-in','chart-zoom-out','chart-range-reset'].forEach((id) => { $(id).disabled = !available; });
+    // The chart owns pan/zoom; its displayed range still drives marker counts.
     renderMarkerScope();
-    if (!available) { chartRangeDraft = null; chartRangeObserved = null; $('chart-range-start').value = ''; $('chart-range-end').value = ''; $('chart-range-summary').textContent = ''; return; }
-    const range = chart.timeScale().getVisibleLogicalRange();
-    if (!range) return;
-    const observed = [state.analysisSequence,state.frequency,range.from,range.to].join('|');
-    if (chartRangeObserved != null && chartRangeObserved !== observed) chartRangeDraft = null;
-    chartRangeObserved = observed;
-    const from = Math.max(0,Math.min(bars.length - 1,Math.ceil(range.from))), to = Math.max(from,Math.min(bars.length - 1,Math.floor(range.to)));
-    ['chart-range-start','chart-range-end'].forEach((id) => { $(id).min = day(bars[0].time); $(id).max = day(bars.at(-1).time); });
-    if (!chartRangeDraft) { $('chart-range-start').value = day(bars[from].time); $('chart-range-end').value = day(bars[to].time); }
-    $('chart-range-summary').textContent = `${state.frequency} · 显示 ${to - from + 1} 根 · 判断截至 ${state.analysis.data_end || state.query?.as_of || '—'} · 筹码截至 ${selectedChipProfile()?.as_of || '—'} · 滚轮缩放 / 拖动平移`;
-  }
-  function captureChartRangeDraft() {
-    chartRangeDraft = {start:$('chart-range-start').value,end:$('chart-range-end').value};
-    return {...chartRangeDraft};
-  }
-  function applyChartRange(requested = captureChartRangeDraft()) {
-    const bars = state.analysis?.frequencies?.[state.frequency]?.bars || [];
-    if (!chart || !bars.length) return false;
-    // Validate the captured inputs before clearing selection, which can resync the chart.
-    chartRangeDraft = {...requested};
-    const {start,end} = requested;
-    if (!start || !end || start > end) { notice('显示区间开始日期不能晚于结束日期。'); return false; }
-    const from = bars.findIndex((bar) => day(bar.time) >= start), to = bars.findLastIndex((bar) => day(bar.time) <= end);
-    if (from < 0 || to < from) { notice('所选区间没有可显示的K线。'); return false; }
-    updateChartSelection('clear');
-    chartRangeDraft = null;
-    chart.timeScale().setVisibleLogicalRange({from:from - .5,to:to + .5});
-    syncChartRange();
-    return true;
-  }
-  function zoomChart(factor) {
-    if (!chart) return;
-    chartRangeDraft = null;
-    const bars = state.analysis?.frequencies?.[state.frequency]?.bars || [], range = chart.timeScale().getVisibleLogicalRange();
-    if (!bars.length || !range) return;
-    const left = Math.max(-.5,range.from), right = Math.min(bars.length - .5,range.to), center = (left + right) / 2;
-    const span = Math.min(bars.length,Math.max(Math.min(5,bars.length),(right - left) * factor));
-    const from = Math.max(-.5,Math.min(bars.length - span - .5,center - span / 2));
-    chart.timeScale().setVisibleLogicalRange({from,to:from + span});
   }
   function drawZones() {
     const overlay = $('zone-overlay');
@@ -796,16 +746,11 @@
 
 
 
-  function nextSessionGuidance(decision, requestedAsOf) {
-    if(methodDefinitions[resultMethod(state.analysis)]?.prediction)return methodDraftDirty?'草稿参数已修改；旧方法方向已清空，请显式重新分析。':`${esc(globalThis.KHQuantMethodPresentation?.label(state.analysis?.method_view)||'方法视图未核验')} · 截止 ${esc(state.analysis?.method_view?.as_of||state.analysis.data_end)}。仅截止日方向；来源历史点独立保留，历史方法轨迹尚未逐日评估。`;
-    if (state.analysis?.structure_only) return `结构与量价 · 截至 ${esc(state.analysis.data_end)}。点击来源 B/S 查看首次可用时间与依据；模拟账户中查看实际买卖。`;
-    if (!decision) return '参考判断不可用，请重新分析。';
-    const action = decision.reference_action || decision.action || 'WAIT';
-    const label = decision.position_reference?.schema === 'reference_position_v1' ? {BUY:'参B · 参考增仓',SELL:'参S · 参考减仓',WAIT:'参考目标未变化',HOLD:'参考目标未变化'}[action] || '参考未评分' : {BUY:'共B · 最终买方参考',SELL:'共S · 最终卖方参考',WAIT:'继续观察',HOLD:'继续观察'}[action] || '继续观察';
-    const referenceDate = day(decision.reference_price_date || decision.date || state.analysis.data_end);
-    const requested = day(requestedAsOf);
-    const stale = requested && referenceDate && referenceDate < requested ? `<p>行情截至 ${esc(referenceDate)}，未覆盖请求日期 ${esc(requested)}。</p>` : '';
-    return `${stale}<strong>${esc(referenceDate)} · <span class="badge ${actionClass(action)}">${esc(label)}</span></strong><p>${esc(referencePriceText(decision.reference_close ?? decision.reference_price,referenceDate,'收盘参考价'))}</p><p>依据：${esc(decision.basis || decision.reference_recommendation?.basis || evidenceUI()?.opinionReasons(decision) || '方向支持不足，继续观察')}</p>`;
+  function eventTimestampHtml(event) {
+    const timestamp = event.reference_layer === 'method'
+      ? event.market_cutoff_at || event.time || event.date
+      : event.first_available_at || event.available_at || event.time || event.date;
+    return `<p class="event-time"><time datetime="${esc(timestamp || '')}">${esc(day(timestamp) || '未记录')}</time></p>`;
   }
   function renderEvents() {
     const reference = referenceMode(state.analysis);
@@ -818,17 +763,17 @@
     if ($('event-filter-summary')) $('event-filter-summary').textContent = latest ? `所选图层最近 S：${day(latest.first_available_at || latest.available_at || latest.date)} · ${latest.reference_layer === 'method' ? '方法 S（截止日）' : latest.reference_layer === 'source' ? '来源 S' : '目标变化 S'}` : '所选图层在本份结果中没有 S。';
     renderSellNavigation(allEvents);
     $('position-reference-card').innerHTML = evidenceUI()?.positionHtml(state.analysis) || '';
-    $('event-context').innerHTML = nextSessionGuidance(state.analysis?.next_session_decision,state.query?.as_of || state.analysis?.as_of);
+
+    
     const research = state.analysis?.research;
     $('analysis-research-evidence').hidden = !research;
     $('analysis-research-evidence').innerHTML = research ? researchEvidence({...research,...state.analysis.next_session_decision}) : '';
     if (state.analysis?.compute_info) $('analysis-compute-status').textContent = research ? researchComputeCaption(state.analysis.compute_info,state.analysis) : computeCaption(state.analysis.compute_info);
-    $('event-list').innerHTML = events.length ? [...events].reverse().map((event) => `<article class="event-entry" data-event-time="${esc(day(event.time || event.date))}" data-evidence-date="${esc(day(event.evidence_date || event.time || event.date))}"><strong>${esc(event.reference_layer === 'source' ? `${event.source_label || event.source}来源 ${event.action === 'BUY' ? 'B' : 'S'}` : event.reference_display_label || `最终共识 ${event.action === 'BUY' ? 'B' : 'S'}`)}</strong><p><span class="badge ${actionClass(event.action)}">${actionShape(event.action)}${esc(actionLabel(event.action))}${reference ? '参考' : '意图'}</span></p><p class="event-reference">${esc(referencePriceText(event.reference_price,event.reference_price_date,`${actionLabel(event.action)}参考价`))}</p><p>${event.reference_layer === 'method' ? '所选方法截止日方向，非首次触发、非模拟成交；历史未逐日评估。' : event.reference_layer === 'source' ? esc(event.source_relationship_text || `已确认来源证据 · ${event.consensus_qualified ? '同日最终共识通过' : '同日最终共识未通过；来源点独立保留'}`) : esc(readableReason(event))}</p><p class="event-time">发生 ${esc(display(event.time || event.date))}<br>${event.reference_layer==='method'?`输入截止 ${esc(event.market_cutoff_at)} · 当时发布时间未记录`:`可用 ${esc(display(event.available_at))}`}</p><button type="button" data-locate-event="${esc(day(event.evidence_date || event.time || event.date))}">定位主图</button></article>`).join('') : '<div class="empty-copy">所选筛选没有事件。可切换图层或 B/S；形成中的结构不代表确认信号。</div>';
+    $('event-list').innerHTML = events.length ? [...events].reverse().map((event) => `<article class="event-entry" data-event-time="${esc(day(event.time || event.date))}" data-evidence-date="${esc(day(event.evidence_date || event.time || event.date))}"><strong>${esc(event.reference_layer === 'source' ? `${event.source_label || event.source}来源 ${event.action === 'BUY' ? 'B' : 'S'}` : event.reference_display_label || `最终共识 ${event.action === 'BUY' ? 'B' : 'S'}`)}</strong><p><span class="badge ${actionClass(event.action)}">${actionShape(event.action)}${esc(actionLabel(event.action))}${reference ? '参考' : '意图'}</span></p><p class="event-reference">${esc(referencePriceText(event.reference_price,event.reference_price_date,`${actionLabel(event.action)}参考价`))}</p>${event.reference_layer === 'source' ? '' : `<p>${event.reference_layer === 'method' ? '所选方法截止日方向参考' : esc(readableReason(event))}</p>`}${eventTimestampHtml(event)}<button type="button" data-locate-event="${esc(day(event.evidence_date || event.time || event.date))}">定位主图</button></article>`).join('') : '<div class="empty-copy">所选筛选没有事件。可切换图层或 B/S；形成中的结构不代表确认信号。</div>';
   }
   function highlightEvent(time) { const dates = new Set(Array.isArray(time) ? time : [time]); document.querySelectorAll('[data-event-time]').forEach((entry) => { entry.style.background = (dates.has(entry.dataset.eventTime) || dates.has(entry.dataset.evidenceDate)) ? 'var(--accent-soft)' : ''; }); }
   function locateTime(time, openPopup = true, center = false) {
     if (!chart) return;
-    chartRangeDraft = null;
     const bars = state.analysis?.frequencies?.[state.frequency]?.bars || [];
     const index = bars.findIndex((bar) => KHQuantMarkers.periodKey(bar.time,state.frequency) === KHQuantMarkers.periodKey(time,state.frequency));
     if (index >= 0) { chart.timeScale().setVisibleLogicalRange(center ? {from:Math.max(0,index - 20),to:Math.min(bars.length - 1,index + 20)} : {from:Math.max(0,index - 35),to:index + 5}); updateChartSelection(openPopup ? 'pin' : 'locate',day(bars[index].time),null,time); }
@@ -851,7 +796,8 @@
     const sequence = ++state.analysisSequence;
     analysisLoading = true; renderMethodResult('analysis',null); resetChartSelection();
     emptyChart('正在按所选时点分析','参考价与评分加载中…');
-    $('event-context').textContent = '正在按所选时点加载判断…'; $('event-list').innerHTML = '<div class="empty-copy">事件加载中…</div>';
+
+    $('event-list').innerHTML = '<div class="empty-copy">事件加载中…</div>';
     $('analysis-research-evidence').hidden = true; $('analysis-research-evidence').replaceChildren();
     if (!preserveDates) { historyRows = []; historyPage = 0; }
     renderReplayEvidence(); updateReplay();
@@ -871,7 +817,8 @@
       if (sequence !== state.analysisSequence) return;
       state.analysis = null; analysisLoading = false; renderMarkerScope(); renderResultIdentity();
       $('position-reference-card').innerHTML = evidenceUI()?.positionHtml(state.analysis) || '';
-    $('event-context').innerHTML = nextSessionGuidance(null);
+
+    
       $('analysis-research-evidence').hidden = true; $('analysis-research-evidence').replaceChildren();
       if (candles) { candles.setData([]); candles.setMarkers([]); penSeries.forEach((series) => chart.removeSeries(series)); penSeries = []; volume.setData([]); }
       $('event-list').innerHTML = '<div class="empty-copy">分析未完成，无法展示该请求的事件。</div>';
@@ -882,12 +829,9 @@
   }
   function renderReplayEvidence() {
     const ui = evidenceUI(); if (!ui) return;
-    if (analysisLoading) { $('replay-evidence-card').innerHTML = '<p class="subtle">正在按所选日期重新判断，参考价与评分加载中…</p>'; $('history-evidence-table').innerHTML = '<p class="subtle">历史参考记录加载中…</p>'; return; }
+    if (analysisLoading) { $('history-evidence-table').innerHTML = '<p class="subtle">历史参考记录加载中…</p>'; return; }
     const evidence = displayedEvidence();
     const selected = state.query?.as_of || state.analysis?.as_of || state.analysis?.data_end || state.dates[state.replayIndex];
-    const row = ui.rowAt(evidence,selected), decision = ui.consensusAt(displayedConsensus(),selected);
-    $('replay-evidence-card').innerHTML = state.analysis ? `<strong>信息截止 ${esc(selected || '—')}</strong>${ui.consensusHtml(decision,displayedConsensus()?.config,displayedConsensus()?.version)}${ui.referenceHtml(row)}${ui.agentsHtml(row,false,decision,displayedConsensus()?.config,displayedConsensus()?.version)}${ui.positionHtml(row)}${ui.rawEventsHtml(row,[],state.analysis?.consensus_decisions?.version)}<p class="subtle">参考价使用该日行情；评分按当时可见的模型与事件展示。</p>` : '<p class="subtle">尚无成功分析结果，参考价与评分不可用。</p>';
-    if(state.analysis?.structure_only) $('replay-evidence-card').innerHTML = `<strong>结构与量价 · 信息截止 ${esc(selected||'—')}</strong><p>已知收盘 ${number(row?.reference_close,2)} 元</p>${ui.rawEventsHtml(row,[],state.analysis?.consensus_decisions?.version)}`;
     if (!state.analysis) { $('history-evidence-table').innerHTML = '<p class="subtle">历史参考记录不可用，请重新分析。</p>'; return; }
     const cutoff = day(state.query?.as_of || state.analysis?.as_of || state.analysis?.data_end);
     const rows = historyRows.filter(item => rowObservable(item,state.query?.as_of || cutoff));
@@ -895,11 +839,6 @@
     $('history-evidence-table').innerHTML = ui.historyHtml(rows,historyPage,day(selected),evidence?.statistics);
   }
   function updateReplay() {
-    const available = Boolean(state.analysis) && state.dates.length > 0 && !analysisLoading && !state.archive;
-    ['replay-slider','replay-date','replay-reset'].forEach((id) => { $(id).disabled = !available; });
-    $('replay-slider').max = String(Math.max(0,state.dates.length - 1)); $('replay-slider').value = String(state.replayIndex);
-    $('replay-date').min = state.dates[0] || ''; $('replay-date').max = state.dates[state.dates.length - 1] || ''; $('replay-date').value = state.dates[state.replayIndex] || '';
-    $('replay-prev').disabled = !available || state.replayIndex === 0; $('replay-next').disabled = !available || state.replayIndex >= state.dates.length - 1;
     renderReplayEvidence();
   }
   async function replay(index) {
@@ -1163,7 +1102,7 @@
     const total=state.scan?.scan_view?.paged?state.scan.scan_view.total:filtered.length;
     state.scanPage = Math.max(0,Math.min(state.scanPage,Math.ceil(total / PAGE_SIZE) - 1));
     const page = state.scan?.scan_view?.paged ? filtered : filtered.slice(state.scanPage * PAGE_SIZE,(state.scanPage + 1) * PAGE_SIZE);
-    $('scan-count').textContent = number(state.scan?.scan_view?.total_rows ?? all.length);
+    $('scan-count').textContent = number(total);
     const categories = {buy:'买入候选',watch:'继续观察',exit:'持仓退出研究',excluded:'排除 / 不足'};
     $('scan-rows').innerHTML = page.length ? page.map((row) => `<tr><td><button type="button" class="favorite" data-favorite="${esc(row.symbol)}" aria-label="关注 ${esc(row.symbol)}" aria-pressed="${state.favorites.has(row.symbol)}" ${!state.personalLoaded || state.watchlistBusy ? 'disabled' : ''}>${state.favorites.has(row.symbol) ? '★' : '☆'}</button></td><td><strong>${esc(row.symbol)}</strong><span class="stock-name">${esc(row.name || state.symbolCatalog.get(row.symbol)?.name || '')}</span></td><td>${esc(scanEventText(row))}</td><td>${scanActionCell(row)}</td><td>${scanTimingCell(row)}</td><td>${row.method_evaluation?'模型参考无目标仓位':evidenceUI()?.positionSummaryHtml(row) || '不可用'}</td><td class="reason">${esc(scanReasonText(row))}${ruleOriginal(row)}${row.method_evaluation?`<details><summary>预测与评分依据</summary>${methodEvaluationHtml(row.method_evaluation,true,row.method_view)}</details>`:researchEvidence(row)}</td><td><button type="button" class="link-button" data-analyze-symbol="${esc(row.symbol)}" data-analysis-source="scan" ${row.data_end ? `data-analyze-end="${esc(row.data_end)}"` : ''}>分析</button></td></tr>`).join('') : `<tr><td colspan="8" class="empty-cell">${state.scan ? '没有符合筛选条件的股票。' : '开始扫描后，结果显示在这里。'}</td></tr>`;
     pagination('scan',total,state.scanPage);
@@ -1172,7 +1111,15 @@
     if (state.scan) { $('scan-coverage').textContent = `覆盖 ${number(state.scan.coverage?.success)} / ${number(state.scan.coverage?.requested)} 只成功 · 失败 ${number((state.scan.failures || []).length)}${state.scan.coverage?.deferred ? ` · 延后 ${number(state.scan.coverage.deferred)}` : ''}${state.scan.coverage?.unavailable ? ` · 输入不可用 ${number(state.scan.coverage.unavailable)}` : ''}${state.scan.data_range?.requested_end ? ` · 请求截止 ${state.scan.data_range.requested_end} · 实际行情 ${state.scan.data_end || state.scan.data_range.end || '缺失'}` : ''}`; renderDiagnostics('scan-failures',state.scan.failures);if(state.scan.population_summary?.counts){const c=state.scan.population_summary.counts;$('scan-coverage').textContent=`截止 ${state.scan.data_end||'—'} · 完整人口 ${number(c.expected)} · 有效方法 ${number(c.complete)} · 不可用 ${number(c.unavailable)} · 失败 ${number(c.failed)} · 待处理 ${number(c.deferred)}`;}
       if (!reference && state.scan.model_gate) $('scan-research-result').textContent = `${gateCaption(state.scan.model_gate)} · ${Object.entries(categories).map(([key,label]) => `${label} ${number(state.scan.category_counts?.[key] || 0)}`).join(' · ')}。${state.scan.model_gate.reason || ''}`;
     }
+    const displayed=state.scan;
+    globalThis.KHQuantMarketList?.render({rows:page.map(row=>({...row,name:row.name||state.symbolCatalog.get(row.symbol)?.name||''})),result:displayed,favorites:state.favorites,personalReady:state.personalLoaded&&!state.watchlistBusy,request,
+      onFavorite:symbol=>changeWatchlist(symbol,state.favorites.has(symbol)).catch(showError),
+      onAnalyze:row=>{try{draftAnalysis(row.symbol,row.data_end||displayed?.data_end,{...resultResearchContext(displayed),start:displayed?.data_range?.start||displayed?.method_context?.start},displayed?.run_id);}catch(error){showError(error);}},
+      onBacktest:row=>{try{globalThis.KHQuantMarketWorkspace?.draftBacktest(row,{...resultResearchContext(displayed),analysis_method:resultMethod(displayed),start:displayed?.data_range?.start||displayed?.method_context?.start,end:displayed?.data_end});}catch(error){showError(error);}}
+    });
+    globalThis.KHQuantMarketWorkspace?.update(displayed);
   }
+  globalThis.KHQuantMarketBridge={request,openSaved:id=>openRun(id,'scan')};
   let scanPageSequence=0;
   async function loadScanPage(){
     const combined=Boolean(state.scan?.run_id&&methodDefinitions[resultMethod(state.scan)]?.prediction&&globalThis.KHQuantMethodPresentation);
@@ -1261,7 +1208,10 @@
     const d = task.progress_detail;
     if (!d || typeof d !== 'object') return display(d || '');
     const info = task.compute_info, research = Boolean(task.spec?.plan_id) || task.spec?.research;
-    const compute = info ? research ? ` · ${researchComputeCaption(info)}` : ` · ${info.cuda_work ? '已执行 CUDA 信号运算' : 'CPU 信号运算'}` : task.spec?.device ? ` · 所选设备 ${task.spec.device}（尚非 GPU 执行证明）` : '';
+    const measured = globalThis.KHQuantTaskComputeView?.caption(task);
+    const compute = task.spec?.analysis_method?.startsWith('structure_kronos') || info?.method
+      ? measured ? ` · ${measured}` : ''
+      : info ? research ? ` · ${researchComputeCaption(info)}` : ` · ${info.cuda_work ? '已执行 CUDA 信号运算' : 'CPU 信号运算'}` : task.spec?.device ? ` · 所选设备 ${task.spec.device}（尚非 GPU 执行证明）` : '';
     return `${d.stage || ''}${d.current != null ? ` · ${number(d.current)} / ${number(d.total)}` : ''}${d.device && activeStatuses.has(task.status) ? ` · 当前阶段 ${d.device === 'cpu' ? 'CPU' : d.device}` : ''}${d.failed ? ` · 失败 ${number(d.failed)}` : ''}${Number.isFinite(d.not_updated) ? ` · 未更新 ${number(d.not_updated)}` : ''}${Number.isFinite(d.excluded) ? ` · 北交排除 ${number(d.excluded)}` : ''}${Number.isFinite(d.target_date_covered) ? ` · 目标日覆盖 ${number(d.target_date_covered)}` : ''}${Number.isFinite(d.in_flight) ? ` · 计算中 ${number(d.in_flight)}` : ''}${Number.isFinite(d.cache_hits) ? ` · 数据库复用 ${number(d.cache_hits)}` : ''}${Number.isFinite(d.stocks_per_minute) && d.stocks_per_minute > 0 ? ` · ${number(d.stocks_per_minute)} 股/分钟` : ''}${compute}`;
   }
   function taskActions(task) {
@@ -1282,11 +1232,15 @@
     else if (kind !== 'update') { globalThis.KHQuantTraining?.showResult(result); if (navigate) location.hash = 'training'; return; }
     if (navigate) location.hash = kind === 'update' ? 'data' : kind;
   }
-  async function refreshTasks() {
+  async function refreshTasks(fresh = false) {
     if(document.hidden){clearTimeout(state.pollTimer);return;}
     const sequence = ++state.taskSequence;
     clearTimeout(state.pollTimer);
-    const data = await request('/api/tasks');
+    if (fresh || !tasksRequest) {
+      const pending = request('/api/tasks').finally(() => { if (tasksRequest === pending) tasksRequest = null; });
+      tasksRequest = pending;
+    }
+    const data = await tasksRequest;
     if (sequence !== state.taskSequence) return;
     state.tasks = Array.isArray(data) ? data : data.tasks || [];
     renderTasks();
@@ -1307,7 +1261,7 @@
         }
         if (task.job_id !== state.tracked[task.kind]) continue;
         notice(`${kindNames[task.kind] || task.kind}已完成`);
-        refreshRuns().catch(showError);
+        if (parseRoute().view === 'data') refreshRuns(true).catch(showError);
       } catch (error) { state.delivered.delete(task.job_id); if (task.job_id === state.tracked[task.kind]) showError(error); }
     }
     if (!document.hidden && sequence === state.taskSequence && state.tasks.some((task) => activeStatuses.has(task.status))) state.pollTimer = setTimeout(() => refreshTasks().catch((error) => { showError(error); state.pollTimer = setTimeout(() => refreshTasks().catch(showError),5000); }),2500);
@@ -1317,10 +1271,10 @@
     const button = $(kind === 'update' ? 'update-data' : `start-${kind}`); button.disabled = true;
     try { if (kind !== 'update' && computeLoaded) spec = {...spec,device:$(`${kind}-device`).value}; const task = await request('/api/tasks',{method:'POST',body:JSON.stringify({kind,spec})}); state.tracked[kind] = task.job_id;
       if (kind === 'scan') { state.scan = null; state.scanPage = 0; renderScan(); $('scan-coverage').textContent = '等待本次扫描结果'; $('scan-failures').hidden = true; }
-      notice(`${kindNames[kind]}任务已提交`); await refreshTasks();
+      notice(`${kindNames[kind]}任务已提交`); await refreshTasks(true);
     } catch (error) { showError(error); button.disabled = false; }
   }
-  async function cancelTask(jobId) { await request(`/api/tasks/${encodeURIComponent(jobId)}/cancel`,{method:'POST',body:'{}'}); await refreshTasks(); notice('已请求取消任务'); }
+  async function cancelTask(jobId) { await request(`/api/tasks/${encodeURIComponent(jobId)}/cancel`,{method:'POST',body:'{}'}); await refreshTasks(true); notice('已请求取消任务'); }
   function runMethodCaption(run) {
     const summary=run.summary||{},method=summary.analysis_method||summary.method_context?.analysis_method||run.analysis_method;
     const knownMethod=method&&methodDefinitions[normalizeMethod(method)];
@@ -1328,10 +1282,28 @@
     const current=knownMethod&&normalizeMethod(method)!=='legacy_reference'||schema==='reference_position_v1'||schema==='account_free_methods_v1';
     return `${knownMethod?methodLabel(method):schema==='account_free_methods_v1'?'结构、预测与均线评分':schema||'版本未记录'}${schema&&!current?' · 只读归档':''}`;
   }
-  async function refreshRuns() {
-    const data = await request('/api/runs?limit=30');
-    const rows = Array.isArray(data) ? data : data.runs || [];
-    $('run-list').innerHTML = rows.length ? rows.map((run) => `<article class="run-row"><div><strong>${esc(kindNames[run.kind] || run.kind || '分析运行')}</strong><small>${esc(run.run_id)} · ${esc(run.created_at || '')}<br>${esc(runMethodCaption(run))} · 行情 ${esc(run.summary?.data_range?.end || '—')}</small></div><button type="button" data-run-id="${esc(run.run_id)}" data-run-kind="${esc(run.kind || '')}">打开结果</button></article>`).join('') : '<div class="empty-copy">尚无新系统运行记录。</div>';
+  function renderRuns() {
+    runPage = Math.max(0,Math.min(runPage,Math.ceil(recentRuns.length/RUN_PAGE_SIZE)-1));
+    const rows = recentRuns.slice(runPage*RUN_PAGE_SIZE,(runPage+1)*RUN_PAGE_SIZE);
+    $('run-list').innerHTML = rows.length ? rows.map((run) => `<article class="run-row"><div><strong>${esc(kindNames[run.kind] || run.kind || '分析运行')}</strong><small>${esc(runCreatedAt(run.created_at))}<br>${esc(runMethodCaption(run))} · 行情 ${esc(run.summary?.data_range?.end || '—')}</small><details class="run-identity"><summary>运行标识</summary><small>${esc(run.run_id)}</small></details></div><button type="button" data-run-id="${esc(run.run_id)}" data-run-kind="${esc(run.kind || '')}">打开结果</button></article>`).join('') : '<div class="empty-copy">尚无新系统运行记录。</div>';
+    $('run-page-label').textContent = `最近 ${recentRuns.length} 条 · 第 ${runPage+1} / ${Math.max(1,Math.ceil(recentRuns.length/RUN_PAGE_SIZE))} 页`;
+    $('run-page-prev').disabled = runPage === 0;
+    $('run-page-next').disabled = (runPage+1)*RUN_PAGE_SIZE >= recentRuns.length;
+  }
+  function runCreatedAt(value) {
+    const instant = shanghaiClock(value);
+    return Number.isFinite(instant) ? new Date(instant).toLocaleString('sv-SE',{timeZone:'Asia/Shanghai',hour12:false}) : String(value || '');
+  }
+  async function refreshRuns(fresh = false) {
+    const sequence = ++runsSequence;
+    if (fresh || !runsRequest) {
+      const pending = request('/api/runs?limit=30').finally(() => { if (runsRequest === pending) runsRequest = null; });
+      runsRequest = pending;
+    }
+    const data = await runsRequest;
+    if (sequence !== runsSequence) return;
+    recentRuns = Array.isArray(data) ? data : data.runs || [];
+    renderRuns();
   }
   function resultResearchContext(result) {
     const explicit=result?.analysis_method || result?.method_context?.analysis_method || result?.request?.analysis_method;
@@ -1451,7 +1423,7 @@
     window.addEventListener('hashchange',route);
     window.addEventListener('khquant-selection-updated',() => refreshResearch().catch(showError));
     document.addEventListener('visibilitychange',()=>{clearTimeout(state.pollTimer);if(!document.hidden)refreshTasks().catch(showError);});
-    window.addEventListener('khquant:task-history-changed',()=>{refreshTasks().catch(showError);refreshRuns().catch(showError);});
+    window.addEventListener('khquant:task-history-changed',()=>{refreshTasks(true).catch(showError);if(parseRoute().view==='data')refreshRuns(true).catch(showError);});
     window.addEventListener('keydown',(event) => { if (event.key === 'Escape') updateChartSelection('clear'); });
     $('chart-evidence-reset').addEventListener('click',() => updateChartSelection('clear'));
     $('theme-toggle').addEventListener('click',() => setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
@@ -1469,17 +1441,6 @@
     $('chart-locate-target-s')?.addEventListener('click',() => locateLatestSell('target'));
     $('analysis-current-recompute')?.addEventListener('click',() => reanalyzeCurrentResult().catch(showError));
     ['start','end','mode','model-family','usage-mode','model-policy','model','checkpoint','device','position'].forEach((name) => $(`analysis-${name}`).addEventListener('change',() => updateChartSelection('clear')));
-    ['chart-range-start','chart-range-end'].forEach((id) => {
-      $(id).addEventListener('input',captureChartRangeDraft);
-      $(id).addEventListener('change',() => { captureChartRangeDraft(); updateChartSelection('clear'); });
-    });
-    $('chart-range-apply').addEventListener('click',() => { const requested = captureChartRangeDraft(); applyChartRange(requested); });
-    $('chart-zoom-in').addEventListener('click',() => zoomChart(.7)); $('chart-zoom-out').addEventListener('click',() => zoomChart(1.4));
-    $('chart-range-reset').addEventListener('click',() => { chartRangeDraft = null; if (chart) { chart.timeScale().fitContent(); syncChartRange(); } });
-    $('replay-slider').addEventListener('change',() => replay(Number($('replay-slider').value)));
-    $('replay-prev').addEventListener('click',() => replay(state.replayIndex - 1)); $('replay-next').addEventListener('click',() => replay(state.replayIndex + 1));
-    $('replay-date').addEventListener('change',() => { const date = $('replay-date').value; const index = state.dates.findLastIndex((value) => value <= date); if (index < 0) notice('请选择可用行情范围内的日期'); else replay(index); });
-    $('replay-reset').addEventListener('click',() => { if (!state.query) return; const {as_of:_,...query} = state.query; state.replayIndex = Math.max(0,state.dates.length - 1); analyze(query,true); });
     $('scan-form').addEventListener('submit',(event) => { event.preventDefault(); try { submitTask('scan',{symbols:symbols($('scan-symbols').value),...dateSpec('scan'),...researchSpec('scan')}); } catch(error) { showError(error); } });
     ['analysis','scan'].forEach((prefix) => {
       ['mode','model-family','usage-mode','model-policy','model'].forEach((name) => $(`${prefix}-${name}`).addEventListener('change',() => {
@@ -1503,7 +1464,9 @@
       }
     }));
     ['prev','next'].forEach((direction) => $(`scan-${direction}`).addEventListener('click',() => { state.scanPage += direction === 'prev' ? -1 : 1; loadScanPage().catch(showError); }));
-    $('refresh-data').addEventListener('click',() => refreshData().catch(showError)); $('refresh-tasks').addEventListener('click',() => refreshTasks().catch(showError)); $('refresh-runs').addEventListener('click',() => refreshRuns().catch(showError));
+    $('refresh-data').addEventListener('click',() => refreshData().catch(showError)); $('refresh-tasks').addEventListener('click',() => refreshTasks(true).catch(showError)); $('refresh-runs').addEventListener('click',() => refreshRuns(true).catch(showError));
+    $('run-page-prev').addEventListener('click',() => { runPage--; renderRuns(); });
+    $('run-page-next').addEventListener('click',() => { runPage++; renderRuns(); });
     ['analysis','scan','data'].forEach((kind) => $(`${kind}-device`).addEventListener('change',() => { if (kind === 'scan') renderScanComputePlan(); refreshCompute(kind,$(`${kind}-device`).value).catch(showError); }));
     $('refresh-compute').addEventListener('click',() => refreshCompute('data',$('data-device').value).catch(showError));
     $('update-form').addEventListener('submit',(event) => { event.preventDefault(); const end = $('update-end').value; submitTask('update',{symbols:symbols($('update-symbols').value),...(end ? {end} : {})}); });
@@ -1521,7 +1484,7 @@
     document.addEventListener('click',(event) => {
       const button = event.target.closest('button'); if (!button) return;
       if (button.hasAttribute('data-chart-evidence-close')) updateChartSelection('clear');
-      if (button.dataset.evidenceDate) { chartSelection = evidenceUI().selectionTransition(chartSelection,{type:'date',date:button.dataset.evidenceDate}); renderChartPopup(); drawChipProfile(); renderIndicatorReadout(chartSelection.pinned); syncChartRange(); $('chart-selection-status').textContent = `已固定原始日期 ${button.dataset.evidenceDate} · 筹码截至 ${selectedChipProfile()?.as_of || '—'}`; }
+      if (button.dataset.evidenceDate) { chartSelection = evidenceUI().selectionTransition(chartSelection,{type:'date',date:button.dataset.evidenceDate}); renderChartPopup(); drawChipProfile(); renderIndicatorReadout(chartSelection.pinned); syncChartRange(); $('chart-evidence-reset').hidden = false; $('chart-selection-controls').hidden = false;  }
       if (button.dataset.evidenceLocate) { highlightEvent(button.dataset.evidenceLocate); const entry = [...document.querySelectorAll('[data-event-time]')].find((item) => item.dataset.eventTime === button.dataset.evidenceLocate || item.dataset.evidenceDate === button.dataset.evidenceLocate); entry?.scrollIntoView({behavior:'smooth',block:'nearest'}); }
       if (button.dataset.evidenceReplay || button.dataset.historyDate) { const time = button.dataset.evidenceReplay || button.dataset.historyDate; const index = state.dates.findIndex((item) => item === time); if (index >= 0 && !analysisLoading) { if (state.archive) locateTime(time); else replay(index).catch(showError); } }
       if (button.dataset.historyPage != null && !analysisLoading) { historyPage = Number(button.dataset.historyPage); renderReplayEvidence(); }
@@ -1541,7 +1504,7 @@
     const theme = localStorage.getItem('khquant_czsc_theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); setTheme(theme);
     bind(); ['analysis','scan'].forEach(prefix=>{const select=$(`${prefix}-mode`);select.innerHTML=Object.entries(methodDefinitions).map(([key,value])=>`<option value="${key==='legacy_reference'?'research':key}" ${key==='structure'?'selected':''}>${esc(value.label)}</option>`).join('');updateResearchControls(prefix);}); route();
     refreshLatestDates().catch(showError);
-    const results = await Promise.allSettled([refreshData(),searchSymbols(),refreshTasks(),refreshRuns(),ensurePersonal(),refreshCompute(),...(['#training','#parameters','#scan'].includes(location.hash)?[refreshResearch()]:[])]);
+    const results = await Promise.allSettled([refreshData(),searchSymbols(),refreshTasks(),ensurePersonal(),refreshCompute(),...(['#training','#parameters','#scan'].includes(location.hash)?[refreshResearch()]:[])]);
     results.forEach((result) => { if (result.status === 'rejected') showError(result.reason); });
     if (results[0].status === 'rejected') { $('connection-state').textContent = '数据检查失败'; $('connection-state').className = 'status-dot failed'; $('data-detail').textContent = '数据状态请求失败，请检查服务后刷新。'; }
     if (results[1].status === 'fulfilled' && results[1].value.length && !$('analysis-symbol').value) { $('analysis-symbol').value = results[1].value[0].symbol; refreshLatestDates().catch(showError); }

@@ -1,0 +1,36 @@
+/* Data operations: tasks first, secondary diagnostics and recent results nearby. */
+#view-data .data-summary>div{padding:16px 20px}
+#view-data .update-options{margin:14px 0 18px}
+.data-workspace{display:grid;grid-template-columns:minmax(0,1fr) minmax(310px,380px);gap:20px;align-items:start}
+.data-workspace section,.data-side-panels{min-width:0}
+.data-task-panel,.data-device-panel,.data-runs-panel{padding:18px;border:1px solid var(--border);border-radius:var(--radius);background:var(--panel)}
+.data-side-panels{display:grid;gap:20px}
+.data-runs-panel{grid-column:1/-1}
+.data-runs-panel .run-list{grid-template-columns:repeat(3,minmax(0,1fr))}
+.data-workspace .run-identity{margin-top:6px;padding-top:6px}
+.data-workspace .run-identity summary{font-size:11px}
+.data-workspace .section-heading{margin:0 0 14px;gap:10px}
+.data-workspace .section-heading button{font-size:12px;padding:6px 9px}
+.data-workspace h3{font-size:13px;margin:16px 0 6px}
+.data-workspace .task-history-controls{gap:10px}
+.data-workspace .task-history-controls label{flex:1 1 140px;min-width:0}
+.data-workspace .task-history-controls select{font-size:12px;min-height:38px}
+.data-workspace #task-history-state:empty{display:none}
+.data-workspace .task-history-panel{margin-top:14px}
+.data-workspace .task-history-panel>summary{font-size:13px;color:var(--ink)}
+.data-workspace .compute-panel{display:grid;gap:12px;padding:0;border:0;background:transparent}
+.data-workspace .compute-panel>label{width:100%}
+.data-workspace .compute-panel details{margin-top:10px;padding-top:10px}
+.data-workspace .compute-panel details p{margin-top:8px}
+.data-workspace .run-row{padding:11px 12px;gap:10px;background:var(--soft);align-items:flex-start}
+.data-workspace .run-row small{font-size:11px;line-height:1.65}
+.data-workspace .run-row button{font-size:11px;padding:5px 8px}
+.data-workspace .pagination{flex-wrap:wrap;gap:6px}
+.data-workspace .task-heading{flex-wrap:wrap}
+.data-workspace .task-actions{flex-wrap:wrap;justify-content:flex-start}
+.data-workspace .button-group{gap:5px}
+.data-workspace .empty-copy{padding:12px 0}
+@media(max-width:1100px){.data-workspace{grid-template-columns:minmax(0,1fr)}.data-runs-panel .run-list{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:650px){.data-runs-panel .run-list{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:480px){.app-header nav{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));overflow:visible;gap:4px}.app-header nav a{padding:7px 6px;text-align:center}}
+@media(max-width:650px){.data-side-panels{grid-template-columns:minmax(0,1fr)}.data-task-panel,.data-device-panel,.data-runs-panel{padding:14px}.data-workspace{gap:14px}.data-side-panels{gap:14px}.data-workspace .section-heading{align-items:flex-start}.data-workspace .section-heading>.button-group{flex-basis:100%}.data-workspace .section-heading>.button-group button{flex:1}.data-workspace #task-cleanup-preview{flex-basis:100%;font-size:12px}.data-workspace .task-history-controls button{white-space:normal}.data-workspace .run-row{flex-wrap:wrap}.data-workspace .run-row>div{flex:1 1 200px}.data-workspace .task-heading>div{max-width:100%}#view-data .data-summary>div{padding:14px 12px}}

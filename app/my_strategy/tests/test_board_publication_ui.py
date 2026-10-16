@@ -30,7 +30,7 @@ const source=fs.readFileSync(process.argv[1],'utf8').replace("  if(!$('scan-boar
 vm.runInThisContext(source);
 const day=g=>g==='g1'?'2026-10-13':'2026-10-14';
 const status=g=>({fluent:{market:g?{generation_id:g,calculation_scope:'sh_sz_a_v1',price_date:day(g)}:null}});
-const ranking=g=>({generation_id:g,calculation_scope:'sh_sz_a_v1',price_date:day(g),rankings:[{generation_id:g,calculation_scope:'sh_sz_a_v1',price_date:day(g)}]});
+const ranking=g=>({generation_id:g,calculation_scope:'sh_sz_a_v1',price_date:day(g),rankings:[{generation_id:g,kind:'industry',calculation_scope:'sh_sz_a_v1',price_date:day(g)}]});
 const visual=g=>({generation_id:g,calculation_scope:'sh_sz_a_v1',price_date:day(g),rows:[{generation_id:g,calculation_scope:'sh_sz_a_v1',price_date:day(g)}]});
 const response=value=>({ok:true,status:200,json:async()=>value});
 const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
@@ -44,7 +44,7 @@ def test_new_publication_between_status_and_rows_keeps_one_frozen_generation():
     run_js(r'''
 (async()=>{
 let latest='g1';
-global.fetch=async path=>{calls.push(path);if(path==='/api/boards/status'){const old=latest;latest='g2';return response(status(old));}
+global.fetch=async path=>{calls.push(path);if(new URL(path,'http://local').pathname==='/api/boards/status'){const old=latest;latest='g2';return response(status(old));}
 if(path==='/api/light/status'||path==='/api/boards/jobs')return response({jobs:[]});
 const selected=new URL(path,'http://local').searchParams.get('generation_id') || latest;
 return response(path.includes('/rankings?')?ranking(selected):visual(selected));};
@@ -62,7 +62,7 @@ def test_delayed_chart_is_committed_with_table_and_generation_mismatch_is_reject
     run_js(r'''
 (async()=>{
 const pending=deferred();let bad=false;
-global.fetch=async path=>{if(path==='/api/boards/status')return response(status('g2'));
+global.fetch=async path=>{if(new URL(path,'http://local').pathname==='/api/boards/status')return response(status('g2'));
 if(path==='/api/light/status'||path==='/api/boards/jobs')return response({jobs:[]});
 if(path.includes('/rankings?'))return response(ranking('g2'));
 if(bad)return response(visual('g1'));return pending.promise;};
@@ -81,11 +81,11 @@ assert.equal(el('board-detail').hidden,false);
 def test_empty_publication_never_adopts_unpinned_rows_and_slow_old_refresh_cannot_overwrite():
     run_js(r'''
 (async()=>{
-global.fetch=async path=>{calls.push(path);return response(path==='/api/boards/status'?status(null):{jobs:[]});};
+global.fetch=async path=>{calls.push(path);return response(new URL(path,'http://local').pathname==='/api/boards/status'?status(null):{jobs:[]});};
 await ui.refresh();assert.deepEqual(commits,[['status',null],['ranking',null],['visual',null]]);
 assert.equal(calls.some(path=>path.includes('/rankings?') || path.includes('/capital-visualization?')),false);
 commits.length=0;const old=deferred();let n=0;
-global.fetch=async path=>{if(path==='/api/boards/status')return response(status(++n===1?'g1':'g2'));
+global.fetch=async path=>{if(new URL(path,'http://local').pathname==='/api/boards/status')return response(status(++n===1?'g1':'g2'));
 if(path==='/api/light/status'||path==='/api/boards/jobs')return response({jobs:[]});
 const g=new URL(path,'http://local').searchParams.get('generation_id');
 if(g==='g1' && path.includes('/capital-visualization?'))return old.promise;
@@ -101,7 +101,7 @@ def test_job_banner_adopts_latest_completed_retry_and_keeps_current_partial_acti
 (async()=>{
 let saved=[{job_id:'failed-parent',status:'partial',kind:'board_knowledge'}];
 global.fetch=async path=>{
-if(path==='/api/boards/status')return response(status('g2'));
+if(new URL(path,'http://local').pathname==='/api/boards/status')return response(status('g2'));
 if(path==='/api/light/status'||path==='/api/boards/jobs')return response({jobs:saved});
 return response(path.includes('/rankings?')?ranking('g2'):visual('g2'));};
 await ui.refresh();assert.equal(jobCommits.at(-1).job_id,'failed-parent');
@@ -118,7 +118,7 @@ def test_active_board_job_takes_priority_over_finished_job():
     run_js(r'''
 (async()=>{
 global.fetch=async path=>{
-if(path==='/api/boards/status')return response(status('g2'));
+if(new URL(path,'http://local').pathname==='/api/boards/status')return response(status('g2'));
 if(path==='/api/light/status'||path==='/api/boards/jobs')return response({jobs:[{job_id:'done',status:'succeeded'},{job_id:'active',status:'running'}]});
 return response(path.includes('/rankings?')?ranking('g2'):visual('g2'));};
 await ui.refresh();assert.deepEqual(jobCommits,[{polled:'active'}]);
@@ -131,7 +131,7 @@ def test_delayed_old_job_reply_cannot_restore_failed_banner_after_new_refresh():
 (async()=>{
 const old=deferred();let calls=0;
 global.fetch=async path=>{
-if(path==='/api/boards/status')return response(status('g2'));
+if(new URL(path,'http://local').pathname==='/api/boards/status')return response(status('g2'));
 if(path==='/api/light/status'||path==='/api/boards/jobs')return ++calls===1?old.promise:response({jobs:[{job_id:'new',status:'succeeded'}]});
 return response(path.includes('/rankings?')?ranking('g2'):visual('g2'));};
 const first=ui.refresh();await flush();await ui.refresh();

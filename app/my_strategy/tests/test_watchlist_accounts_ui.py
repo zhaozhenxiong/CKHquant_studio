@@ -106,6 +106,32 @@ await fire('light-sim-form','submit',{preventDefault(){}});assert.equal(calls.fi
 ''')
 
 
+def test_observation_progress_distinguishes_total_days_and_per_day_stocks():
+    run(r'''
+const old=answer;answer=async(url,options)=>url==='/api/light/jobs/one'?{job_id:'one',kind:'simulation',status:'running',progress:{stage:'agent_observation',phase:'model_inference',symbol:'002156.SZ',date:'2026-07-17',completed:0,total:1,completed_sessions:128,total_sessions:188,observations_completed:103,cpu_workers:2}}:old(url,options);
+await fire('light-sim-form','submit',{preventDefault(){}});await settle();
+const text=element('light-account-progress').textContent;
+assert(text.includes('模型推理'));assert(text.includes('已评估交易日 128/188'));assert(text.includes('累计预测 103 次'));assert(text.includes('当日股票 0/1'));assert(text.includes('CPU输入准备 2 线程'));assert(!text.includes('进程'));assert(!text.includes('agent_observation'));
+''')
+
+
+def test_structure_progress_distinguishes_processes_from_input_threads():
+    run(r'''
+const old=answer;answer=async(url,options)=>url==='/api/light/jobs/one'?{job_id:'one',kind:'simulation',status:'running',progress:{stage:'structure',symbol:'002156.SZ',cpu_workers:2}}:old(url,options);
+await fire('light-sim-form','submit',{preventDefault(){}});await settle();
+const text=element('light-account-progress').textContent;
+assert(text.includes('准备结构与量价'));assert(text.includes('CPU准备 2 进程'));assert(!text.includes('线程'));assert(!text.includes('已评估交易日'));assert(!text.includes('累计预测'));
+''')
+
+
+def test_legacy_observation_progress_does_not_invent_missing_totals():
+    run(r'''
+const old=answer;answer=async(url,options)=>url==='/api/light/jobs/one'?{job_id:'one',kind:'simulation',status:'running',progress:{stage:'agent_observation',date:'2026-07-17',completed:0,total:1}}:old(url,options);
+await fire('light-sim-form','submit',{preventDefault(){}});await settle();
+const text=element('light-account-progress').textContent;assert(text.includes('当日股票 0/1'));assert(!text.includes('已评估交易日'));assert(!text.includes('累计预测'));assert(!text.includes('CPU准备'));
+''')
+
+
 def test_daily_uses_its_explicit_date_and_saved_open_is_read_only():
     run(r'''
 const old=answer;answer=async(url,options)=>url.startsWith('/api/light/results/')?value:old(url,options);

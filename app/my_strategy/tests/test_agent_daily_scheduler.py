@@ -66,6 +66,103 @@ def test_cache_hits_do_not_buy_more_observations_or_change_account():
     for policy in configs:assert cold['comparisons'][policy]==hot['comparisons'][policy]
 
 
+def test_progress_reports_actual_whole_window_sessions_and_completed_observations():
+    days,frames,events,configs=fixture();updates=[]
+    result=run(days,frames,events,configs,progress=lambda **kw:updates.append(kw))
+    assert updates
+    for index,item in enumerate(updates):
+        assert item['completed_sessions']==days.index(item['date'])
+        assert item['total_sessions']==len(days)
+        assert item['observations_completed']==index
+        assert item['completed']==0 and item['total']==1
+    assert len(updates)==result['coverage']['requested']
+
+
+def test_checkpoint_pacing_preserves_every_account_fact_and_forces_final_snapshot(monkeypatch):
+    import my_strategy.services.light_daily_scheduler as scheduler
+    days,frames,events,configs=fixture();original=run(days,frames,events,configs)
+    monkeypatch.setattr(scheduler.time,'monotonic',lambda:100.)
+    snapshots=[]
+    paced=run(days,frames,events,configs,checkpoint_callback=snapshots.append,
+        checkpoint_stages={'day_committed','completed','partial','cancelled','interrupted'},checkpoint_interval_seconds=5.)
+    assert paced==original
+    assert [s['stage'] for s in snapshots]==['day_committed','completed']
+    assert snapshots[-1]['complete_through']==days[-1]
+    assert snapshots[-1]['comparisons']==original['comparisons']
+
+
+def test_cancel_checkpoint_ignores_pacing_and_drains_exact_observation(monkeypatch):
+    import my_strategy.services.light_daily_scheduler as scheduler
+    days,frames,events,configs=fixture();stop=threading.Event();snapshots=[]
+    monkeypatch.setattr(scheduler.time,'monotonic',lambda:100.)
+    def cancel(s,d):stop.set();return predict(s,d)
+    with pytest.raises(ScheduleCancelled) as exc:
+        run(days,frames,events,configs,prediction=cancel,stop=stop,checkpoint_callback=snapshots.append,
+            checkpoint_stages={'day_committed','completed','partial','cancelled','interrupted'},checkpoint_interval_seconds=5.)
+    assert snapshots[-1]['stage']=='cancelled'
+    assert snapshots[-1]==exc.value.checkpoint
+    assert len(snapshots[-1]['pending']['outcomes'])==1
+    stop.clear()
+    resumed=run(days,frames,events,configs,checkpoint=exc.value.checkpoint)
+    full=run(days,frames,events,configs)
+    assert resumed['comparisons']==full['comparisons'] and resumed['evidence']==full['evidence']
+
+
+def test_paced_deadline_checkpoint_keeps_quota_and_resume_calls_exactly_once(monkeypatch):
+    import my_strategy.services.light_daily_scheduler as scheduler
+    days,frames,events,configs=fixture();clock=[100.];calls=[];snapshots=[]
+    monkeypatch.setattr(scheduler.time,'monotonic',lambda:clock[0])
+    def infer(s,d):
+        calls.append((s,d));clock[0]=102.;return predict(s,d)
+    partial=run(days,frames,events,configs,prediction=infer,deadline=101.,checkpoint_callback=snapshots.append,
+        checkpoint_stages={'day_committed','completed','partial','cancelled','interrupted'},checkpoint_interval_seconds=5.)
+    assert partial['status']=='partial' and snapshots[-1]['stage']=='interrupted'
+    assert partial['coverage']['requested']==1
+    assert partial['checkpoint']['pending'] is not None
+    resumed=run(days,frames,partial['evidence'],configs,checkpoint=partial['checkpoint'],
+        prediction=lambda s,d:(calls.append((s,d)) or predict(s,d)))
+    full=run(days,frames,events,configs)
+    assert len(calls)==len(set(calls))==resumed['coverage']['requested']
+    assert resumed['comparisons']==full['comparisons'] and resumed['coverage']==full['coverage']
+
+
+def test_paced_prediction_failure_remains_partial_and_forces_final_evidence():
+    days,frames,events,configs=fixture();snapshots=[]
+    def broken(s,d):raise ValueError('real unavailable input')
+    result=run(days,frames,events,configs,prediction=broken,checkpoint_callback=snapshots.append,
+        checkpoint_stages={'day_committed','completed','partial','cancelled','interrupted'},checkpoint_interval_seconds=5.)
+    assert result['status']=='partial' and snapshots[-1]['stage']=='partial'
+    assert result['coverage']['failed'] and result['errors']
+    assert snapshots[-1]['errors']==result['errors']
+    assert result['scheduler']['complete_through']<days[-1]
+
+
+def test_unexpected_prediction_exception_seals_pending_without_publishing_or_double_quota():
+    days,frames,events,configs=fixture();snapshots=[];completed=[]
+    def broken(s,d):
+        if completed:raise OSError('unexpected local input failure')
+        completed.append((s,d));return predict(s,d)
+    with pytest.raises(OSError,match='unexpected local input'):
+        run(days,frames,events,configs,prediction=broken,checkpoint_callback=snapshots.append,
+            checkpoint_stages={'day_committed','completed','partial','cancelled','interrupted'},checkpoint_interval_seconds=5.)
+    checkpoint=snapshots[-1]
+    assert checkpoint['stage']=='interrupted' and checkpoint['pending'] is not None
+    assert checkpoint['coverage']['requested']==sum(checkpoint['coverage'][k] for k in ('succeeded','unusable','failed','budget_skipped'))==1
+    resumed_calls=[]
+    resumed=run(days,frames,checkpoint['evidence'],configs,checkpoint=checkpoint,
+        prediction=lambda s,d:(resumed_calls.append((s,d)) or predict(s,d)))
+    assert not set(completed)&set(resumed_calls)
+    full=run(days,frames,events,configs)
+    assert resumed['comparisons']==full['comparisons'] and resumed['coverage']==full['coverage']
+
+
+@pytest.mark.parametrize('interval',[-1,6,float('nan'),float('inf')])
+def test_checkpoint_pacing_rejects_unbounded_or_invalid_interval(interval):
+    days,frames,events,configs=fixture()
+    with pytest.raises(ValueError,match='Checkpoint interval'):
+        run(days,frames,events,configs,checkpoint_interval_seconds=interval)
+
+
 def test_cancel_substage_restarts_new_request_without_duplicate_calls():
     days,frames,events,configs=fixture();stop=threading.Event();calls=[];saved=[]
     def cancel_after_first(s,d):

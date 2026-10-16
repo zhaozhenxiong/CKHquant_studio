@@ -364,6 +364,24 @@ def result(result_id:str,request:Request):
 @router.get('/saved')
 def saved(request:Request):return {'results':request.app.state.light.store.list(namespace='simulations',limit=50)}
 
+@router.get('/account-charts')
+def account_chart_options(request:Request,symbol:str,as_of:date):
+    from my_strategy.services.saved_account_chart import chart_options
+    try:
+        return chart_options(request.app.state.light,clean_symbol(symbol),as_of.isoformat())
+    except ValueError as exc:
+        raise HTTPException(422,str(exc))
+
+@router.get('/account-charts/{result_id}')
+def saved_account_chart(result_id:str,request:Request,symbol:str,strategy:str,as_of:date):
+    from my_strategy.services.saved_account_chart import account_chart
+    try:
+        return account_chart(request.app.state.light,result_id,clean_symbol(symbol),strategy,as_of.isoformat())
+    except KeyError:
+        raise HTTPException(404,'回测结果不存在或预览已过期；没有重新计算。')
+    except ValueError as exc:
+        raise HTTPException(409,str(exc))
+
 @router.post('/accounts/{result_id}')
 def account(result_id:str,spec:AccountSpec,request:Request):
     try: return request.app.state.light.enable_account(result_id,spec.enabled,shadow_research=spec.shadow_research)

@@ -4,7 +4,7 @@
   const $=id=>document.getElementById(id), esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const active=new Set(['queued','running','cancelling']);
   const statusNames={queued:'等待开始',running:'运行中',cancelling:'正在取消',succeeded:'已完成',partial:'部分完成',failed:'失败',cancelled:'已取消',blocked:'条件未满足',interrupted:'服务中断'};
-  const kindNames={analysis:'结构分析',scan:'全市场扫描',update:'行情更新',prediction:'Kronos 预测',simulation:'模拟回测',score_training:'评分模型训练',score_observations:'历史预测观察',kronos_tuning:'预测参数比较',daily:'每日续算',incremental:'结构增量补齐',board_features:'板块特征',board_sync:'板块结构同步',board_knowledge:'板块成员',model_training:'历史模型训练',model_validation:'模型复核'};
+  const kindNames={analysis:'结构分析',scan:'全市场扫描',update:'行情更新',prediction:'Kronos 预测',simulation:'模拟回测',score_training:'评分模型训练',score_observations:'历史预测观察',tuning:'预测参数比较',kronos_tuning:'预测参数比较',daily:'每日续算',incremental:'结构增量补齐',board_features:'板块特征',board_sync:'板块结构同步',board_knowledge:'板块成员',model_training:'历史模型训练',model_validation:'模型复核'};
   const state={page:1,pageSize:20,total:0,items:[],active:[],open:new Set(),selected:new Set(),plan:null,sequence:0,busy:false,timer:null};
   const key=item=>`${item.backend}:${item.job_id}`;
   const label=item=>kindNames[item.kind]||item.kind||'任务';

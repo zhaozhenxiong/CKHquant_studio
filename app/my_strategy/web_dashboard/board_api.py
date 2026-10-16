@@ -55,6 +55,29 @@ def _generation_catalog(store):
     return [{**{key: row.get(key) for key in fields}, **_scope_metadata(row, explicit=True)} for row in rows]
 
 
+def _compact_generation_status(generation):
+    """Project an already verified publication for the main panel's status line.
+
+    Memberships and original proofs remain available through the default full
+    status response and explicit detail routes; this changes only serialization.
+    """
+    if generation is None:
+        return None
+    fields = ('generation_id', 'price_date', 'membership_date', 'created_at',
+        'board_count', 'stock_count', 'market_ready', 'full_ready',
+        'market_published', 'full_published', 'calculation_scope', 'mode',
+        'training_eligible', 'training_started', 'capital_basis', 'qualification')
+    return {key: generation[key] for key in fields if key in generation}
+
+
+def _compact_ranking_row(row):
+    """Table fields from a fully authenticated ranking and its market row."""
+    fields = ('rank', 'board_id', 'name', 'kind', 'calculation_scope', 'activity_score',
+        'board_return_1', 'board_amount', 'board_market_amount_share', 'board_relative_amount20',
+        'effective_members', 'expected_members', 'coverage', 'generation_id', 'price_date')
+    return {key: row[key] for key in fields if key in row}
+
+
 @contextmanager
 def _store(request):
     yield BoardKnowledgeStore(getattr(request.app.state, 'board_db_path', None), readonly=True)
@@ -75,7 +98,8 @@ def _fluent_stale(request, row):
 def _refresh_summary(result):
     """Keep counts and outcome; source responses remain in the verified database."""
     fields = ('run_id', 'source', 'status', 'requested_boards', 'completed_boards', 'request_count',
-        'current_only', 'historical_membership_verified', 'resume', 'resumed_from', 'error')
+        'current_only', 'historical_membership_verified', 'resume', 'resumed_from', 'error',
+        'workers', 'requested_workers', 'min_interval', 'reuse_today', 'fresh_boards', 'reused_boards', 'elapsed_seconds')
     summary = {key: result[key] for key in fields if key in result}
     summary['failed_board_count'] = len(result.get('failed_board_ids', []))
     summary['missing_board_count'] = len(result.get('missing_board_ids', []))
@@ -160,7 +184,7 @@ def _start_job_guarded(request, kind, work, summarize):
 
 
 @router.get('/status')
-def status(request: Request, generation_id: str | None = None):
+def status(request: Request, generation_id: str | None = None, compact: bool = False):
     if not getattr(request.app.state, 'board_integrated', False):
         with _store(request) as store: return store.status()
     # Main-panel status is an indexed hint, not a membership eligibility proof.
@@ -194,9 +218,15 @@ def status(request: Request, generation_id: str | None = None):
             state = {'available': False, 'market': None, 'full': None, 'stale': True,
                 'stale_reasons': ['invalid_scope_publication'], 'native_stale': False}
     scope = _scope_metadata(generation, explicit=bool(generation_id))
-    return {**knowledge, 'fluent': {**state, **scope,
+    result = {**knowledge, 'fluent': {**state, **scope,
         'needs_rebuild': bool(state.get('stale') or scope['needs_rebuild'])},
         'generations': _generation_catalog(fluent)}
+    if compact:
+        # Keep selection, scope/SHA authentication, freshness and history checks
+        # above identical to the default route. Only the final response shrinks.
+        result['fluent'] = {**result['fluent'], **{
+            key: _compact_generation_status(state.get(key)) for key in ('market', 'full')}}
+    return result
 
 
 @router.get('/generations')
@@ -296,6 +326,9 @@ class RefreshSpec(BaseModel):
     boards: list[str] = Field(default_factory=list)
     resume: str | None = None
     limit_budget: int = Field(default=2000, ge=1)
+    workers: int = Field(default=4, ge=1, le=8, strict=True)
+    min_interval: float = Field(default=1.3, ge=0, allow_inf_nan=False)
+    reuse_today: bool = Field(default=True, strict=True)
 
 
 @router.post('/refresh', status_code=202)
@@ -308,7 +341,8 @@ async def refresh(spec: RefreshSpec, request: Request):
         from my_strategy.scripts.refresh_board_knowledge import refresh_knowledge
         return refresh_knowledge(db_path=getattr(request.app.state, 'board_db_path', None),
             raw_db_path=getattr(request.app.state, 'board_raw_db_path', None), kinds=spec.kinds,
-            boards=spec.boards or None, resume=spec.resume, limit_budget=spec.limit_budget, on_progress=progress)
+            boards=spec.boards or None, resume=spec.resume, limit_budget=spec.limit_budget,
+            workers=spec.workers, min_interval=spec.min_interval, reuse_today=spec.reuse_today, on_progress=progress)
     return _start_job(request, 'refresh', work, _refresh_summary)
 
 
@@ -372,11 +406,13 @@ def configure_board_routes(app, *, db_path=None, raw_db_path=None, fluent_db_pat
 @router.get('/rankings')
 def rankings(request: Request, kind: Literal['industry', 'concept'] = 'industry',
              ranking_type: Literal['activity', 'capital'] = 'activity', limit: int = 30,
-             generation_id: str | None = None):
+             generation_id: str | None = None, compact: bool = False):
     from my_strategy.storage.board_fluent import BoardFluentStore
     store = BoardFluentStore(request.app.state.board_fluent_db_path, readonly=True)
     generation = _selected_generation(store, generation_id)
     rows = store.rankings(kind, ranking_type, min(30, max(1, limit)), generation_id=generation['generation_id']) if generation else []
+    if compact:
+        rows = [_compact_ranking_row(row) for row in rows]
     return {'rankings': rows, 'generation_id': (generation or {}).get('generation_id'),
         'price_date': (generation or {}).get('price_date'), 'training_eligible': False,
         'capital_basis': 'turnover_amount_proxy', **_scope_metadata(generation, explicit=bool(generation_id))}
@@ -423,6 +459,26 @@ def capital_visualization(request: Request, kind: Literal['industry', 'concept']
         'membership_basis':'fixed_current_snapshot_historical_price_comparison',
         'comparison_basis':'same_verified_members_on_both_days',
         'overlapping_boards':True}
+
+
+@router.get('/capital-history/{board_id}')
+def capital_history(board_id: str, request: Request, window: Literal['90', '50', '20'] = '90',
+                    generation_id: str | None = None):
+    """Display-only extension, pinned to an unchanged publication and raw witness."""
+    from my_strategy.storage.board_fluent import BoardFluentStore
+    from my_strategy.services.board_capital_history import capital_history as read_history
+    store = BoardFluentStore(request.app.state.board_fluent_db_path, readonly=True)
+    generation = _selected_generation(store, generation_id)
+    if generation is None:
+        raise HTTPException(404, '尚无可读取的板块发布版本')
+    row = store.board(board_id, generation['generation_id'])
+    if row is None:
+        raise HTTPException(404, '该发布版本没有此板块')
+    try:
+        return read_history(generation=generation, board=row,
+            raw_db_path=request.app.state.board_raw_db_path, window=int(window))
+    except (ValueError, OSError, KeyError) as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.get('/detail/{board_id}')

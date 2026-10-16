@@ -40,7 +40,7 @@ const status=g=>({fluent:{market:{generation_id:g,calculation_scope:'sh_sz_a_v1'
 let generation='g2',lightJobs=[summary(completed)],oldJobs=[cancelled];
 async function defaults(path,options={}){
  calls.push({path,method:options.method||'GET'});
- if(path==='/api/boards/status')return response(status(generation));
+ if(new URL(path,'http://local').pathname==='/api/boards/status')return response(status(generation));
  if(path==='/api/light/status')return response({jobs:lightJobs});
  if(path==='/api/boards/jobs')return response({jobs:oldJobs});
  if(path==='/api/light/jobs/new-fill')return response(completed);

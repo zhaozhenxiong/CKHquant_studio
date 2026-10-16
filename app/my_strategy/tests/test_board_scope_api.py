@@ -1,5 +1,6 @@
 """The current board view excludes old scope without rewriting saved history."""
 import copy
+import gc
 import hashlib
 import json
 import sqlite3
@@ -52,6 +53,9 @@ def _no_math(monkeypatch):
 def test_old_scope_is_history_only_and_read_paths_do_not_write(scoped, monkeypatch):
     _no_math(monkeypatch)
     client, store = scoped['client'], scoped['store']
+    # Finalize fixture writers before comparing physical SQLite file bytes.
+    # Otherwise GC can checkpoint their committed WAL during a read request.
+    gc.collect()
     before = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in [scoped['kb'], store.path]}
     board = scoped['original']['board_id']
     for url in ['/status', '/rankings', '/capital-visualization', '/features/' + board,

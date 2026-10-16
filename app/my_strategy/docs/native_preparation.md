@@ -1,5 +1,48 @@
 # Native preparation, checkpoints and SQLite reuse
 
+## Current SH/SZ board summaries
+
+The current board display uses the incremental source cache, independently of
+the historical training preparation described below. Its full population is the
+verified `sh_sz_a_v1` board projection, including ChiNext and STAR members.
+After updating and verifying the requested price date, preview a new full task:
+
+```sh
+./khquant-native.sh fill-board-native preview --checkpoint /absolute/path/task.json --price-date YYYY-MM-DD --cpu-workers 6 --batch-size 100
+./khquant-native.sh fill-board-native execute --checkpoint /absolute/path/task.json --cpu-workers 6 --budget-seconds 1800
+```
+
+Each batch contains at most 100 stocks. Preview defaults to four workers; the
+examples explicitly select six. `--cpu-workers` permits 1..12 for a measured
+machine with enough CPU and memory. It does not change numerical source identity.
+Changing coordinator code still requires a new preview; that preview verifies and
+reuses completed immutable source objects instead of trusting an old checkpoint.
+Each worker opens its own source-cache connection. Completed summaries have
+atomic files and SHA-bound checkpoint records. A partial attempt does not
+publish a board generation; an explicit subsequent `execute` revalidates the
+same checkpoint before continuing. A cancelled task is terminal and requires a
+new preview. The dispatch budget stops new work; in-flight work and final
+verification can extend beyond it.
+
+Publication occurs once, after the entire frozen population and actual source
+objects are reverified. With more than one worker the existing process pool also
+runs the final unchanged `inspect` and `summary` checks, at most one stock per
+worker. The parent reads each SHA-bound stock checkpoint and compares the actual
+summary, row hash, cache key and frozen input identity before collecting results
+in frozen population order. One-worker execution performs these checks serially.
+Any final failure or cancellation blocks publication; leases cover verification
+as well as preparation. Final verification progress is reported separately and
+remains outside the dispatch budget. Input, calendar, producer or executor changes reject
+reuse. Missing local history and missing target-day prices remain explicit
+unavailable summaries in the original denominator. Final verification independently
+reads actual raw history before accepting either missing reason; a re-signed
+checkpoint action cannot conceal an existing target-day price. Malformed data and unknown
+errors remain failures. `full_published` denotes complete population processing,
+not universal eligible structure coverage. Per-board minimum-member and coverage
+gates still apply. This task never trains models or resumes cancelled legacy jobs.
+
+## Historical training preparation
+
 Preparation preserves the complete frozen historical liquidity-qualified union.
 `stock_batch_size` bounds preparation work; it never selects fewer stocks. The
 coordinator keeps at most `min(2 * cpu_workers, stock_batch_size)` tasks in flight,

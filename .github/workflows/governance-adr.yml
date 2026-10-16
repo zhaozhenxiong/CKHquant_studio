@@ -26,8 +26,20 @@ jobs:
       - run: python app/build_czsc_runtime.py --out app/vendor/wheels --no-install
       - run: python install.py --venv-dir .venv-ci --device cpu
       - run: ${{ matrix.python }} -m my_strategy.scripts.ci_guard --skip-docker
+      - name: Verify frontend contracts
+        shell: python
+        run: |
+          import subprocess
+          from pathlib import Path
+          root = Path('app/my_strategy')
+          tests = sorted((root / 'tests').glob('test_*.cjs'))
+          tests += sorted((root / 'web_dashboard/scripts').glob('test_*.js'))
+          required = {'test_analysis_account_view.cjs', 'test_analysis_method_view.cjs', 'test_task_compute_view.cjs', 'test_chart_markers.js', 'test_market_opportunities.js'}
+          assert required <= {path.name for path in tests} and all(path.is_file() for path in tests), 'Frontend contract sources missing'
+          subprocess.run(['node', '--version'], check=True)
+          subprocess.run(['node', '--test', *map(str, tests)], check=True)
       - run: ${{ matrix.python }} -m pip wheel . --no-deps --no-build-isolation --wheel-dir .scratch/application-wheels
-      - run: ${{ matrix.python }} -m pip install --no-deps --force-reinstall .scratch/application-wheels/khquant-1.0.2-py3-none-any.whl
+      - run: ${{ matrix.python }} -m pip install --no-deps --force-reinstall .scratch/application-wheels/khquant-1.0.3-py3-none-any.whl
       - name: Verify the actual installed application wheel
         shell: python
         env:
@@ -35,11 +47,11 @@ jobs:
         run: |
           import hashlib, os, subprocess
           from pathlib import Path
-          wheel = Path('.scratch/application-wheels/khquant-1.0.2-py3-none-any.whl')
+          wheel = Path('.scratch/application-wheels/khquant-1.0.3-py3-none-any.whl')
           digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
           executable = str(Path(os.environ['KHQUANT_CI_PYTHON']).absolute())
           subprocess.run([executable, '-I', 'app/verify_installation.py', '--device', 'cpu',
-                          '--expected-version', '1.0.2', '--expected-wheel-sha256', digest,
+                          '--expected-version', '1.0.3', '--expected-wheel-sha256', digest,
                           '--output', 'installation-cpu.json'], check=True)
       - uses: actions/upload-artifact@v4
         with:

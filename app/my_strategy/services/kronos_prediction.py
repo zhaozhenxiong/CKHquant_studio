@@ -64,7 +64,10 @@ def _device(requested: str) -> str:
         raise RuntimeError("Requested CUDA device is unavailable")
     if requested != "cpu" and requested != "mps" and not requested.startswith("cuda"):
         raise ValueError("device must be auto, cpu, mps or cuda")
-    return str(torch.device(requested))
+    resolved = torch.device(requested)
+    if resolved.type == "cuda" and resolved.index is None:
+        resolved = torch.device("cuda", torch.cuda.current_device())
+    return str(resolved)
 
 
 def prepare_input(frame: pd.DataFrame, future_dates, *, symbol: str, as_of: str,
@@ -139,14 +142,48 @@ def _load_model(root: Path, device: str, identity: dict):
     spec.loader.exec_module(module)
     # Initializers do not disturb the application's independent CPU random stream.
     with torch.random.fork_rng(devices=[]):
-        model = module.Kronos(**json.loads((root / "config.json").read_text()))
+        # These parameters are entirely replaced by the pinned state dictionary.
+        # Constructing on meta avoids allocating and randomly initializing a
+        # second, unused 409 MB model. Persistent buffers are assigned strictly
+        # from the same official weights; an unmaterialized buffer is an error.
+        with torch.device("meta"):
+            model = module.Kronos(**json.loads((root / "config.json").read_text()))
         tokenizer = module.KronosTokenizer(**json.loads((root / "tokenizer/config.json").read_text()))
-    model.load_state_dict(load_file(str(root / "model.safetensors"), device="cpu"), strict=True)
+    model.load_state_dict(load_file(str(root / "model.safetensors"), device="cpu"), strict=True, assign=True)
+    if any(value.is_meta for value in (*model.parameters(), *model.buffers())):
+        raise ValueError("Pinned Kronos state did not materialize every model parameter and buffer")
+    # The tokenizer's nonpersistent group codebook is produced by its unchanged
+    # CPU constructor, rather than left as an uninitialized meta buffer.
     tokenizer.load_state_dict(load_file(str(root / "tokenizer/model.safetensors"), device="cpu"), strict=True)
     model.eval().requires_grad_(False).to(device=device, dtype=torch.float32)
     tokenizer.eval().requires_grad_(False).to(device=device, dtype=torch.float32)
     _SINGLETON.update(key=key, model=model, tokenizer=tokenizer, inference=module.auto_regressive_inference)
     return model, tokenizer, module.auto_regressive_inference, False
+
+
+def _synchronize(device: str) -> None:
+    import torch
+    if device == "mps":
+        torch.mps.synchronize()
+    elif device.startswith("cuda"):
+        torch.cuda.synchronize(device)
+
+
+def _execution_devices(model, tokenizer, inputs, device: str) -> dict:
+    """Observe actual tensors, rather than infer execution from a request label."""
+    def name(value):
+        # PyTorch tensors spell the sole Apple device mps:0; the supported
+        # requested/resolved name is mps. CUDA retains its actual ordinal.
+        return "mps" if value.device.type == "mps" else str(value.device)
+    def parameters(module):
+        return sorted({name(value) for value in module.parameters()}) if module is not None else []
+    observed = {"model_parameter_devices": parameters(model),
+                "tokenizer_parameter_devices": parameters(tokenizer),
+                "input_tensor_devices": sorted({name(value) for value in inputs})}
+    observed["tensor_devices_verified"] = all(value == [device] for value in observed.values())
+    if model is not None and tokenizer is not None and not observed["tensor_devices_verified"]:
+        raise RuntimeError("Kronos execution tensor devices differ from the resolved device")
+    return observed
 
 
 @contextmanager
@@ -228,17 +265,25 @@ def predict(frame: pd.DataFrame, future_dates, *, symbol: str, as_of: str,
         raise ValueError("seed must be a nonnegative integer below 2**63")
     if calendar_verified and not calendar_identity:
         raise ValueError("Verified calendar requires an identity")
+    phase_started = time.monotonic()
     current, dates, input_info = prepare_input(frame, future_dates, symbol=symbol, as_of=as_of,
                                               lookback=lookback, horizon=horizon)
+    input_seconds = time.monotonic() - phase_started
     root = resolve_asset_root(asset_root)
+    phase_started = time.monotonic()
     assets = asset_status(root)
+    timings = {"input_preparation_seconds": input_seconds,
+               "asset_verification_seconds": time.monotonic() - phase_started}
     if not assets["ready"]:
         raise FileNotFoundError("Kronos local assets unavailable: " + json.dumps(assets, ensure_ascii=False))
     actual_device = _device(device)
     params = {"lookback": lookback, "horizon": horizon, "samples": samples, "seed": seed,
               "temperature": temperature, "top_p": top_p, "top_k": 0, "clip": 5.0,
               "device": actual_device, "torch_version": torch.__version__, "dtype": "float32"}
-    identity = {"schema": SCHEMA, "assets": assets["files"], "source": _source_identity(),
+    phase_started = time.monotonic()
+    source_identity = _source_identity()
+    timings["source_verification_seconds"] = time.monotonic() - phase_started
+    identity = {"schema": SCHEMA, "assets": assets["files"], "source": source_identity,
                 "input": input_info, "future_dates": dates, "parameters": params,
                 "calendar": {"verified": bool(calendar_verified), "identity": calendar_identity}}
     cache_key = _hash(identity)
@@ -252,17 +297,33 @@ def predict(frame: pd.DataFrame, future_dates, *, symbol: str, as_of: str,
     def stamps(index):
         ts = pd.DatetimeIndex(index) + pd.Timedelta(hours=15)
         return np.column_stack([ts.minute, ts.hour, ts.weekday, ts.day, ts.month]).astype(np.float32)
+    phase_started = time.monotonic()
     with _MODEL_LOCK:
+        timings["model_lock_wait_seconds"] = time.monotonic() - phase_started
+        phase_started = time.monotonic()
         model, tokenizer, inference, reused = _load_model(root, actual_device, identity)
+        _synchronize(actual_device)
+        timings["model_load_seconds"] = time.monotonic() - phase_started
         check_cancel()
         with _seeded(seed, actual_device), torch.inference_mode():
+            phase_started = time.monotonic()
             tensor = lambda value: torch.from_numpy(value[None, ...]).to(actual_device)
-            raw = inference(tokenizer, model, tensor(normalized), tensor(stamps(current.index)),
-                            tensor(stamps(pd.to_datetime(dates))), max_context=512, pred_len=horizon,
+            inputs = (tensor(normalized), tensor(stamps(current.index)), tensor(stamps(pd.to_datetime(dates))))
+            execution = _execution_devices(model, tokenizer, inputs, actual_device)
+            _synchronize(actual_device)
+            timings["input_transfer_seconds"] = time.monotonic() - phase_started
+            phase_started = time.monotonic()
+            raw = inference(tokenizer, model, *inputs, max_context=512, pred_len=horizon,
                             clip=5, T=temperature, top_k=0, top_p=top_p, sample_count=samples,
                             verbose=False, cancel_check=check_cancel)
+            _synchronize(actual_device)
+            timings["inference_seconds"] = time.monotonic() - phase_started
+            execution.update(schema="kronos_execution_v1", fresh_inference=True,
+                requested_device=device, actual_device=actual_device,
+                synchronization_completed=True, inference_calls=1)
             paths = raw[0, :, -horizon:, :] * (std[None, None, :] + 1e-5) + mean[None, None, :]
         allocated = int(torch.mps.current_allocated_memory()) if actual_device == "mps" else None
+    phase_started = time.monotonic()
     result = summarize_samples(paths, dates, input_info["last_close"])
     verified_sources = {"sina_unadjusted_v1", "fuyao_unadjusted_v1"}
     source_ok = bool(input_info["source"]) and set(input_info["source"]).issubset(verified_sources)
@@ -280,7 +341,9 @@ def predict(frame: pd.DataFrame, future_dates, *, symbol: str, as_of: str,
                                  "reason": "Forecast availability does not certify a trading policy"},
                   resource={"actual_device": actual_device, "model_reused": reused,
                             "elapsed_seconds": time.monotonic() - started,
-                            "mps_allocated_bytes": allocated, "model_training_started": False})
+                            "mps_allocated_bytes": allocated, "model_training_started": False,
+                            "execution": execution, "timings": timings})
+    timings["postprocess_seconds"] = time.monotonic() - phase_started
     return result
 
 

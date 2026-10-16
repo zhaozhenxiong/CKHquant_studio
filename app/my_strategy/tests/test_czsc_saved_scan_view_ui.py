@@ -42,7 +42,7 @@ def test_saved_compact_scan_renders_search_and_drills_causal_reference():
     run_js(SCAN + r'''
 const calls=[];global.fetch=async(url)=>{calls.push(url);return response(scan);};
 await workbench.openRun('saved/final','scan');
-assert.equal(calls[0],'/api/runs/saved%2Ffinal?view=scan&page=1&page_size=100');
+assert.equal(calls[0],'/api/runs/saved%2Ffinal?view=scan&page=1&page_size=20');
 assert.equal(element('scan-count').textContent,'2');
 assert(element('scan-rows').innerHTML.includes('S · 参考减仓'));
 element('scan-search').value='东诚';workbench.renderScan();
@@ -85,7 +85,7 @@ const job={job_id:'finished scan',kind:'scan',status:'succeeded',run_id:'final-s
 workbench.state.tracked.scan=job.job_id;
 const calls=[];global.fetch=async(url)=>{calls.push(url);
  if(url==='/api/tasks')return response({tasks:[job]});
- if(url==='/api/runs/final-scan?view=scan&page=1&page_size=100')return response(scan);
+ if(url==='/api/runs/final-scan?view=scan&page=1&page_size=20')return response(scan);
  if(url==='/api/runs?limit=30')return response({runs:[]});
  throw new Error('unexpected full result request: '+url);};
 await workbench.refreshTasks();await settle();

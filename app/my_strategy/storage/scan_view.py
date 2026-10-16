@@ -60,7 +60,7 @@ def _scan_row_view(row):
         if key in row:
             result[key] = row[key]
     for key in ("model_resolution", "exit_model", "policy_entry_model", "reference_recommendation",
-                "reference_risk_plan", "position_reference", "reference_quality_identity"):
+                "reference_risk_plan", "entry_plan", "raw_risk_plan", "position_reference", "reference_quality_identity"):
         if key in row:
             result[key] = _scan_display_metadata(row[key])
     if isinstance(row.get('method_evaluation'), dict):

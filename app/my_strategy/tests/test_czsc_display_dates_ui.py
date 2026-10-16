@@ -13,6 +13,7 @@ const assert=require('node:assert/strict'),path=require('path'),fs=require('fs')
 global.KHQuantMarkers=require(path.join(process.argv[1],'chart_markers.js'));
 global.KHQuantWyckoffMarkers=require(path.join(process.argv[1],'wyckoff_markers.js'));
 global.KHQuantChartEvidence=require(path.join(process.argv[1],'chart_evidence.js'));
+global.KHQuantAnalysisMethodView=require(path.join(process.argv[1],'analysis_method_view.js'));
 const elements=new Map();
 function newElement(tag='div') {
   const el={tag,dataset:{},style:{},checked:false,hidden:false,disabled:false,value:'',textContent:'',className:'',

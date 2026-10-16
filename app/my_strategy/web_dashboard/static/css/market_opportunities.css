@@ -1,0 +1,120 @@
+/* The market list owns only its rows and inline evidence. */
+.market-opportunity-list{border:1px solid var(--border);border-radius:var(--radius);background:var(--panel);overflow:hidden;min-width:0;box-shadow:var(--shadow)}
+.market-opportunity-row{min-width:0;border-top:1px solid var(--border)}
+.market-opportunity-row:first-child{border-top:0}
+.market-opportunity-row[data-expanded=true]{background:var(--panel)}
+.market-opportunity-summary{display:grid;grid-template-columns:minmax(140px,1.1fr) minmax(160px,1.3fr) minmax(170px,1.2fr) minmax(130px,1fr) auto;align-items:center;gap:18px;padding:20px 22px}
+.market-opportunity-stock{display:flex;align-items:center;gap:10px;min-width:0}
+.market-opportunity-stock>div{min-width:0}
+.market-opportunity-stock strong{display:block;font-size:16px;overflow-wrap:anywhere}
+.market-opportunity-stock>div>span,.market-opportunity-price>span:last-child{display:block;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+.market-opportunity-favorite{padding:3px;border-color:transparent;background:transparent;color:var(--muted);font-size:22px;line-height:1;flex-shrink:0}
+.market-opportunity-favorite[aria-pressed=true]{color:var(--accent)}
+.market-opportunity-label{display:block;font-size:11px;color:var(--muted);margin-bottom:4px}
+.market-opportunity-direction{min-width:0}
+.market-opportunity-direction-value{font-size:13px;display:block}
+.market-opportunity-direction-value[data-direction=buy]{color:var(--up)}
+.market-opportunity-direction-value[data-direction=sell]{color:var(--down)}
+.market-opportunity-method-name{display:block;color:var(--muted);font-size:10px;overflow-wrap:anywhere;margin-top:3px}
+.market-opportunity-checks{display:grid;grid-template-columns:1fr 1.25fr;gap:12px;border-left:1px solid var(--border);padding-left:18px;min-width:0}
+.market-opportunity-checks strong{font-size:12px;font-weight:500;display:block}
+.market-opportunity-price{border-left:1px solid var(--border);padding-left:18px;min-width:0}
+.market-opportunity-price>strong{font-size:22px;font-weight:600;line-height:1.35;display:block;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.market-opportunity-toggle{font-size:12px;color:var(--accent);border-color:transparent;background:transparent;padding:7px 0;display:flex;align-items:center;gap:12px}
+.market-opportunity-toggle>span{font-size:19px;line-height:1}
+.market-opportunity-details{margin:0 22px 20px;border:1px solid var(--border);border-radius:7px;overflow:hidden;min-width:0}
+.market-opportunity-detail-grid{display:grid;grid-template-columns:minmax(0,1.8fr) minmax(220px,1fr);min-width:0}
+.market-opportunity-prediction{padding:12px 14px;min-width:0}
+.market-opportunity-section-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:8px;padding-right:70px}
+.market-opportunity-section-heading>span{font-size:11px;color:var(--muted)}
+.market-opportunity-details h3{font-size:13px;margin:0 0 10px;font-weight:600;line-height:1.5}
+.market-opportunity-section-heading h3{margin:0}
+.market-opportunity-display-settings{position:relative;margin:0;padding:0;border:0;min-width:0}
+.market-opportunity-display-settings>summary{position:absolute;right:0;top:-28px;font-size:11px;color:var(--accent)}
+.market-opportunity-display-settings[open]{margin-bottom:8px;padding:8px;background:var(--soft);border-radius:5px}
+.market-opportunity-display-settings[open]>summary{right:0;top:-28px}
+.market-opportunity-history-controls{display:flex;align-items:flex-end;flex-wrap:wrap;gap:9px;margin-bottom:7px}
+.market-opportunity-history-controls label{flex:1 1 120px;font-size:10px;min-width:0;max-width:170px}
+.market-opportunity-history-controls select,.market-opportunity-history-controls input{height:34px;font-size:11px;padding:5px 7px;min-width:0}
+.market-opportunity-history-controls button{font-size:11px;height:34px;padding:5px 9px;align-self:flex-end;margin:0}
+.market-opportunity-muted{font-size:11px;color:var(--muted);line-height:1.7;overflow-wrap:anywhere}
+.market-opportunity-chart-legend{display:flex;flex-wrap:wrap;gap:3px 12px;font-size:10px;color:var(--muted);margin:5px 0 6px}
+.market-opportunity-chart-host{position:relative;min-width:0;overflow:hidden}
+.market-opportunity-chart-host>#market-prediction-chart{height:240px;min-width:0;margin:0}
+.market-opportunity-forecast-boundary{position:absolute;z-index:3;top:0;bottom:28px;border-left:1px dashed var(--accent);background:rgba(70,120,190,.055);pointer-events:none}
+.market-opportunity-forecast-boundary>span{position:absolute;top:4px;left:6px;white-space:nowrap;font-size:10px;color:var(--muted);background:var(--panel);padding:2px}
+.market-opportunity-readout{font-size:10px;color:var(--muted);line-height:1.5;margin:5px 0 0;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.market-opportunity-readout:empty{display:none}
+.market-opportunity-prediction-empty{display:flex;min-height:190px;align-items:center;justify-content:center;flex-direction:column;gap:8px;padding:25px 16px;text-align:center;background:var(--soft);border-radius:5px;color:var(--muted);font-size:12px}
+.market-opportunity-prediction-empty strong{font-size:14px;color:var(--ink)}
+.market-opportunity-plan{border-left:1px solid var(--border);padding:12px 14px;background:var(--soft);min-width:0}
+.market-opportunity-plan dl{margin:9px 0;display:grid;gap:7px;font-size:12px}
+.market-opportunity-plan dl>div{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+.market-opportunity-plan dt{color:var(--muted);font-size:11px}
+.market-opportunity-plan dd{margin:0;font-weight:500;overflow-wrap:anywhere;text-align:right;font-variant-numeric:tabular-nums}
+.market-opportunity-plan-state{font-size:11px;line-height:1.6;color:var(--muted);padding-top:8px;border-top:1px solid var(--border);margin:10px 0 0;overflow-wrap:anywhere}
+.market-opportunity-method-brief{border-top:1px solid var(--border);margin-top:12px;padding-top:10px;font-size:11px}
+.market-opportunity-method-brief>strong{display:block;margin-bottom:5px;font-size:12px;font-weight:500}
+.market-opportunity-method-brief h3{margin-bottom:6px}
+.market-opportunity-method-brief dl{margin:7px 0}
+.market-opportunity-full-evidence{margin:0;padding:0;border-top:1px solid var(--border)}
+.market-opportunity-full-evidence>summary{padding:7px 14px;font-size:11px;color:var(--accent)}
+.market-opportunity-evidence-grid{display:grid;grid-template-columns:minmax(0,1.8fr) minmax(220px,1fr);border-top:1px solid var(--border);min-width:0}
+.market-opportunity-method,.market-opportunity-source{padding:16px;min-width:0;font-size:11px;overflow-wrap:anywhere}
+.market-opportunity-method p{margin:7px 0}
+.market-opportunity-method .method-summary{font-size:12px;gap:5px 9px}
+.market-opportunity-method pre{max-height:220px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:10px}
+.market-opportunity-method details{margin-top:12px;padding-top:9px}
+.market-opportunity-source{border-left:1px solid var(--border)}
+.market-opportunity-sources{list-style:none;padding:0;margin:10px 0 0;display:grid;gap:10px;max-height:240px;overflow:auto}
+.market-opportunity-sources li{border-top:1px solid var(--border);padding-top:8px}
+.market-opportunity-sources li:first-child{border-top:0;padding-top:0}
+.market-opportunity-sources strong,.market-opportunity-sources span{display:block}
+.market-opportunity-sources span{font-size:10px;color:var(--muted);margin-top:4px}
+.market-opportunity-actions{display:flex;align-items:center;flex-wrap:wrap;gap:9px;padding:8px 14px;border-top:1px solid var(--border);background:var(--panel);position:sticky;bottom:0;z-index:4}
+.market-opportunity-actions button{font-size:11px;padding:5px 10px}
+.market-opportunity-feedback:not(:empty){padding:12px 22px;border-top:1px solid var(--border);font-size:12px;color:var(--danger)}
+.market-opportunity-empty{padding:45px 20px;text-align:center;color:var(--muted);font-size:12px}
+.market-opportunity-empty strong{display:block;font-size:16px;color:var(--ink);margin-bottom:7px}
+@media(max-width:1100px){
+  .market-opportunity-summary{grid-template-columns:minmax(125px,1fr) minmax(155px,1.3fr) minmax(150px,1.1fr) minmax(115px,.9fr) auto;gap:12px;padding:18px 16px}
+  .market-opportunity-checks,.market-opportunity-price{padding-left:12px}
+  .market-opportunity-checks{gap:8px}
+  .market-opportunity-stock{gap:6px}
+  .market-opportunity-stock strong{font-size:14px}
+  .market-opportunity-price>strong{font-size:20px}
+  .market-opportunity-toggle{font-size:11px;gap:6px}
+  .market-opportunity-details{margin:0 16px 16px}
+  .market-opportunity-detail-grid,.market-opportunity-evidence-grid{grid-template-columns:minmax(0,1.65fr) minmax(210px,1fr)}
+}
+@media(max-width:760px){
+  .market-opportunity-summary{grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:14px}
+  .market-opportunity-stock{grid-column:1 / 3}
+  .market-opportunity-toggle{grid-column:3;grid-row:1}
+  .market-opportunity-direction{grid-column:1;grid-row:2}
+  .market-opportunity-price{grid-column:2 / 4;grid-row:2;padding-left:16px}
+  .market-opportunity-checks{grid-column:1 / 4;grid-row:3;border-left:0;border-top:1px solid var(--border);padding:11px 0 0;grid-template-columns:1fr 1fr}
+  .market-opportunity-checks>div{display:flex;align-items:center;gap:9px}
+  .market-opportunity-checks .market-opportunity-label{margin:0}
+  .market-opportunity-detail-grid,.market-opportunity-evidence-grid{grid-template-columns:minmax(0,1fr)}
+  .market-opportunity-plan,.market-opportunity-source{border-left:0;border-top:1px solid var(--border)}
+  .market-opportunity-plan dl{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+  .market-opportunity-plan dl>div{display:block}
+  .market-opportunity-plan dd{text-align:left;margin-top:3px}
+}
+@media(max-width:440px){
+  .market-opportunity-summary{padding:16px 12px;gap:12px}
+  .market-opportunity-details{margin:0 10px 12px}
+  .market-opportunity-direction-value{font-size:12px}
+  .market-opportunity-price>strong{font-size:21px}
+  .market-opportunity-checks>div{display:block}
+  .market-opportunity-checks strong{margin-top:3px}
+  .market-opportunity-prediction,.market-opportunity-plan,.market-opportunity-method,.market-opportunity-source{padding:12px}
+  .market-opportunity-history-controls{gap:7px}
+  .market-opportunity-history-controls label{flex:1 1 105px}
+  .market-opportunity-history-controls button{height:32px}
+  .market-opportunity-section-heading{padding-right:64px}
+  .market-opportunity-section-heading>span{display:none}
+  .market-opportunity-actions{padding:9px 12px}
+  .market-opportunity-actions>span{flex-basis:100%;font-size:10px}
+}

@@ -78,8 +78,9 @@ global.KHQuantMarkers=require(path.join(root,'chart_markers.js'));require(path.j
 const elements=new Map();function newElement(tag='div') {return {tag,dataset:{},style:{},checked:true,hidden:false,disabled:false,
   clientWidth:145,clientHeight:450,offsetWidth:460,offsetHeight:500,value:'',textContent:'',innerHTML:'',children:[],attributes:{},listeners:{},
   getBoundingClientRect:()=>({left:20,top:180}),addEventListener(key,callback){this.listeners[key]=callback;},
-  querySelector:()=>newElement(),replaceChildren(){this.children=[];},append(child){this.children.push(child);},setAttribute(key,value){this.attributes[key]=value;}};}
-function element(id){if(!elements.has(id))elements.set(id,newElement());return elements.get(id);}
+  querySelector(selector){this.queries??=new Map();if(!this.queries.has(selector))this.queries.set(selector,newElement());return this.queries.get(selector);},replaceChildren(){this.children=[];},append(child){this.children.push(child);},setAttribute(key,value){this.attributes[key]=value;}};}
+const removedIds=new Set(['marker-details','chart-selection-status','chart-range-summary','event-context','replay-evidence-card','replay-slider','replay-date','replay-prev','replay-next','replay-reset']);
+function element(id){if(removedIds.has(id))return null;if(!elements.has(id))elements.set(id,newElement());return elements.get(id);}
 global.document={getElementById:element,documentElement:{},createElementNS:(_,tag)=>newElement(tag),querySelectorAll:()=>[]};
 global.getComputedStyle=()=>({getPropertyValue:()=> '#123456'});global.ResizeObserver=class{observe(){}};
 global.requestAnimationFrame=()=>1;global.window={innerWidth:907,innerHeight:924,addEventListener(){}};global.location={hash:''};
@@ -109,7 +110,13 @@ state.query={symbol:'600027.SH',start:dates[0],end:dates[2]};state.dates=dates;s
 element('analysis-chart').clientWidth=640;element('view-analysis').hidden=false;
 renderAnalysis(false);interactions.seedHistory(rows);updateReplay();
 assert(element('history-evidence-table').innerHTML.includes('2026-07-01'));
-assert(element('replay-evidence-card').innerHTML.includes('13 元'));
+function expectCurrentPrice(value,date) {
+  assert.equal(state.analysis.chart_evidence.rows.find(row=>row.date===date).reference_close,value);
+  const visibleRow=element('history-evidence-table').innerHTML.split('<tr').find(row=>row.includes(`data-history-date="${date}"`));
+  assert(visibleRow,`missing visible history row for ${date}`);
+  assert(visibleRow.includes(`<td>${value}</td>`),`wrong visible reference price for ${date}`);
+}
+expectCurrentPrice(13,dates[2]);
 const hover=time=>crosshair({time,point:{x:420,y:430},seriesData:new Map([[firstSeries,{close:11}]])});
 hover(dates[0]);assert.equal(selectedChipProfile().as_of,dates[0]);
 assert(element('chart-evidence-popup').hidden);assert.equal(interactions.selection().popupOpen,false);
@@ -160,45 +167,45 @@ state.frequency='日线';updateChartSelection('clear');
 global.sessionStorage={getItem:()=>null};
 let resolveRequest;global.fetch=()=>new Promise(resolve=>{resolveRequest=resolve;});
 const pending=analyze({...state.query,as_of:dates[0]},true);
-assert(element('replay-evidence-card').innerHTML.includes('加载中'));
-assert(!element('replay-evidence-card').innerHTML.includes('13 元'));
 assert(element('history-evidence-table').innerHTML.includes('加载中'));assert(element('chart-evidence-popup').hidden);
-assert(element('replay-prev').disabled);
+assert(!element('history-evidence-table').innerHTML.includes('<td>13</td>'));
+assert.equal(interactions.loading(),true);
+assert.equal(element('analysis-form').querySelector('[type=submit]').disabled,true);
 const response={...state.analysis,as_of:dates[0],data_end:dates[0],chart_evidence:{rows:[rows[0]]},
  frequencies:{'日线':{bars:[bars[0]],indicators:{rows:[bars[0]],chip_profile:old,chip_profiles:{[dates[0]]:old}}}}};
 resolveRequest({ok:true,status:200,text:async()=>JSON.stringify(response)});
-pending.then(async()=>{assert(element('replay-evidence-card').innerHTML.includes('11 元'));assert.deepEqual(state.query.consensus_config,consensus.config);
+pending.then(async()=>{expectCurrentPrice(11,dates[0]);assert.deepEqual(state.query.consensus_config,consensus.config);
   assert(!element('history-evidence-table').innerHTML.includes('2026-07-03'));
   assert(element('history-evidence-table').innerHTML.includes('2026-07-01'));
   global.fetch=async()=>({ok:false,status:500,text:async()=>JSON.stringify({detail:'analysis failed'})});
   await analyze({...state.query,as_of:dates[1]},true);
-  assert(element('replay-evidence-card').innerHTML.includes('不可用'));
-  assert(!element('replay-evidence-card').innerHTML.includes('11 元'));
+  assert.equal(state.analysis,null);
+  assert(!element('history-evidence-table').innerHTML.includes('<td>11</td>'));
   assert(element('history-evidence-table').innerHTML.includes('不可用'));
   const requests=[];global.fetch=()=>new Promise(resolve=>requests.push(resolve));
   const earlier=analyze({...state.query,as_of:dates[0]},true);
   const newer=analyze({...state.query,as_of:dates[2]},true);
   requests[1]({ok:true,status:200,text:async()=>JSON.stringify({...response,as_of:dates[2],data_end:dates[2],chart_evidence:{rows}})});
-  await newer;assert(element('replay-evidence-card').innerHTML.includes('13 元'));
+  await newer;expectCurrentPrice(13,dates[2]);
   requests[0]({ok:true,status:200,text:async()=>JSON.stringify(response)});await earlier;
-  assert(element('replay-evidence-card').innerHTML.includes('13 元'));assert.equal(state.query.as_of,dates[2]);
+  expectCurrentPrice(13,dates[2]);assert.equal(state.query.as_of,dates[2]);
   // Saved B wins over an analysis A that was already running when B opened.
   const savedB={...response,symbol:'600028.SH',chart_evidence:{rows:[{...rows[0],symbol:'600028.SH',reference_close:88}]}};
   const queued=[];global.fetch=()=>new Promise(resolve=>queued.push(resolve));
   const oldAnalysis=analyze({symbol:'600027.SH',as_of:dates[0]},true);
   const saved=interactions.openRun('saved-B');
   queued[1]({ok:true,status:200,text:async()=>JSON.stringify({kind:'analysis',result:savedB})});await saved;
-  assert.equal(state.analysis.symbol,'600028.SH');assert(element('replay-evidence-card').innerHTML.includes('88 元'));
+  assert.equal(state.analysis.symbol,'600028.SH');expectCurrentPrice(88,dates[0]);
   assert.equal(interactions.loading(),false);
   queued[0]({ok:true,status:200,text:async()=>JSON.stringify(response)});await oldAnalysis;
-  assert.equal(state.analysis.symbol,'600028.SH');assert(element('replay-evidence-card').innerHTML.includes('88 元'));
+  assert.equal(state.analysis.symbol,'600028.SH');expectCurrentPrice(88,dates[0]);
   // Two saved-run requests also obey the latest request, independent of arrival.
   const runs=[];global.fetch=()=>new Promise(resolve=>runs.push(resolve));
   const runFirst=interactions.openRun('older-saved'),runLast=interactions.openRun('newer-saved');
   const savedC={...savedB,symbol:'600029.SH',chart_evidence:{rows:[{...rows[0],symbol:'600029.SH',reference_close:99}]}};
   runs[1]({ok:true,status:200,text:async()=>JSON.stringify({kind:'analysis',result:savedC})});await runLast;
   runs[0]({ok:true,status:200,text:async()=>JSON.stringify({kind:'analysis',result:savedB})});await runFirst;
-  assert.equal(state.analysis.symbol,'600029.SH');assert(element('replay-evidence-card').innerHTML.includes('99 元'));
+  assert.equal(state.analysis.symbol,'600029.SH');expectCurrentPrice(99,dates[0]);
   // Opening another result type does not cancel a pending analysis.
   let displayedKind;interactions.setRunDisplay(kind=>{displayedKind=kind;});
   const mixed=[];global.fetch=()=>new Promise(resolve=>mixed.push(resolve));
@@ -207,13 +214,13 @@ pending.then(async()=>{assert(element('replay-evidence-card').innerHTML.includes
   mixed[1]({ok:true,status:200,text:async()=>JSON.stringify({kind:'scan',result:{rows:[]}})});await savedScan;
   assert.equal(displayedKind,'scan');assert.equal(interactions.loading(),true);
   mixed[0]({ok:true,status:200,text:async()=>JSON.stringify(response)});await activeAnalysis;
-  assert.equal(state.analysis.symbol,'600027.SH');assert(element('replay-evidence-card').innerHTML.includes('11 元'));
+  assert.equal(state.analysis.symbol,'600027.SH');expectCurrentPrice(11,dates[0]);
   // A new analysis started after a saved request stays newer than that request.
   const last=[];global.fetch=()=>new Promise(resolve=>last.push(resolve));
   const staleSaved=interactions.openRun('stale-saved'),freshAnalysis=analyze({symbol:'600027.SH',as_of:dates[0]},true);
   last[1]({ok:true,status:200,text:async()=>JSON.stringify(response)});await freshAnalysis;
   last[0]({ok:true,status:200,text:async()=>JSON.stringify({kind:'analysis',result:savedC})});await staleSaved;
-  assert.equal(state.analysis.symbol,'600027.SH');assert(element('replay-evidence-card').innerHTML.includes('11 元'));
+  assert.equal(state.analysis.symbol,'600027.SH');expectCurrentPrice(11,dates[0]);
   // Opening a saved analysis from the hidden Data view must reveal Analysis
   // synchronously before chip layout resize and fitContent, without waiting
   // for the browser's later hashchange callback.

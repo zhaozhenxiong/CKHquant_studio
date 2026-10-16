@@ -31,7 +31,9 @@ assert(grouped.markers.filter(e=>e.text.endsWith('S')).every(e=>e.color==='green
 const sourceGroup=grouped.groups.find(g=>g.kind==='source_reference'&&g.source_label==='结构');
 const evidence={rows:[{date,symbol,analysis_mode:'reference',reference_close:30,reference_price_date:date,agents:{}}]};
 const html=ui.popupHtml({evidence,groups:[sourceGroup],consensus:{version:'trend_consensus',rows:[{date,action:'WAIT',analysis_mode:'reference',agents:{}}]},barDate:date,frequency:'日线'});
-assert(html.includes('结构来源 S'));assert(html.includes('S · 卖方参考'));assert(html.includes('同日最终共识未通过'));
+assert(html.includes('结构来源 S'));assert(html.includes('S · 卖方参考'));
+assert(!html.includes('同日最终共识未通过'));assert(html.includes('首次可用 '+stamp));
+assert.equal(point.consensus_qualified,false);assert.equal(point.consensus_action,'WAIT');
 assert(!html.includes('账户退出'));assert.equal(ui.referenceSelection({evidence,groups:[sourceGroup],barDate:date}).price,30);
 ''')
 
@@ -84,8 +86,10 @@ def test_reference_shell_removed_account_and_backtest_handlers_and_keeps_binding
     assert set(validate()['routes']) == {'analysis','scan','watchlist','training','parameters','data','simulation'}
     html=(STATIC.parent/'index.html').read_text()
     js=(STATIC/'workbench.js').read_text()
-    for removed in ['view-backtest','view-holdings','send-backtest','id="trade-rows"','id="equity-chart"','backtest-form','holdings-form']:
+    for removed in ['view-backtest','view-holdings','send-backtest','id="trade-rows"','id="equity-chart"','id="backtest-form"','id="holdings-form"']:
         assert removed not in html and removed not in js
+    # The current market backtest form drafts the independent simulation account.
+    assert 'id="market-backtest-form"' in html
     run_js(r'''
 const assert=require('node:assert/strict'),fs=require('fs'),vm=require('vm'),p=require('path');
 const ids=new Set([...fs.readFileSync(p.join(process.argv[1],'../index.html'),'utf8').matchAll(/id="([^"]+)"/g)].map(m=>m[1]));

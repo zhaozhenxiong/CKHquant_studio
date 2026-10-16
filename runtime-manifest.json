@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "application_version": "1.0.2",
+  "application_version": "1.0.3",
   "method": "CZSC",
   "version": "1.0.1",
   "source_manifest": "app/czsc-source-manifest.json",
@@ -67,7 +67,17 @@
     "verified-history-and-forecast-chart",
     "cutoff-method-direction-layer",
     "full-population-method-screening",
-    "saved-scan-board-method-summary"
+    "saved-scan-board-method-summary",
+    "market-opportunity-workspace",
+    "parallel-bounded-board-member-refresh",
+    "lazy-board-capital-90-50-20",
+    "readonly-existing-broker-fill-chart",
+    "paced-account-checkpoints",
+    "bounded-account-prediction-input-preparation",
+    "pinned-meta-device-kronos-loading",
+    "factual-fresh-tensor-device-execution",
+    "bounded-spawn-source-preparation",
+    "phase-specific-inference-and-account-progress"
   ],
   "python": "3.12",
   "devices": [
@@ -76,12 +86,12 @@
     "cuda"
   ],
   "platform_verification": {
-    "macos_arm64_cpu": "pending_1_0_2_exact_installed_asset_verification",
-    "macos_arm64_mps": "pending_1_0_2_exact_installed_asset_verification",
-    "windows_x64_cpu": "pending_1_0_2_exact_installed_asset_verification",
-    "linux_x64_cpu": "pending_1_0_2_exact_installed_asset_verification",
-    "windows_x64_cuda": "not_verified_1_0_2",
-    "linux_x64_cuda": "not_verified_1_0_2",
+    "macos_arm64_cpu": "pending_1_0_3_exact_installed_asset_verification",
+    "macos_arm64_mps": "pending_1_0_3_exact_installed_asset_verification",
+    "windows_x64_cpu": "pending_1_0_3_exact_installed_asset_verification",
+    "linux_x64_cpu": "pending_1_0_3_exact_installed_asset_verification",
+    "windows_x64_cuda": "not_verified_1_0_3",
+    "linux_x64_cuda": "not_verified_1_0_3",
     "macos_x64": "not_in_release_matrix"
   },
   "verification_report": "release-validation.json",
@@ -98,10 +108,10 @@
   "verification_scope": {
     "financial_certification": false,
     "source_commit_binding": "release_manifest_generated_from_actual_release_checkout",
-    "version_1_0_2": "pending_exact_installed_asset_and_platform_validation"
+    "version_1_0_3": "pending_exact_installed_asset_and_platform_validation"
   },
   "software_release": {
-    "version": "1.0.2",
+    "version": "1.0.3",
     "status": "pending_exact_merged_source_and_installed_asset_validation",
     "authorized_by": "user",
     "parameter_policy": "frozen_research_candidates_no_automatic_promotion",
@@ -146,7 +156,7 @@
     "contains_trained_models": false,
     "contains_personal_data": false,
     "local_model_baseline_published": false,
-    "tag": "v1.0.2",
+    "tag": "v1.0.3",
     "source_commit_binding": "release.json.git_revision_generated_from_exact_release_checkout",
     "contains_research_ledgers": false
   },

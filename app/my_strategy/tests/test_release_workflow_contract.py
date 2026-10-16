@@ -229,3 +229,15 @@ def test_windows_final_probe_uses_selected_source_and_exact_installed_bytes(tmp_
     assert command[command.index('--expected-wheel-sha256') + 1] == digest
     assert command[command.index('--expected-version') + 1] == application_version()
     assert options['check'] is True
+
+
+def test_each_platform_runs_new_frontend_contracts_with_node():
+    for name, job in [('governance-adr.yml', 'test'), ('portable-release.yml', 'wheels')]:
+        command = next(item['run'] for item in steps(name, job)
+            if item.get('name') == 'Verify frontend contracts')
+        assert "glob('test_*.cjs')" in command
+        assert "(root / 'web_dashboard/scripts').glob('test_*.js')" in command
+        assert 'test_chart_markers.js' in command and 'test_market_opportunities.js' in command
+        assert "['node', '--test', *map(str, tests)]" in command
+        assert "check=True" in command and 'all(path.is_file()' in command
+        compile(command, name+'-frontend-contracts', 'exec')

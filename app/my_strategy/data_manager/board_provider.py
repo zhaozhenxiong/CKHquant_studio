@@ -12,6 +12,7 @@ import math
 import os
 from pathlib import Path
 import re
+import threading
 import time
 from urllib.parse import urlencode
 
@@ -33,6 +34,7 @@ KINDS = {'industry': ('I', 'industry'), 'concept': ('C', 'cn_concept')}
 class BoardSourceError(ValueError): pass
 class BoardAccessError(BoardSourceError): pass
 class BoardBudgetExhausted(BoardSourceError): pass
+class BoardCollectionStopped(InterruptedError): pass
 
 
 def _hash(value):
@@ -96,19 +98,68 @@ class FuyaoBoardProvider:
     taxonomy = TAXONOMY
     historical_membership_verified = False
 
-    def __init__(self, *, session=None, request_budget=2000, min_interval=1.0, timeout=20, env_file=None):
+    def __init__(self, *, session=None, session_factory=None, request_budget=2000, min_interval=1.0, timeout=20, env_file=None):
         if type(request_budget) is not int or request_budget < 1:
             raise ValueError('request budget must be a positive integer')
         if isinstance(min_interval, bool) or not isinstance(min_interval, (int, float)) or not math.isfinite(min_interval) or min_interval < 0:
             raise ValueError('request interval must be nonnegative')
         self._api_key = load_board_api_key(env_file)
-        self.session = session or requests.Session()
+        if session is not None and session_factory is not None:
+            raise ValueError('provide either one serial session or an independent session factory')
+        self._session_factory = session_factory or requests.Session
+        self.session = session or self._session_factory()
+        # A caller-supplied single Session retains its serial contract. Normal
+        # collection owns one independent connection pool per actual thread.
+        self.concurrent_safe = session is None
+        self._local = threading.local(); self._local.session = self.session
+        self._sessions = [self.session]
+        self._gate = threading.Lock()
+        self._stop = threading.Event(); self._access_error = None
         self.request_budget, self.request_count = request_budget, 0
         self.min_interval, self.timeout = float(min_interval), float(timeout)
         self._last_request = None
         self.catalog_provenance = {}
 
-    def close(self): self.session.close()
+    def stop(self): self._stop.set()
+
+    def close(self):
+        self.stop()
+        for session in self._sessions: session.close()
+
+    def _session(self):
+        session = getattr(self._local, 'session', None)
+        if session is None:
+            session = self._session_factory()
+            with self._gate:
+                if any(session is item for item in self._sessions):
+                    raise ValueError('concurrent Fuyao sessions must be independent')
+                self._sessions.append(session)
+            self._local.session = session
+        return session
+
+    def _permit(self):
+        # One global start interval and budget for catalogs AND every worker.
+        # Holding the gate through the interruptible wait prevents a burst of
+        # previously reserved requests when a slow response finally returns.
+        with self._gate:
+            if self._access_error: raise BoardAccessError(self._access_error)
+            if self._stop.is_set(): raise BoardCollectionStopped('Fuyao collection stopped')
+            if self.request_count >= self.request_budget:
+                raise BoardBudgetExhausted('Fuyao request budget exhausted; resume with a new explicit budget')
+            if self._last_request is not None:
+                remaining = self.min_interval - (time.monotonic() - self._last_request)
+                if remaining > 0 and self._stop.wait(remaining):
+                    if self._access_error: raise BoardAccessError(self._access_error)
+                    raise BoardCollectionStopped('Fuyao collection stopped')
+            if self._access_error: raise BoardAccessError(self._access_error)
+            if self._stop.is_set(): raise BoardCollectionStopped('Fuyao collection stopped')
+            self.request_count += 1; self._last_request = time.monotonic()
+
+    def _refuse(self, message):
+        # Set the event before acquiring the gate: a waiting limiter must wake
+        # immediately, rather than start another request after access refusal.
+        self._access_error = message; self._stop.set()
+        raise BoardAccessError(message)
 
     def _safe(self, value):
         if isinstance(value, str): return value.replace(self._api_key, '[REDACTED]')
@@ -119,20 +170,16 @@ class FuyaoBoardProvider:
         return value
 
     def _get(self, path, params):
-        if self.request_count >= self.request_budget:
-            raise BoardBudgetExhausted('Fuyao request budget exhausted; resume with a new explicit budget')
-        if self._last_request is not None:
-            remaining = self.min_interval - (time.monotonic() - self._last_request)
-            if remaining > 0: time.sleep(remaining)
-        self.request_count += 1; self._last_request = time.monotonic()
+        session = self._session()
+        self._permit()
         try:
-            response = self.session.get(BASE_URL + path, params=params,
+            response = session.get(BASE_URL + path, params=params,
                 headers={'X-api-key': self._api_key, 'Accept': 'application/json', 'User-Agent': 'KHQuant/0.1.7'},
                 timeout=self.timeout, allow_redirects=False)
         except requests.RequestException as exc:
             raise BoardSourceError('Fuyao transport request failed: ' + type(exc).__name__) from None
         if response.status_code in (401, 403, 429):
-            raise BoardAccessError('Fuyao access refused or rate limited: HTTP ' + str(response.status_code))
+            self._refuse('Fuyao access refused or rate limited: HTTP ' + str(response.status_code))
         if response.status_code != 200:
             raise BoardSourceError('Fuyao HTTP response invalid: ' + str(response.status_code))
         try: payload = self._safe(response.json())
@@ -140,7 +187,7 @@ class FuyaoBoardProvider:
         if not isinstance(payload, dict): raise BoardSourceError('Fuyao response envelope missing')
         code = payload.get('code')
         if code in (2001, 2003, 4001):
-            raise BoardAccessError('Fuyao authentication, permission or rate limit failure: code ' + str(code))
+            self._refuse('Fuyao authentication, permission or rate limit failure: code ' + str(code))
         if type(code) is not int or code != 0:
             raise BoardSourceError('Fuyao business response failed: code ' + str(code))
         data = payload.get('data')

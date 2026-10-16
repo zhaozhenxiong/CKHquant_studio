@@ -60,7 +60,7 @@ def test_analysis_low_quality_still_uses_original_ref_and_invalidates_on_edit():
     run(r'''
 let renders=[];KHQuantPredictionChart.create=()=>({render:(value,api)=>renders.push(value),clear(){},onRoute(){}});
 KHQuantMethodPresentation.analysisChart({...result,method_view:{...view,valid:false,forecast_valid:false,status:'unavailable'}},()=>{throw Error('unexpected');});
-assert.equal(renders[0].result_ref.cache_key,'synthetic-ref');assert(element('analysis-prediction-summary').textContent.includes('不生成方法 B/S'));
+assert.equal(renders[0].result_ref.cache_key,'synthetic-ref');assert(element('analysis-prediction-summary').textContent.includes('方法不可用'));assert(element('analysis-prediction-summary').textContent.includes('预测路径质量不足'));assert.equal(KHQuantChartEvidence.methodMarkerInputs({...result,method_view:{...view,valid:false,forecast_valid:false,status:'unavailable'}}).length,0);
 KHQuantMethodPresentation.analysisChart(result,()=>{}, {dirty:true});assert(element('analysis-prediction').hidden);
 workbench.prepareMethodLayers(result);assert(element('layer-method').checked);assert(!element('layer-sources').checked);
 workbench.prepareMethodLayers({analysis_method:'structure'});assert(!element('layer-method').checked);assert(element('layer-sources').checked);
@@ -95,7 +95,7 @@ def test_scan_saved_match_checks_actual_parameters_and_new_full_population_filte
 workbench.state.scan={...result,run_id:'synthetic-run',rows:[],coverage:{requested:5000},scan_view:{paged:true,total:5000,total_rows:5000}};
 assert.equal(KHQuantMethods.scanSelection().run_id,'synthetic-run');element('scan-samples').value='8';assert.equal(KHQuantMethods.scanSelection().run_id,null);element('scan-samples').value='32';
 element('scan-filter').value='watch';readAnswer=async url=>{assert(url.includes('/api/boards/method-scans/synthetic-run/stocks?'));assert(url.includes('category=wait'));return {...workbench.state.scan,population_summary:{counts},rows:[{symbol:'000001.SZ',method_view:{...view,direction:'WAIT'},method_evaluation:{method,status:'complete'}}],scan_view:{paged:true,total:2100,total_rows:5000}};};
-await workbench.loadScanPage();assert(element('scan-method-summary').innerHTML.includes('5,000'));assert(element('scan-method-summary').innerHTML.includes('2,100'));assert.equal(element('scan-count').textContent,'5,000');
+await workbench.loadScanPage();assert(element('scan-method-summary').innerHTML.includes('5,000'));assert(element('scan-method-summary').innerHTML.includes('2,100'));assert.equal(element('scan-count').textContent,'2,100');assert.equal(workbench.state.scan.scan_view.total_rows,5000);assert.equal(workbench.state.scan.population_summary.counts.expected,5000);assert(element('scan-page-label').textContent.includes('2,100'));
 ''')
 
 

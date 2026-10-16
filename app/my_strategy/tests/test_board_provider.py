@@ -308,9 +308,9 @@ def test_provider_defaults_to_one_second_start_interval_without_real_wait(monkey
     clock, sleeps = [10.0], []
     monkeypatch.setattr(provider_module.time, 'monotonic', lambda: clock[0])
     def sleep(seconds): sleeps.append(seconds); clock[0] += seconds
-    monkeypatch.setattr(provider_module.time, 'sleep', sleep)
     session = Session([Response(catalogs()), Response(catalogs())])
     provider = FuyaoBoardProvider(session=session)
+    monkeypatch.setattr(provider._stop, 'wait', lambda seconds: sleep(seconds) or False)
     assert provider.min_interval == 1.0
     assert len(provider.catalog(['industry'])) == 2
     assert sleeps == [1.0] and provider.request_count == 2

@@ -143,6 +143,29 @@ class BoardMethodSummary:
         con.execute('PRAGMA query_only=ON')
         return con
 
+    def _remember(self, key, value):
+        """Reports and membership projections share the same LRU/byte budget."""
+        size = len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode())
+        if size <= self.cache_bytes and self.cache_entries:
+            while self._cache and (len(self._cache) >= self.cache_entries or self._bytes+size > self.cache_bytes):
+                _, (_, removed) = self._cache.popitem(last=False)
+                self._bytes -= removed
+            self._cache[key] = (value, size)
+            self._bytes += size
+
+    def _knowledge_signature(self):
+        # A committed SQLite write can live entirely in WAL. Main-file mtime
+        # alone would hide new manifests, memberships or corrupted source proofs.
+        # Include inode/ctime as well to notice replacement and same-size edits.
+        path = BoardKnowledgeStore(self.kb_path, readonly=True).path
+        signatures = []
+        for item in (path, Path(str(path)+'-wal'), Path(str(path)+'-journal')):
+            try:
+                signatures.append(_signature(item))
+            except FileNotFoundError:
+                signatures.append(None)
+        return (str(path), *signatures)
+
     def list_runs(self, *, method, as_of, page=1, page_size=20):
         self._selection(method, as_of)
         if page < 1 or not 1 <= page_size <= 100:
@@ -220,11 +243,7 @@ class BoardMethodSummary:
                 raise ValueError('saved scan report SHA mismatch')
             report = _json(encoded)
             result = self._validate(report, run_id, method, as_of, row['row_count'], row['report_sha256'])
-            size = len(json.dumps(result, ensure_ascii=False, allow_nan=False).encode())
-            if size <= self.cache_bytes and self.cache_entries:
-                while self._cache and (len(self._cache) >= self.cache_entries or self._bytes+size > self.cache_bytes):
-                    _, (_, removed) = self._cache.popitem(last=False); self._bytes -= removed
-                self._cache[key] = (result, size); self._bytes += size
+            self._remember(key, result)
             return result
 
     @staticmethod
@@ -351,9 +370,41 @@ class BoardMethodSummary:
             boards.append(board); members[board['board_id']] = selected
         return boards, members
 
+    def _board_projection(self, report):
+        """Reuse only a fully authenticated projection of unchanged DB files.
+
+        Keep symbols rather than repeated stock-result dictionaries in the
+        projection. Member pagination joins back to the authenticated report.
+        The existing lock also combines concurrent misses, avoiding 710 source
+        proof checks for every simultaneous summary/member request.
+        """
+        with self._lock:
+            for _ in range(2):
+                signature = self._knowledge_signature()
+                for stale in list(self._cache):
+                    if len(stale) == 3 and stale[0] == 'boards' and stale[2] != signature:
+                        _, removed = self._cache.pop(stale)
+                        self._bytes -= removed
+                key = ('boards', stable_hash(report['identity']), signature)
+                cached = self._cache.get(key)
+                if cached is not None:
+                    self._cache.move_to_end(key)
+                    return cached[0]
+                boards, members = self._boards(report)
+                projection = {'boards': boards, 'members': {
+                    board: [row['symbol'] for row in rows] for board, rows in members.items()}}
+                if signature != self._knowledge_signature():
+                    # Never publish a projection assembled while a manifest or
+                    # source changed. Retry once; a busy writer stays explicit.
+                    continue
+                self._remember(key, projection)
+                return projection
+        raise ValueError('board knowledge changed during saved summary read; retry')
+
     def summary(self, run_id, *, method, as_of, board_id=None, page=1, page_size=40, query='', category='all', symbols=None):
         report = self._read(run_id, method, as_of)
-        boards, members = self._boards(report)
+        projection = self._board_projection(report)
+        boards = projection['boards']
         identity = {**deepcopy(report['identity']), 'calculation_scope': CALCULATION_SCOPE,
             'memberships': {board['board_id']: {'snapshot_hash': board['membership']['snapshot_hash'],
                 'projection_hash': board['membership']['projection_hash']} for board in boards}}
@@ -371,6 +422,11 @@ class BoardMethodSummary:
             board = next((b for b in boards if b['board_id'] == board_id), None)
             if board is None:
                 raise KeyError(board_id)
-            rows, pagination = _page(members[board_id], page, page_size, query, category, symbols)
-            return result | {'board': board, 'rows': rows, 'pagination': pagination}
-        return result | {'boards': boards}
+            lookup = {row['symbol']: row for row in report['rows']}
+            selected = [lookup.get(symbol) or {'symbol': symbol, 'name': '', 'method_view': {
+                'status': 'not_in_scan', 'valid': False, 'direction': None, 'reason_codes': ['not_in_frozen_scan_population'],
+                'forecast_valid': False, 'score_valid': False, 'method': report['analysis_method'], 'as_of': report['as_of']}}
+                for symbol in projection['members'][board_id]]
+            rows, pagination = _page(selected, page, page_size, query, category, symbols)
+            return result | {'board': deepcopy(board), 'rows': rows, 'pagination': pagination}
+        return result | {'boards': deepcopy(boards)}

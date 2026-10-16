@@ -48,7 +48,7 @@ const descendants=element=>[element,...element.children.flatMap(descendants)];
 def test_current_ui_refuses_old_scope_even_if_stale_server_returns_it():
     run_js(r'''
 (async()=>{
-global.fetch=async(path,options={})=>{calls.push([path,options.method||'GET']);return response(path==='/api/boards/status'?state(legacy):{jobs:[]});};
+global.fetch=async(path,options={})=>{calls.push([path,options.method||'GET']);return response(new URL(path,'http://local').pathname==='/api/boards/status'?state(legacy):{jobs:[]});};
 await ui.refresh();
 assert.deepEqual(commits,[['rows',null],['visual',null]]);
 assert.equal(calls.some(([path])=>path.includes('/rankings?')||path.includes('/capital-visualization?')),false);
@@ -70,14 +70,14 @@ global.fetch=async(path,options={})=>{
  return response({jobs:[]});
 };
 await ui.refresh();
-assert.equal(calls[0][0],'/api/boards/status?generation_id=old-mixed');
+assert.equal(calls[0][0],'/api/boards/status?compact=true&generation_id=old-mixed');
 assert.deepEqual(commits,[['rows','old-mixed'],['visual','old-mixed']]);
 assert.match(el('board-status').textContent,/历史原范围.*显式历史版本/);
 await assert.rejects(ui.start('/features/build',{}),/切回/);
 await assert.rejects(ui.previewFill(),/切回/);
 assert(calls.every(([,method])=>method==='GET'));
 el('board-generation').value='';
-global.fetch=async path=>response(path==='/api/boards/status'?state(null):{jobs:[]});
+global.fetch=async path=>response(new URL(path,'http://local').pathname==='/api/boards/status'?state(null):{jobs:[]});
 await ui.refresh();assert.deepEqual(commits.slice(-2),[['rows',null],['visual',null]]);
 assert.equal(el('board-detail').hidden,true);
 })().catch(error=>{console.error(error);process.exitCode=1;});

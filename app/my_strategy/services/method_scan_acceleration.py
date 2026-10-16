@@ -26,6 +26,7 @@ from types import FunctionType
 VERSION = 'method_source_spawn_v1'
 _WORKER_LIGHT = None
 _WORKER_CANCEL = None
+_WORKER_THREADPOOL_LIMITER = None
 
 
 class PreparationInfrastructureError(InterruptedError):
@@ -66,7 +67,12 @@ class _SourceReader:
 
 
 def _worker_initialize(config, cancel):
-    global _WORKER_LIGHT, _WORKER_CANCEL
+    global _WORKER_LIGHT, _WORKER_CANCEL, _WORKER_THREADPOOL_LIMITER
+    # Source kernels are CPU float64; each process owns one stock. Bound
+    # transitive BLAS/Torch pools instead of multiplying worker counts.
+    for name in ('OMP_NUM_THREADS','OPENBLAS_NUM_THREADS','MKL_NUM_THREADS',
+                 'VECLIB_MAXIMUM_THREADS','NUMEXPR_NUM_THREADS'):
+        os.environ[name] = '1'
     from my_strategy.services import analysis_methods
     from my_strategy.services import light_research
     from my_strategy.services.incremental_source import code_identity
@@ -77,8 +83,26 @@ def _worker_initialize(config, cancel):
         raise RuntimeError('CPU preparation worker code differs from its parent')
     if not Path(config['raw_db']).is_file():
         raise FileNotFoundError('CPU preparation raw database is unavailable')
+    # Spawn can import an application main (and NumPy) before this initializer.
+    # Apply an actual controller after loading the frozen native dependencies,
+    # retaining it for the process lifetime. Environment settings remain a
+    # request for non-introspectable backends such as Apple Accelerate.
+    from my_strategy.adapters.czsc_adapter import native_runtime
+    from threadpoolctl import threadpool_limits
+    native_runtime()
+    _WORKER_THREADPOOL_LIMITER = threadpool_limits(limits=1)
     _WORKER_CANCEL = cancel
     _WORKER_LIGHT = _SourceReader(config)
+
+
+def _worker_threadpools():
+    from threadpoolctl import threadpool_info
+    values = [{key: value.get(key) for key in
+        ('user_api','internal_api','prefix','num_threads','version','threading_layer')}
+        for value in threadpool_info()]
+    if any(value.get('num_threads') != 1 for value in values):
+        raise PreparationInfrastructureError('CPU numerical thread pool exceeded its limit')
+    return values
 
 
 def _worker_prepare(symbol, day, deadline):
@@ -92,13 +116,27 @@ def _worker_prepare(symbol, day, deadline):
     except (sqlite3.Error, CacheCapacityError, OSError) as exc:
         raise PreparationInfrastructureError(f'CPU source storage failed: {type(exc).__name__}: {exc}') from exc
     return {'prepared': prepared, 'pid': os.getpid(),
-            'elapsed_seconds': time.monotonic() - started}
+            'elapsed_seconds': time.monotonic() - started, 'threadpools': _worker_threadpools()}
+
+
+def _worker_account_source(symbol, day, deadline):
+    from my_strategy.storage.research_store import CacheCapacityError
+    started = time.monotonic()
+    try:
+        prepared = _WORKER_LIGHT.source(symbol, day, stop=_WorkerStop(deadline))
+    except (InterruptedError, TimeoutError):
+        raise
+    except (sqlite3.Error, CacheCapacityError, OSError) as exc:
+        raise PreparationInfrastructureError(f'CPU source storage failed: {type(exc).__name__}: {exc}') from exc
+    return {'prepared': prepared, 'pid': os.getpid(),
+            'elapsed_seconds': time.monotonic() - started, 'threadpools': _worker_threadpools()}
 
 
 class _Execution:
     def __init__(self, original):
         from my_strategy.services import light_research
-        self.identity = {'schema': VERSION, 'sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        self.identity = {'schema': VERSION, 'cpu_kernel_thread_limit_requested': 1,
+            'thread_limit_policy':'environment_and_loaded_threadpool_controller', 'sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             'strategy': 'cpu_process_spawn', 'start_method': 'spawn',
             'base_evaluator_sha256': hashlib.sha256(Path(original.__globals__['__file__']).read_bytes()).hexdigest(),
             'source_adapter_sha256': hashlib.sha256(Path(light_research.__file__).read_bytes()).hexdigest(),
@@ -108,6 +146,7 @@ class _Execution:
         self.submitted = 0
         self.received = 0
         self.worker_seconds = 0.
+        self.threadpools = {}
         self.max_workers = None
         self.fatal = None
 
@@ -120,7 +159,9 @@ class _Execution:
         with self.lock:
             return {**self.identity, 'cpu_workers': self.max_workers,
                 'worker_pids': sorted(self.worker_pids), 'source_tasks_submitted': self.submitted,
-                'source_tasks_received': self.received, 'source_worker_seconds': round(self.worker_seconds, 6)}
+                'source_tasks_received': self.received, 'source_worker_seconds': round(self.worker_seconds, 6),
+                'observed_threadpools_by_pid': deepcopy(self.threadpools),
+                'threadpool_scope':'introspectable BLAS/OpenMP libraries only; empty list is not proof of Apple Accelerate thread count'}
 
 
 class _SourceFuture:
@@ -139,13 +180,16 @@ class _SourceFuture:
         if (not isinstance(value, dict) or not isinstance(value.get('prepared'), tuple)
                 or len(value['prepared']) != 4 or type(value.get('pid')) is not int or value['pid'] <= 0
                 or not isinstance(value.get('elapsed_seconds'), (int, float))
-                or not math.isfinite(value['elapsed_seconds']) or value['elapsed_seconds'] < 0):
+                or not math.isfinite(value['elapsed_seconds']) or value['elapsed_seconds'] < 0
+                or not isinstance(value.get('threadpools'),list)
+                or any(not isinstance(pool,dict) or pool.get('num_threads') != 1 for pool in value['threadpools'])):
             raise self._execution.failure(ValueError('Malformed CPU preparation worker response'))
         if not self._recorded:
             with self._execution.lock:
                 self._execution.worker_pids.add(value['pid'])
                 self._execution.received += 1
                 self._execution.worker_seconds += value['elapsed_seconds']
+                self._execution.threadpools[str(value['pid'])] = deepcopy(value.get('threadpools'))
             self._recorded = True
         return value['prepared']
 
@@ -184,6 +228,12 @@ class _PreparationExecutor:
         from my_strategy.services.analysis_methods import prepare_stock
         if function is not prepare_stock:
             raise ValueError('CPU preparation accepts only the original prepare_stock')
+        return self._submit(_worker_prepare, symbol, day, stop)
+
+    def submit_source(self, symbol, day, stop):
+        return self._submit(_worker_account_source, symbol, day, stop)
+
+    def _submit(self, worker, symbol, day, stop):
         if self._parent_stop is None:
             self._parent_stop = stop
             self._monitor = threading.Thread(target=self._watch_cancel, name='method-source-cancel', daemon=True)
@@ -192,7 +242,7 @@ class _PreparationExecutor:
             raise ValueError('A preparation executor cannot mix scan cancellation scopes')
         stop.check()
         try:
-            future = self._pool.submit(_worker_prepare, symbol, day, stop.deadline)
+            future = self._pool.submit(worker, symbol, day, stop.deadline)
         except (BrokenProcessPool, RuntimeError) as exc:
             raise self.execution.failure(exc) from exc
         with self.execution.lock:

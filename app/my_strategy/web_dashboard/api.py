@@ -213,6 +213,8 @@ class TaskSpec(MethodFields):
         if self.analysis_method is not None:
             self.research = self.analysis_method == 'legacy_reference'
         if self.analysis_method in {'structure_kronos', 'structure_kronos_ma_mlp', 'structure_kronos_ma_l2'}:
+            if self.cpu_workers is not None and self.cpu_workers > 12:
+                raise ValueError('组合方法CPU准备进程最多12个')
             if (self.model_run_id or self.model_fold or self.consensus_config is not None or self.consensus_version
                     or self.calendar_run_id or self.model_policy != 'auto'):
                 raise ValueError('组合方法不能使用历史参考模型检查点或参数')

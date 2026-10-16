@@ -16,7 +16,8 @@ global.KHQuantMarkers=require(path.join(root,'chart_markers.js'));require(path.j
 const elements=new Map(),listeners={};
 function newElement(){return {dataset:{},style:{},checked:false,hidden:false,disabled:false,value:'',textContent:'',innerHTML:'',children:[],attributes:{},clientWidth:700,clientHeight:400,offsetWidth:400,offsetHeight:400,
 addEventListener(key,fn){this[key]=fn;},getBoundingClientRect:()=>({left:0,top:0}),querySelector:()=>newElement(),replaceChildren(){this.children=[];this.innerHTML='';},append(child){this.children.push(child);},setAttribute(key,value){this.attributes[key]=value;},hasAttribute(key){return key in this.attributes;}};}
-function el(id){if(!elements.has(id))elements.set(id,newElement());return elements.get(id);}
+const removedIds=new Set(['marker-details','chart-selection-status','chart-range-summary','event-context','replay-evidence-card','replay-slider','replay-date','replay-prev','replay-next','replay-reset','chart-range-start','chart-range-end','chart-range-apply','chart-zoom-in','chart-zoom-out','chart-range-reset','analysis-prediction-history-state']);
+function el(id){if(removedIds.has(id))return null;if(!elements.has(id))elements.set(id,newElement());return elements.get(id);}
 global.document={getElementById:el,documentElement:{},createElementNS:()=>newElement(),querySelectorAll:()=>[],addEventListener(key,fn){listeners[key]=fn;}};
 global.window={innerWidth:1000,innerHeight:900,addEventListener(){}};global.location={hash:''};
 global.getComputedStyle=()=>({getPropertyValue:()=> '#123456'});global.ResizeObserver=class{observe(){}};
@@ -29,7 +30,7 @@ const series=()=>({data:[],markers:[],setData(x){this.data=x;},setMarkers(x){thi
 const chart={addCandlestickSeries:()=>candles=series(),addHistogramSeries:series,addLineSeries:series,removeSeries(){},resize(){},subscribeClick(){},subscribeCrosshairMove(){},timeScale:()=>scale,priceScale:()=>({width:()=>50})};
 global.LightweightCharts={createChart:()=>chart,LineStyle:{Solid:0,Dashed:2}};window.LightweightCharts=LightweightCharts;
 const source=fs.readFileSync(path.join(root,'workbench.js'),'utf8').replace('init().catch(showError);',
-'globalThis.ui={state,bind,applyChartRange,syncChartRange,renderAnalysis,renderEvents,renderMarkerScope,locateLatestSell,resetChartSelection,updateChartSelection,referenceEventCounts,filteredReferenceEvents,latestSellEvent,prepareAnalysisView,currentReanalysisQuery,openRun,replay,analysisHistoryIdentity,storeHistoryEvidence,scanActionCell,history:()=>historyRows};');
+'globalThis.ui={state,bind,syncChartRange,renderAnalysis,renderEvents,renderMarkerScope,locateLatestSell,resetChartSelection,updateChartSelection,referenceEventCounts,filteredReferenceEvents,latestSellEvent,prepareMethodLayers,prepareAnalysisView,currentReanalysisQuery,openRun,replay,analysisHistoryIdentity,storeHistoryEvidence,scanActionCell,history:()=>historyRows};');
 vm.runInThisContext(source);
 const {state}=ui;
 const symbol='002436.SZ',dates=['2026-01-05','2026-01-09','2026-03-09','2026-03-10','2026-07-31'];
@@ -52,6 +53,99 @@ def run_js(body):
         pytest.skip('Node required for workbench behavior checks')
     result = subprocess.run([node, '-e', HARNESS + body, str(STATIC)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_analysis_shell_removes_requested_annotations_and_keeps_working_controls():
+    from html.parser import HTMLParser
+
+    class Shell(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.ids = set()
+
+        def handle_starttag(self, tag, attrs):
+            attributes = dict(attrs)
+            if attributes.get('id'):
+                self.ids.add(attributes['id'])
+
+    shell = Shell()
+    shell.feed((STATIC.parent / 'index.html').read_text(encoding='utf-8'))
+    assert not shell.ids.intersection({
+        'marker-details', 'chart-selection-status', 'chart-range-summary',
+        'event-context', 'replay-evidence-card', 'replay-slider',
+        'replay-date', 'replay-prev', 'replay-next', 'replay-reset',
+        'chart-range-start', 'chart-range-end', 'chart-range-apply', 'chart-zoom-in',
+        'chart-zoom-out', 'chart-range-reset', 'analysis-prediction-history-state',
+    })
+    assert {
+        'history-evidence-table', 'chart-evidence-reset', 'event-list',
+        'analysis-device',
+    }.issubset(shell.ids)
+
+
+def test_source_event_keeps_one_first_known_date_without_repeated_relationship_copy():
+    run_js(r'''
+state.analysis.reference_points=[];state.analysis.trend_consensus.events=[];
+const point={...event('source-confirmed',dates[2],'BUY','structure'),time:dates[0],original_event_date:dates[0],
+  first_available_at:dates[2]+'T15:00:00+08:00',available_at:dates[3]+'T15:00:00+08:00',
+  source_relationship_text:'已确认结构与量价来源；实际仓位变化在模拟账户中核验'};
+const future={...event('future','2026-08-03','SELL','wyckoff')};
+for(const fallback of [false,true]) {
+  const current={...point};
+  if(fallback){delete current.first_available_at;current.available_at=dates[2]+'T15:00:00+08:00';}
+  state.analysis.source_reference_points=[current,future];
+  const original=JSON.stringify(state.analysis);
+  ui.renderEvents();
+  const html=el('event-list').innerHTML;
+  assert.equal(el('event-count').textContent,'1 / 1');
+  assert.equal((html.match(/class="event-time"/g)||[]).length,1);
+  const displayedTime=html.match(/<p class="event-time">([\s\S]*?)<\/p>/)?.[1];
+  assert.equal(displayedTime,'<time datetime="2026-03-09T15:00:00+08:00">2026-03-09</time>');
+  assert(!displayedTime.includes(dates[0]));assert(!displayedTime.includes(dates[3]));
+  assert(!html.includes('已确认结构与量价来源'));assert(!html.includes('实际仓位变化在模拟账户中核验'));
+  assert(html.includes('买入参考价 11 元'));assert(html.includes('data-locate-event="2026-03-09"'));
+  assert(!html.includes('2026-08-03'));
+  const grouped=KHQuantMarkers.build({bars,dailyBars:bars,frequency:'日线',symbol,
+    events:KHQuantChartEvidence.referenceMarkerInputs(state.analysis).events,
+    consensusVersion:'reference_position_v1',asOf:dates.at(-1),up:'red',down:'green'});
+  const popup=KHQuantChartEvidence.popupHtml({evidence:{structure_only:true,rows:[{date:dates[2],symbol,reference_close:11,reference_price_date:dates[2]}]},
+    groups:grouped.groups,barDate:dates[2],frequency:'日线'});
+  assert(popup.includes('首次可用 2026-03-09T15:00:00+08:00'));
+  assert(popup.includes('参考价 11 元'));
+  assert(!popup.includes('已确认结构与量价来源'));assert(!popup.includes('实际仓位变化在模拟账户中核验'));
+  assert.equal(JSON.stringify(state.analysis),original);
+}
+''')
+
+
+def test_unavailable_combination_preserves_sources_without_manufacturing_method_points():
+    run_js(r'''
+const last=dates.at(-1),method='structure_kronos';
+function combo(valid,status) {
+  return {...result(),analysis_method:method,method_view:{schema:'method_display_v1',method,label:'结构与量价 + Kronos',
+    valid,status,as_of:last,direction:'BUY',method_reference_points:[{symbol,method,reference_layer:'method',
+      action:'BUY',date:last,market_cutoff_at:last+'T15:00:00+08:00',reference_price:11}]}};
+}
+for(const [valid,status,sourceVisible] of [[false,'unavailable',true],[false,'complete',true],[true,'unavailable',true],[true,'complete',false]]) {
+  state.analysis=combo(valid,status);const original=JSON.stringify(state.analysis);
+  ui.prepareMethodLayers(state.analysis);
+  assert.equal(el('layer-method').checked,true);assert.equal(el('layer-sources').checked,sourceVisible);
+  ui.renderAnalysis(false);ui.renderEvents();
+  assert.equal(candles.markers.some(marker=>marker.text==='法B'),valid&&status==='complete');
+  assert.equal(el('event-list').innerHTML.includes('来源 B'),sourceVisible);
+  assert.equal(JSON.stringify(state.analysis),original,'presentation must not change stored method eligibility');
+  // A user can still choose the source layer after the default is applied.
+  el('layer-sources').checked=!sourceVisible;ui.renderAnalysis(false);ui.renderEvents();
+  assert.equal(el('layer-sources').checked,!sourceVisible);
+  assert.equal(el('event-list').innerHTML.includes('来源 B'),!sourceVisible);
+  assert.equal(JSON.stringify(state.analysis),original);
+}
+state.analysis={...result(),analysis_method:'structure'};const original=JSON.stringify(state.analysis);
+ui.prepareMethodLayers(state.analysis);ui.renderAnalysis(false);ui.renderEvents();
+assert.equal(el('layer-method').checked,false);assert.equal(el('layer-sources').checked,true);
+assert(el('event-list').innerHTML.includes('来源 B'));assert(!candles.markers.some(marker=>marker.text==='法B'));
+assert.equal(JSON.stringify(state.analysis),original);
+''')
 
 
 def test_full_loaded_visible_counts_filters_and_sell_navigation_are_independent():
@@ -171,8 +265,9 @@ assert.equal(state.analysis.run_id,'archive');
 assert.equal(state.archive,true);assert.equal(el('analysis-model').value,'current-form-model');
 assert(!Object.hasOwn(state.query,'model_run_id'));assert(!Object.hasOwn(state.query,'consensus_config'));
 assert(el('analysis-result-caption').textContent.includes('只读归档 · trend_consensus'));
-assert.equal(el('replay-slider').disabled,true);
+const archivedQuery=state.query,archivedResult=state.analysis;
 await ui.replay(0);assert.equal(calls.length,1);
+assert.equal(state.query,archivedQuery);assert.equal(state.analysis,archivedResult);
 const query=ui.currentReanalysisQuery(archive);
 assert.equal(query.consensus_version,'reference_position_v1');assert.equal(query.model_policy,'auto');
 for(const key of ['model_run_id','model_fold','calendar_run_id','consensus_config','current_position_fraction']) assert(!Object.hasOwn(query,key));
@@ -237,52 +332,33 @@ const legacy=ui.scanActionCell({...base,version:'trend_consensus'});assert(legac
 ''')
 
 
-def test_bound_range_input_draft_survives_change_hover_clear_and_applies_captured_dates():
+def test_native_chart_zoom_and_pan_preserve_method_cutoff_after_toolbar_removal():
     run_js(r'''
 ui.bind();ui.renderAnalysis(false);ui.locateLatestSell('source');
-const before=JSON.stringify(range);
-el('chart-range-start').value='2026-03-09';el('chart-range-start').input();
-ui.updateChartSelection('hover','2026-01-09');ui.syncChartRange();
-assert.equal(el('chart-range-start').value,'2026-03-09');
-el('chart-range-start').change();
-assert.equal(el('chart-range-start').value,'2026-03-09');
-assert.equal(candles.markers.some(x=>x.text.includes('定位')),false);
-el('chart-range-end').value='2026-03-10';el('chart-range-end').input();el('chart-range-end').change();
-ui.updateChartSelection('pin','2026-07-31');ui.updateChartSelection('clear');
-assert.equal(el('chart-range-start').value,'2026-03-09');assert.equal(el('chart-range-end').value,'2026-03-10');
-el('chart-range-apply').click();
+const beforeQuery=JSON.stringify(state.query),beforePoints=JSON.stringify(state.analysis.source_reference_points);
+ui.updateChartSelection('hover','2026-01-09');
+scale.setVisibleLogicalRange({from:1.5,to:3.5});
 assert.deepEqual(range,{from:1.5,to:3.5});
-assert.equal(el('chart-range-start').value,'2026-03-09');assert.equal(el('chart-range-end').value,'2026-03-10');
-assert(el('chart-range-summary').textContent.includes('显示 2 根'));
-// Clicking Apply also captures values when the browser has not dispatched change yet.
-el('chart-range-start').value='2026-01-05';el('chart-range-end').value='2026-01-09';el('chart-range-apply').click();
-assert.deepEqual(range,{from:-.5,to:1.5});
+assert.equal(JSON.stringify(state.query),beforeQuery);
+assert.equal(JSON.stringify(state.analysis.source_reference_points),beforePoints);
+assert.equal(el('chart-range-start'),null);assert.equal(el('chart-range-apply'),null);
+assert(el('marker-view-summary').textContent.includes('当前可见 2026-03-09 至 2026-03-10'));
+ui.updateChartSelection('pin','2026-07-31');ui.updateChartSelection('clear');
+assert.deepEqual(range,{from:1.5,to:3.5});
 ''')
 
 
-def test_bound_invalid_range_preserves_draft_and_selection_until_explicit_navigation():
+def test_removed_toolbar_is_not_bound_and_native_navigation_still_finds_latest_sell():
     run_js(r'''
 ui.bind();ui.renderAnalysis(false);ui.locateLatestSell('target');
-const before=JSON.stringify(range);
-el('chart-range-start').value='2026-07-31';el('chart-range-start').input();
-el('chart-range-end').value='2026-01-09';el('chart-range-end').input();
-el('chart-range-apply').click();
-assert.equal(JSON.stringify(range),before);assert.equal(el('chart-range-start').value,'2026-07-31');assert.equal(el('chart-range-end').value,'2026-01-09');
 assert(candles.markers.some(x=>x.text==='参S · 定位'));
-ui.syncChartRange();assert.equal(el('chart-range-start').value,'2026-07-31');
-el('chart-range-start').value='2026-02-01';el('chart-range-end').value='2026-02-02';el('chart-range-apply').click();
-assert.equal(JSON.stringify(range),before);assert.equal(el('chart-range-start').value,'2026-02-01');
-assert(el('notice').textContent.includes('没有可显示'));
-el('chart-range-reset').click();assert.equal(el('chart-range-start').value,dates[0]);assert.equal(el('chart-range-end').value,dates.at(-1));
-el('chart-range-start').value='2026-03-09';el('chart-range-start').input();el('chart-zoom-in').click();
-assert.notEqual(el('chart-range-start').value,'2026-03-09');
-el('chart-range-start').value='2026-03-09';el('chart-range-start').input();ui.locateLatestSell('source');
-assert.equal(el('chart-range-start').value,dates[0]);
-el('chart-range-start').value='2026-03-09';el('chart-range-start').input();scale.setVisibleLogicalRange({from:1,to:3});
-assert.equal(el('chart-range-start').value,'2026-01-09');assert.equal(el('chart-range-end').value,'2026-03-10');
-// A new result or period render uses its actual view rather than the preceding draft.
-el('chart-range-start').value='2026-07-31';el('chart-range-start').input();state.frequency='周线';ui.renderAnalysis();
-assert.equal(el('chart-range-start').value,dates[0]);assert.equal(el('chart-range-end').value,dates.at(-1));
+const beforeQuery=JSON.stringify(state.query);
+scale.setVisibleLogicalRange({from:1,to:3});
+assert.equal(JSON.stringify(state.query),beforeQuery);
+ui.locateLatestSell('source');assert(candles.markers.some(x=>x.text==='量S · 定位'));
+state.frequency='周线';ui.renderAnalysis();
+assert.equal(state.query.as_of,dates.at(-1));
+for(const id of ['chart-range-start','chart-range-end','chart-range-apply','chart-range-reset','chart-zoom-in','chart-zoom-out'])assert.equal(el(id),null);
 ''')
 
 

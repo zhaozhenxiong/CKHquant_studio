@@ -289,7 +289,8 @@ class TaskManager:
             current = event.get('current', event.get('completed', 0)) or 0
             total = event.get('total', 0) or 0
             self._patch(job_id, progress=min(95, current / total * 95) if total else 0,
-                progress_detail={**{key: event[key] for key in ('stage', 'status', 'failed', 'cache_hits', 'sync_id', 'knowledge_run_id') if key in event},
+                progress_detail={**{key: event[key] for key in ('stage', 'status', 'failed', 'cache_hits', 'sync_id', 'knowledge_run_id',
+                    'workers', 'requested_workers', 'min_interval', 'fresh_boards', 'reused_boards', 'request_count', 'elapsed_seconds') if key in event},
                     'stage': event.get('stage', kind), 'current': current, 'total': total, 'progress_scope': 'current_stage'})
         if kind == 'board_knowledge':
             from my_strategy.scripts.refresh_board_knowledge import refresh_knowledge
@@ -314,12 +315,23 @@ class TaskManager:
             try:
                 result = _refresh_summary(refresh_knowledge(kinds=spec.get('kinds'), boards=spec.get('boards') or None,
                     resume=spec.get('resume'), limit_budget=spec.get('limit_budget', 2000),
-                    min_interval=1.3, on_progress=refresh_progress))
+                    min_interval=spec.get('min_interval', 1.3), workers=spec.get('workers', 4),
+                    reuse_today=spec.get('reuse_today', True), on_progress=refresh_progress,
+                    check_cancel=lambda: self._check(job_id)))
                 result['knowledge_run_id'] = result.pop('run_id', None)
                 result['sync_id'] = claim['sync_id']
                 outcome = 'completed' if result.get('status') in {'completed', 'succeeded'} else 'failed' if result.get('status') == 'failed' else 'partial'
             except Cancelled:
                 outcome = 'cancelled'
+                # refresh_knowledge has drained its bounded workers before it
+                # propagates cancellation. Seal the actual committed successes
+                # now; a later explicit retry creates a new child manifest.
+                from my_strategy.storage.board_knowledge import BoardKnowledgeStore
+                knowledge_id = self.get(job_id).get('knowledge_run_id')
+                if knowledge_id:
+                    knowledge = BoardKnowledgeStore()
+                    state = knowledge.get_refresh(knowledge_id)
+                    if state and state['status'] == 'running': knowledge.finish_refresh(knowledge_id)
                 raise
             finally:
                 store.finish_sync(claim['sync_id'], status=outcome, result=result)

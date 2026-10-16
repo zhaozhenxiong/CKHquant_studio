@@ -7,7 +7,7 @@ import sqlite3
 import time
 import uuid
 
-from my_strategy.adapters.czsc_adapter import normalize_symbol
+from my_strategy.adapters.czsc_adapter import MissingHistoricalBars, normalize_symbol
 from my_strategy.core.market_scope import require_supported_symbol
 from my_strategy.core.run_context import stable_hash
 from my_strategy.services.incremental_source import IncrementalSource, code_identity, _stop
@@ -106,6 +106,9 @@ def create_plan(*,store,raw_db_path=None,kb_db_path=None,fluent_db_path=None,sco
         try:
             row=source.inspect(symbol,contract['price_date'],calendar_dates=dates)
             if row['observed_end']!=contract['price_date']:row.update(action='missing_price',reason='target_day_price_missing')
+        except MissingHistoricalBars:
+            row={'symbol':symbol,'action':'missing_price','observed_end':None,
+                'reason':'verified_history_unavailable','price_date':contract['price_date']}
         except (ValueError,OSError,KeyError) as exc:
             row={'symbol':symbol,'action':'failed','reason':str(exc),'price_date':contract['price_date']}
         rows.append(row)
@@ -165,8 +168,9 @@ def execute_plan(*,store,plan_id,raw_db_path=None,kb_db_path=None,fluent_db_path
         for frozen in plan['rows']:
             _stop(stop);symbol=frozen['symbol'];action=frozen['action']
             if action=='missing_price':
-                summaries[symbol]=_unavailable(symbol,plan['price_date'],'target_day_price_missing')
-                row={'symbol':symbol,'status':'missing_price','observed_end':frozen['observed_end']}
+                reason=frozen.get('reason') or 'target_day_price_missing'
+                summaries[symbol]=_unavailable(symbol,plan['price_date'],reason)
+                row={'symbol':symbol,'status':'missing_price','observed_end':frozen['observed_end'],'reason':reason}
             elif action=='failed':row={'symbol':symbol,'status':'failed','error':frozen['reason']}
             elif action!='reuse' and (computed>=plan['max_symbols'] or time.monotonic()>=deadline):
                 row={'symbol':symbol,'status':'deferred','reason':'本批计算数量或时间预算已用完'}

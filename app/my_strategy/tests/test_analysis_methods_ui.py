@@ -44,9 +44,9 @@ assert.equal(lastAnalysisQuery.account_start,undefined);
 def test_method_evidence_does_not_hide_missing_inputs_or_rename_old_mlp():
     run_js(r'''
 const html=KHQuantMethods.evaluationHtml({method:'structure_kronos_ma_mlp',status:'partial',as_of:'2026-10-12',direction:'WAIT',score:{score:null,status:'missing'},missing_reasons:['缺少均线候选'],kronos:{status:'missing',reason:'预算已用完'}});
-assert(html.includes('均线模型 MLP'));assert(html.includes('评分不可用'));assert(html.includes('缺少均线候选'));assert(html.includes('预算已用完'));assert(!html.includes('评分 0'));
+assert(html.includes('均线模型 MLP'));assert(html.includes('评分不可用'));assert(html.includes('评分或模型身份仍需核验'));assert(html.includes('路径计数未记录'));assert(!html.includes('评分 0'));assert(!html.includes('amv-reasons'));
 const complete=KHQuantMethods.evaluationHtml({method:'structure_kronos_ma_l2',status:'complete',direction:'BUY',score:{score:68,model_type:'l2',probabilities:[.1,.2,.7]}});
-assert(complete.includes('68'));assert(complete.includes('上涨 70%'));assert(complete.includes('不代表模拟成交或目标仓位'));
+assert(complete.includes('68'));assert(complete.includes('上涨 70%'));assert(!complete.includes('不代表模拟成交或目标仓位'));assert(complete.includes('组合判断待核验'));
 ''')
 
 
@@ -144,13 +144,15 @@ def test_synthetic_method_summary_preserves_numeric_and_qualification_contract()
     # Public fixture: invented values and a deterministic synthetic model identifier.
     evidence=json.loads((Path(__file__).parent/'fixtures/method_evaluation_ma_mlp.json').read_text())
     run_js('const evidence='+json.dumps(evidence,ensure_ascii=False)+';'+r'''
-const html=KHQuantMethods.evaluationHtml(evidence),summary=html.split('<details>')[0];
+const html=KHQuantMethods.evaluationHtml(evidence),summaryHtml=html.split('<details')[0],summary=summaryHtml.replace(/<[^>]+>/g,' ').replace(/\s+/g,' '),allText=html.replace(/<[^>]+>/g,' ').replace(/\s+/g,' ');
 assert(summary.includes('MLP 已评分 60 / 100'));assert(!summary.includes('TORCH_MLP'));
 assert(summary.includes('中位涨跌 -1.25%'));assert(summary.includes('P10 -4%'));assert(summary.includes('P90 2.5%'));
 assert(summary.includes('上涨采样比例 37.5%'));assert(summary.includes('有效路径 24 / 32'));
-assert(summary.includes('历史研究候选；独立前瞻资格待验证'));assert(summary.includes('采样分位数与上涨比例未经校准'));
+assert(allText.includes('历史研究候选；独立前瞻资格待验证'));assert(summary.includes('采样分位数与上涨比例未经校准'));
+assert(summary.includes('组合判断待核验'));assert(!summary.includes('WAIT · 有效观察'));
+assert(summaryHtml.includes('<svg'));assert(!summaryHtml.includes('amv-checks'));assert(html.includes('<details class="amv-card amv-qualification"><summary>可用性与资格核验</summary>'));assert(!html.includes('<pre'));
 for(const text of ['interval_semantics','probability_semantics','return_basis','scored','empirical_sample_quantiles'])assert(!summary.includes(text),text);
-assert(summary.includes(evidence.model_id.slice(0,12)+'…'));assert(!summary.includes(evidence.model_id));assert(html.includes(evidence.model_id));
+assert(summary.includes(evidence.model_id.slice(0,12)+'…'));assert(!summary.includes(evidence.model_id));assert(html.includes(evidence.model_id));assert(html.includes('class="amv-identity"'));
 evidence.score.qualification={mode:'paper',independent_forward_status:'qualified'};
 assert(KHQuantMethods.evaluationHtml(evidence).includes('自动模拟用途；独立前瞻资格已通过'));
 delete evidence.score.qualification;assert(!KHQuantMethods.evaluationHtml(evidence).includes('独立前瞻资格待验证'));

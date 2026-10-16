@@ -9,6 +9,7 @@ from __future__ import annotations
 from copy import deepcopy
 from bisect import bisect_left, bisect_right
 import time
+import math
 
 import pandas as pd
 
@@ -44,9 +45,13 @@ def run_daily_schedule(frames, evidence, *, configs, calendar, start, end,
                        max_predictions_per_day=60, deadline=None, stop=None,
                        progress=None, checkpoint_callback=None, corporate_actions=None,
                        execution_mode='historical', observed_at=None,
-                       include_benchmarks=True, checkpoint_stages=None):
+                       include_benchmarks=True, checkpoint_stages=None,
+                       checkpoint_interval_seconds=0.):
     if execution_mode not in {'historical','forward'}: raise ValueError('Unknown execution_mode')
     if max_predictions_per_day < 0: raise ValueError('Daily quota cannot be negative')
+    if not math.isfinite(checkpoint_interval_seconds) or not 0 <= checkpoint_interval_seconds <= 5:
+        raise ValueError('Checkpoint interval must be between zero and five seconds')
+    last_committed_snapshot = float('-inf')
     prepared_runtime=PreparedSimulationRuntime(frames,calendar,start=start,end=end)
     state = deepcopy(checkpoint or {})
     if state and state.get('version') != VERSION: raise ValueError('Scheduler version changed; create a branch')
@@ -63,6 +68,8 @@ def run_daily_schedule(frames, evidence, *, configs, calendar, start, end,
     evaluation_gap = bool(state.get('evaluation_gap', False))
     pending = deepcopy(state.get('pending'))
     new_days = [d for d in calendar if start <= d <= end and (original_last is None or d > original_last)]
+    account_days = [d for d in calendar if start <= d <= end]
+    session_index = {day:index for index,day in enumerate(account_days)}
     effective = {s:{} for s in frames}
     for symbol, entries in all_evidence.items():
         for event in entries:
@@ -71,7 +78,12 @@ def run_daily_schedule(frames, evidence, *, configs, calendar, start, end,
             if day: effective[symbol].setdefault(day, []).append(event)
 
     def snapshot(stage, pending_value=None, *, required=False):
+        nonlocal last_committed_snapshot
         deliver = checkpoint_callback is not None and (checkpoint_stages is None or stage in checkpoint_stages)
+        if deliver and stage == 'day_committed' and not required:
+            now = time.monotonic()
+            if now-last_committed_snapshot < checkpoint_interval_seconds: deliver = False
+            else: last_committed_snapshot = now
         if not required and not deliver:
             return None
         # Private daily states skip repeated metrics/JSON conversion. Every
@@ -149,7 +161,9 @@ def run_daily_schedule(frames, evidence, *, configs, calendar, start, end,
                 return interrupted_result(day,current)
             coverage['requested'] += 1
             if progress: progress(stage='agent_observation',date=day,symbol=symbol,
-                completed=ordinal,total=len(queue),risk_through=risk_through,complete_through=complete_through)
+                completed=ordinal,total=len(queue),risk_through=risk_through,complete_through=complete_through,
+                completed_sessions=session_index[day],total_sessions=len(account_days),
+                observations_completed=sum(coverage[k] for k in OUTCOMES))
             status,forecast = None,None
             if ordinal >= max_predictions_per_day:
                 status = 'budget_skipped'
@@ -168,6 +182,12 @@ def run_daily_schedule(frames, evidence, *, configs, calendar, start, end,
                     status = 'failed'
                     forecast = dict(as_of=day,status='unavailable',reason=str(exc),quality={'prediction_usable':False})
                     errors.append(dict(symbol=symbol,date=day,error=str(exc)))
+                except Exception:
+                    # Preserve completed outcomes, but this unfinished call has
+                    # no frozen observation and must not consume quota twice.
+                    coverage['requested'] -= 1
+                    snapshot('interrupted',current,required=True)
+                    raise
             reused = forecast.get('reused') is True
             forecast = deepcopy(forecast)
             forecast.pop('reused',None)

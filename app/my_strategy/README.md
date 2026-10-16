@@ -1,4 +1,4 @@
-# KHQuant 1.0.2
+# KHQuant 1.0.3
 
 主站提供结构分析、全市场扫描、我的关注、预测与模型、数据与任务五个入口。结构与量价、Kronos、均线 MLP 及其同输入 L2 方法在分析与扫描间共享请求和保存身份；历史参考模型保留明确的对照入口。
 
@@ -10,7 +10,7 @@
 
 - [关注股票、模拟账户与历史预测图](docs/watchlist_accounts_and_prediction_chart.md)
 - [组合预测、截止日方向与板块统计](docs/method_prediction_and_board_views.md)
-- [v1.0.2 验证范围](docs/v1_0_2_acceptance.md)
+- [v1.0.3 验证范围](docs/v1_0_3_acceptance.md)
 - [组合方法与任务维护](docs/ma_methods_and_task_maintenance_20261015.md)
 - [轻量研究流程](docs/agent_research.md)
 - [北交所退出与板块范围](docs/beijing_retirement.md)

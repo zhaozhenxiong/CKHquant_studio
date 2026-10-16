@@ -117,7 +117,7 @@ clicked(dates[0]);windowListeners.keydown({key:'Escape'});hover(dates[0]);assert
 clicked(dates[0]);element('chart-evidence-reset').listeners.click[0]();hover(dates[2]);assert(element('chart-evidence-popup').hidden);
 clicked(dates[0]);element('analysis-start').listeners.change[0]();hover(dates[0]);assert(element('chart-evidence-popup').hidden);
 clicked(dates[0]);element('analysis-symbol').listeners.input[0]();hover(dates[0]);assert(element('chart-evidence-popup').hidden);
-clicked(dates[0]);element('chart-range-start').listeners.change[0]();hover(dates[0]);assert(element('chart-evidence-popup').hidden);
+clicked(dates[0]);element('analysis-position').listeners.change[0]();hover(dates[0]);assert(element('chart-evidence-popup').hidden);
 clicked(dates[0]);weeklyButton.listeners.click[0]();hover(dates[2]);assert(element('chart-evidence-popup').hidden);
 assert.deepEqual(firstSeries.markers.map(marker=>marker.text),['共B','共S']);
 renderAnalysis(false);

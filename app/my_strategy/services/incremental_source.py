@@ -57,16 +57,18 @@ def numerical_input_contract():
 
 
 def code_identity():
-    from my_strategy.adapters.czsc_adapter import engine_contract
     from my_strategy.services.czsc_native_evidence import NATIVE_SCHEMA_HASH
     from my_strategy.services.czsc_analysis import strategy_config, native_generation_identity
     names=['incremental_source.py','incremental_rolling.py','czsc_incremental_state.py','czsc_native_evidence.py',
            'czsc_market_features.py','czsc_market_profiles.py','czsc_price_volume_features.py','czsc_price_volume_events.py']
     root=Path(__file__).parent
+    # strategy_config already authenticates every actual engine source SHA.
+    # Bind that same verified engine to both identity fields in this call.
+    config=strategy_config()
     return {'code':{**{name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in names},
                     'czsc_analysis.native_generation':native_generation_identity()},
             'input_contract':numerical_input_contract(),
-            'engine':engine_contract(),'schema':NATIVE_SCHEMA_HASH,'config':strategy_config(),
+            'engine':config['engine_contract'],'schema':NATIVE_SCHEMA_HASH,'config':config,
             'pandas':pd.__version__}
 
 
@@ -104,11 +106,12 @@ class IncrementalSource:
         if calendar_dates is None:
             from my_strategy.services.czsc_trend_support import _calendar
             calendar_dates,_=_calendar(None)
-        dates=[d for d in calendar_dates if d<=str(pd.Timestamp(raw.date.iloc[-1]).date())]
-        if not dates or str(pd.Timestamp(raw.date.iloc[-1]).date()) not in dates:
+        observed_end=str(pd.Timestamp(raw.date.iloc[-1]).date())
+        dates=[d for d in calendar_dates if d<=observed_end]
+        if not dates or observed_end not in dates:
             raise ValueError('股票末日不在已核验日历')
         hashes=_row_hashes(raw)
-        identity={'kind':VERSION,'symbol':symbol,'as_of':str(end),'observed_end':str(pd.Timestamp(raw.date.iloc[-1]).date()),
+        identity={'kind':VERSION,'symbol':symbol,'as_of':str(end),'observed_end':observed_end,
             'input_sha':stable_hash(hashes),'price_basis':raw.attrs.get('price_basis'),
             'units':{k:raw.attrs.get(k) for k in ('volume_unit','amount_unit')},
             'calendar':{'sha256':stable_hash(dates),'prefix_end':dates[-1]},'code':code_identity()}
@@ -249,14 +252,17 @@ class IncrementalSource:
         return raw,frame,events,{**identity,'source_cache_key':key}
 
     def summary(self,symbol,end,*,stop=None,calendar_dates=None):
+        from my_strategy.services.board_native_summary import _evaluation, _fact, _close, _unavailable
+        symbol=normalize_symbol(symbol);day=str(pd.Timestamp(end).date())
         raw,frame,events,identity=self.source(symbol,end,stop=stop,calendar_dates=calendar_dates)
-        if str(pd.Timestamp(raw.date.iloc[-1]).date())!=str(end):
-            return {'symbol':symbol,'price_date':str(end),'status':'unavailable','reason_codes':['target_day_price_missing']}
+        if str(pd.Timestamp(raw.date.iloc[-1]).date())!=day:
+            return _unavailable(symbol,day,'target_day_price_missing')
         manifest=self._peek(identity['source_cache_key'])
         evaluation=manifest['latest_evaluation']
-        result=plain({'symbol':symbol,'price_date':str(end),'status':'available',
+        result=plain({'symbol':symbol,'price_date':day,'status':'available',
             'training_eligible':False,'mode':'current_reference','identity':identity,
-            'structure':evaluation['structure'],'wyckoff':evaluation['wyckoff'],
-            'events_at_day':[e for e in events if e['date']==str(end)]})
+            'structure':_evaluation(evaluation['structure'],symbol,'structure',day),
+            'wyckoff':_evaluation(evaluation['wyckoff'],symbol,'wyckoff',day),
+            'events_at_day':[_fact(e,symbol,e['source'],_close(day)) for e in events if e['date']==day]})
         result['row_hash']=stable_hash(result)
         return result

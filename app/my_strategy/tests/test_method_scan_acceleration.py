@@ -229,3 +229,23 @@ def test_recorded_results_do_not_mutate_input_or_previous_execution_metadata(tmp
     assert result['rows'] == value['rows'] and result['frozen_identity'] == value['frozen_identity']
     assert result['compute_info']['prediction_calls_total'] == 12
     assert 'execution_adapter' in result['compute_info']
+
+
+def test_observed_threadpool_limit_requires_actual_loaded_library_counts(monkeypatch):
+    import threadpoolctl
+    monkeypatch.setattr(threadpoolctl,'threadpool_info',lambda:[dict(user_api='blas',
+        internal_api='openblas',prefix='libopenblas',num_threads=1,version='test')])
+    assert accelerated._worker_threadpools()[0]['num_threads']==1
+    monkeypatch.setattr(threadpoolctl,'threadpool_info',lambda:[])
+    assert accelerated._worker_threadpools()==[] # Unknown backends do not invent evidence.
+    monkeypatch.setattr(threadpoolctl,'threadpool_info',lambda:[dict(num_threads=8)])
+    with pytest.raises(accelerated.PreparationInfrastructureError,match='thread pool'):
+        accelerated._worker_threadpools()
+
+
+def test_parent_rejects_malformed_or_excessive_observed_threadpool_evidence():
+    for pools in (None,[dict(num_threads=8)],['not a library']):
+        execution=accelerated._Execution(methods.scan_methods);inner=Future()
+        inner.set_result(dict(prepared=(1,2,3,4),pid=123,elapsed_seconds=.1,threadpools=pools))
+        with pytest.raises(accelerated.PreparationInfrastructureError,match='Malformed'):
+            accelerated._SourceFuture(inner,execution).result()

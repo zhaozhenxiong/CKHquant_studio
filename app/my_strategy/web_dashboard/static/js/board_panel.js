@@ -5,9 +5,11 @@
   const active = new Set(['queued','running','cancelling']);
   const calculationScope='sh_sz_a_v1';
   const names = {queued:'等待',running:'运行中',cancelling:'取消中',cancelled:'已取消',succeeded:'完成',completed:'完成',partial:'部分完成',failed:'失败',interrupted:'中断'};
-  let loaded = false, sequence = 0, job = null, timer = null, detailSequence = 0;
-  let fillPlan=null,fillJob=null,fillTimer=null,fillResult=null;
+  let loaded = false, sequence = 0, job = null, timer = null, detailSequence = 0, detailTrigger = null;
+  let fillPlan=null,fillPlanContext=null,fillPreviewSequence=0,fillSubmitting=false,fillJob=null,fillTimer=null,fillResult=null;
   let capitalData = null, selectedCapital = null, colorMetric = 'change', displayedGeneration = null;
+  let capitalTrendSequence=0;
+  const capitalHistoryCache=new Map(),capitalHistoryPending=new Map();
   const numeric = (v, digits=2) => typeof v === 'number' && Number.isFinite(v) ? v.toLocaleString('zh-CN',{maximumFractionDigits:digits}) : '—';
   const percent = v => typeof v === 'number' && Number.isFinite(v) ? `${numeric(v*100)}%` : '—';
   const amount = v => typeof v === 'number' && Number.isFinite(v) ? `${numeric(v/1e8)} 亿` : '—';
@@ -26,12 +28,24 @@
     history.replaceState(history.state,'',target.pathname+target.search+target.hash);
     selectTab(false);
   }
-  function selectTab(board) {
-    $('scan-stock-panel').hidden=board; $('scan-board-panel').hidden=!board; $('start-scan').hidden=board;
-    $('scan-stock-tab').setAttribute('aria-selected',String(!board)); $('scan-board-tab').setAttribute('aria-selected',String(board));
-    sessionStorage.setItem('khquant_scan_tab',board?'board':'stock');
+  function selectTab(value) {
+    const tab=value===true?'board':value===false?'stock':value, board=tab==='board';
+    for(const name of ['stock','backtest','board']){
+      const panel=$(`scan-${name}-panel`),button=$(`scan-${name}-tab`),selected=tab===name;
+      if(panel)panel.hidden=!selected;
+      if(button){button.setAttribute('aria-selected',String(selected));button.tabIndex=selected?0:-1;}
+    }
+    $('start-scan').hidden=tab!=='stock';
+    sessionStorage.setItem('khquant_scan_tab',tab);
     globalThis.KHQuantBoardMethods?.onRoute(board);
+    globalThis.KHQuantMarketWorkspace?.onTab(tab);
+    globalThis.KHQuantMarketList?.onRoute();
     if(board && !loaded)refresh().catch(error);
+  }
+  function showBacktest(){
+    const target=new URL(location.href);target.searchParams.delete('board');
+    history.replaceState(history.state,'',target.pathname+target.search+target.hash);
+    selectTab('backtest');
   }
   function renderStatus(status) {
     $('board-status').classList.remove('task-error');
@@ -64,7 +78,7 @@
     rows.forEach(row => {
       const tr=node('tr'), name=node('td'); name.append(node('strong',row.name || row.board_id),node('small',row.board_id));
       tr.append(node('td',row.rank),name,node('td',numeric(row.activity_score)),node('td',percent(row.board_return_1)),node('td',amount(row.board_amount)),node('td',percent(row.board_market_amount_share)),node('td',numeric(row.board_relative_amount20)),node('td',`${row.effective_members ?? '—'}/${row.expected_members ?? '—'} · ${percent(row.coverage)}`));
-      const cell=node('td'), button=node('button','查看');button.type='button';button.addEventListener('click',()=>detail(row.board_id,row.generation_id).catch(error));cell.append(button);tr.append(cell);host.append(tr);
+      const cell=node('td'), button=node('button','查看');button.type='button';button.addEventListener('click',()=>detail(row.board_id,row.generation_id,button).catch(error));cell.append(button);tr.append(cell);host.append(tr);
     });
   }
   const valid = v => typeof v === 'number' && Number.isFinite(v);
@@ -86,15 +100,16 @@
     const changeCard=node('div',null,'capital-card');changeCard.append(node('h3','成交额增减 · 各 Top5'),node('p','按两日都有核验行情的同一批成员比较，单位：亿元。','subtle'));const change=node('div',null,'capital-changes');change.id='capital-changes';changeCard.append(change);grid.append(changeCard);host.append(grid);
     const trend=node('div',null,'capital-card capital-trend-card'), trendHead=node('div',null,'capital-heading');
     const trendCopy=node('div');const title=node('h3','选择一个板块');title.id='capital-trend-title';const meta=node('p','','subtle');meta.id='capital-trend-meta';trendCopy.append(title,meta);trendHead.append(trendCopy);
-    const trendControls=node('div',null,'capital-controls');trendControls.append(control('走势指标','capital-trend-metric',[['amount','成交额（亿元）'],['share','占本地市场成交额（%）']]),control('区间','capital-window',[['20','近20个交易日'],['10','近10个交易日'],['5','近5个交易日']]));const detailButton=node('button','查看成员');detailButton.id='capital-detail-button';detailButton.type='button';trendControls.append(detailButton);trendHead.append(trendControls);trend.append(trendHead);
+    const trendControls=node('div',null,'capital-controls');trendControls.append(control('走势指标','capital-trend-metric',[['amount','成交额（亿元）'],['share','占本地市场成交额（%）']]),control('区间','capital-window',[['90','近90个交易日'],['50','近50个交易日'],['20','近20个交易日']]));const detailButton=node('button','查看成员');detailButton.id='capital-detail-button';detailButton.type='button';trendControls.append(detailButton);trendHead.append(trendControls);trend.append(trendHead);
     const figure=node('div',null,'capital-trend');figure.id='capital-trend';trend.append(figure);host.append(trend);
     host.append(node('p','成交额是交易活跃度代理，不表示净流入。历史曲线按该发布版本的当前成员重建，仅供展示；板块可重叠，不能相加当作全市场资金。','capital-method'));
     const tooltip=node('div',null,'capital-tooltip');tooltip.id='capital-tooltip';tooltip.hidden=true;tooltip.setAttribute('role','status');host.append(tooltip);
     $('scan-board-panel').querySelector('.board-layout').before(host);
     $('capital-sort').addEventListener('change',()=>refresh().catch(error));
     $('capital-color').addEventListener('change',()=>{colorMetric=$('capital-color').value;renderCapital(capitalData);});
+    $('capital-window').value='20';
     ['capital-trend-metric','capital-window'].forEach(id=>$(id).addEventListener('change',renderCapitalTrend));
-    detailButton.addEventListener('click',()=>{if(selectedCapital)detail(selectedCapital.board_id,selectedCapital.generation_id).catch(error);});
+    detailButton.addEventListener('click',()=>{if(selectedCapital)detail(selectedCapital.board_id,selectedCapital.generation_id,detailButton).catch(error);});
   }
   function tip(element, lines) {
     const show=()=>{const host=$('capital-tooltip');host.replaceChildren();lines().filter(Boolean).forEach((text,i)=>host.append(node(i?'div':'strong',text)));host.hidden=false;
@@ -112,8 +127,11 @@
     if(group.length)place(group);return output;
   }
   function rowTip(row) {const v=row.capital_visualization || {};return [row.name,`成交额 ${amount(row.board_amount)} · 涨跌 ${signedPercent(row.board_return_1)}`,`成交额变化 ${signedAmount(v.amount_change_1)} / ${signedPercent(v.amount_change_ratio_1)}`,`同成员比较 ${v.comparable_members ?? '—'}/${row.expected_members ?? '—'} · 覆盖 ${percent(v.comparable_coverage)}`,`行情 ${row.price_date} · 当前成员 ${row.membership_date}`];}
-  function clearFillPlan(){fillPlan=null;if($('board-fill-execute'))$('board-fill-execute').hidden=true;if(!fillJob&&$('board-fill-plan')){if(fillResult)renderFillResult(fillResult);else $('board-fill-plan').replaceChildren();}}
-  function chooseCapital(row) {if(selectedCapital?.board_id!==row.board_id)clearFillPlan();selectedCapital=row;document.querySelectorAll('[data-capital-board]').forEach(el=>el.setAttribute('aria-pressed',String(el.dataset.capitalBoard===row.board_id)));renderCapitalTrend();}
+  function fillSelection(){return {scope:$('board-fill-scope').value,board_id:$('board-fill-scope').value==='current_board'?selectedCapital?.board_id || null:null,
+    generation_id:capitalData?.generation_id || displayedGeneration,price_date:capitalData?.price_date || null,
+    selected_generation:$('board-generation')?.value || '',kind:$('board-kind').value};}
+  function clearFillPlan(){++fillPreviewSequence;fillPlan=null;fillPlanContext=null;if($('board-fill-execute'))$('board-fill-execute').hidden=true;if(!fillJob&&$('board-fill-plan')){if(fillResult)renderFillResult(fillResult);else $('board-fill-plan').replaceChildren();}}
+  function chooseCapital(row) {if(selectedCapital?.board_id!==row?.board_id || selectedCapital?.generation_id!==row?.generation_id || selectedCapital?.price_date!==row?.price_date)clearFillPlan();selectedCapital=row;document.querySelectorAll('[data-capital-board]').forEach(el=>el.setAttribute('aria-pressed',String(el.dataset.capitalBoard===row?.board_id)));renderCapitalTrend();}
   function renderCapital(data) {
     if(!data)return;capitalData=data;
     const rows=data.rows || [], stats=$('capital-stats');stats.replaceChildren();
@@ -133,18 +151,45 @@
     });
     const changes=$('capital-changes');changes.replaceChildren();const ups=(data.increases || []).slice(0,5),downs=(data.decreases || []).slice(0,5),all=[...ups,...downs],max=Math.max(1,...all.map(row=>Math.abs(row.capital_visualization.amount_change_1)));
     [['成交额增加',ups],['成交额减少',downs]].forEach(([label,items])=>{changes.append(node('h4',label));if(!items.length)changes.append(node('p','暂无同成员可比数据。','subtle'));items.forEach(row=>{const value=row.capital_visualization.amount_change_1,button=node('button',null,'capital-change-row');button.type='button';button.append(node('span',row.name,'capital-change-name'));const rail=node('span',null,'capital-change-rail'),bar=node('span',null,value>=0?'capital-positive':'capital-negative'),size=Math.abs(value)/max*49;bar.style.width=`${size}%`;bar.style.left=`${value>=0?50:50-size}%`;rail.append(bar);button.append(rail,node('span',signedAmount(value),'capital-change-value'));button.dataset.capitalBoard=row.board_id;button.setAttribute('aria-label',`${row.name}成交额变化${signedAmount(value)}`);button.addEventListener('click',()=>chooseCapital(row));tip(button,()=>rowTip(row));changes.append(button);});});
-    selectedCapital=rows.find(row=>row.board_id===selectedCapital?.board_id) || rows[0] || null;if(selectedCapital)chooseCapital(selectedCapital);else renderCapitalTrend();
+    const nextSelected=rows.find(row=>row.board_id===selectedCapital?.board_id) || rows[0] || null;chooseCapital(nextSelected);
   }
   function svgNode(tag,attributes={},text) {const element=document.createElementNS('http://www.w3.org/2000/svg',tag);Object.entries(attributes).forEach(([name,value])=>element.setAttribute(name,String(value)));if(text!=null)element.textContent=text;return element;}
   function renderCapitalTrend() {
-    const host=$('capital-trend');if(!host)return;host.replaceChildren();const row=selectedCapital;
+    const host=$('capital-trend');if(!host)return;const renderSequence=++capitalTrendSequence;host.replaceChildren();const row=selectedCapital;
     $('capital-detail-button').disabled=!row;$('capital-trend-title').textContent=row?`${row.name} · 近期成交资金变化`:'选择一个板块';
-    const v=row?.capital_visualization,history=(v?.history || []).slice(-Number($('capital-window').value));
+    const v=row?.capital_visualization,windowSize=Number($('capital-window').value),key=row?`${row.generation_id}:${row.board_id}:${row.snapshot_hash}`:'';
+    let points=v?.history || [];
+    if(row && windowSize>points.length && windowSize>20){
+      const cached=capitalHistoryCache.get(key);
+      if(cached)points=cached.history;
+      else {
+        $('capital-trend-meta').textContent=`当前成员 ${row.membership_date} · 正在读取近${windowSize}个交易日`;
+        host.append(node('p','正在读取本地历史…','capital-empty'));
+        let pending=capitalHistoryPending.get(key);
+        if(!pending){
+          pending=request(`/api/boards/capital-history/${encodeURIComponent(row.board_id)}?window=90&generation_id=${encodeURIComponent(row.generation_id)}`).then(value=>{
+            if(value.generation_id!==row.generation_id || value.board_id!==row.board_id || value.price_date!==row.price_date ||
+                value.snapshot_hash!==row.snapshot_hash || value.calculation_scope!==calculationScope ||
+                !Array.isArray(value.history) || value.history.some((point,i)=>!/^\d{4}-\d{2}-\d{2}$/.test(point.date) || point.date>row.price_date || i&&point.date<=value.history[i-1].date) ||
+                value.history.length && value.history.at(-1).date!==row.price_date)
+              throw Error('扩展资金走势与当前板块版本不一致，保持不可用。');
+            capitalHistoryCache.set(key,value);while(capitalHistoryCache.size>64)capitalHistoryCache.delete(capitalHistoryCache.keys().next().value);return value;
+          }).finally(()=>capitalHistoryPending.delete(key));
+          capitalHistoryPending.set(key,pending);
+        }
+        pending.then(()=>{if(renderSequence===capitalTrendSequence)renderCapitalTrend();}).catch(exc=>{
+          if(renderSequence!==capitalTrendSequence)return;host.replaceChildren(node('p',exc.message || String(exc),'capital-empty'));
+          $('capital-trend-meta').textContent=`当前成员 ${row.membership_date} · 行情 ${row.price_date}`;
+        });return;
+      }
+    }
+    const history=points.slice(-windowSize);
     $('capital-trend-meta').textContent=row?`当前成员 ${row.membership_date} · ${history[0]?.date || '—'} 至 ${row.price_date} · 当前成员历史对照`:'点击热力图或增减排行查看';
     if(!history.length){host.append(node('p','该发布版本没有成交额历史，点击“计算当前板块”生成。','capital-empty'));return;}
     const metric=$('capital-trend-metric').value,amountMode=metric==='amount',values=history.map(point=>amountMode?valid(point.amount)?point.amount/1e8:null:valid(point.market_share)?point.market_share*100:null);
     const mean=amountMode && valid(v.prior20_mean_amount)?v.prior20_mean_amount/1e8:null,max=Math.max(1,...values.filter(valid),mean || 0)*1.12;
     const width=Math.max(360,host.clientWidth || 1000),height=245,left=62,right=24,top=24,bottom=38,plotW=width-left-right,plotH=height-top-bottom;
+    host.dataset.points=String(history.length);host.dataset.window=String(windowSize);
     const svg=svgNode('svg',{viewBox:`0 0 ${width} ${height}`,role:'img','aria-label':`${row.name}近${history.length}个交易日${amountMode?'成交额亿元':'市场成交额占比百分比'}`});host.append(svg);
     const y=value=>top+plotH*(1-value/max),x=i=>left+(i+.5)*plotW/history.length;
     for(let i=0;i<=4;i++){const value=max*i/4,at=y(value);svg.append(svgNode('line',{x1:left,x2:width-right,y1:at,y2:at,class:'capital-gridline'}),svgNode('text',{x:left-9,y:at+4,'text-anchor':'end',class:'capital-axis'},numeric(value,amountMode?0:1)));}
@@ -164,7 +209,9 @@
     const kind=$('board-kind').value,rankingType=$('board-ranking').value,sortBy=$('capital-sort').value;
     // Pin all reads to the publication observed by status. A newer publication
     // may arrive between requests; its immutable predecessor remains readable.
-    const status=await request('/api/boards/status'+(selected?'?generation_id='+encodeURIComponent(selected):''));
+    const statusQuery=new URLSearchParams({compact:'true'});
+    if(selected)statusQuery.set('generation_id',selected);
+    const status=await request('/api/boards/status?'+statusQuery.toString());
     if(current!==sequence)return;
     const state=status.fluent || status;
     // A current request cannot adopt an old mixed-scope publication, even from a stale server.
@@ -179,13 +226,14 @@
     if(generation) {
       const pinned=`&generation_id=${encodeURIComponent(generation)}`;
       [ranking,visual]=await Promise.all([
-        request(`/api/boards/rankings?kind=${encodeURIComponent(kind)}&ranking_type=${encodeURIComponent(rankingType)}${pinned}`),
+        request(`/api/boards/rankings?kind=${encodeURIComponent(kind)}&ranking_type=${encodeURIComponent(rankingType)}&compact=true${pinned}`),
         request(`/api/boards/capital-visualization?kind=${encodeURIComponent(kind)}&sort_by=${encodeURIComponent(sortBy)}${pinned}`)
       ]);
       if(current!==sequence)return;
       const rows=[...(ranking.rankings || []),...(visual.rows || []),...(visual.increases || []),...(visual.decreases || [])];
       if(ranking.generation_id!==generation || visual.generation_id!==generation ||
           ranking.price_date!==market.price_date || visual.price_date!==market.price_date ||
+          (ranking.rankings || []).some(row=>row.kind!==kind || row.calculation_scope!==market.calculation_scope) ||
           rows.some(row=>row.generation_id!==generation || row.price_date!==market.price_date))
         throw new Error('板块发布版本核验失败，已保留原图，请刷新重试。');
     }
@@ -224,8 +272,8 @@
     }
   }
   function metrics(host, pairs) {const dl=node('dl','', 'board-metrics');pairs.forEach(([label,value])=>{dl.append(node('dt',label),node('dd',value));});host.append(dl);}
-  async function detail(id,generation) {
-    const current=++detailSequence;
+  async function detail(id,generation,trigger=null) {
+    const current=++detailSequence, focusedBefore=document.activeElement;
     const result=await request(`/api/boards/detail/${encodeURIComponent(id)}?generation_id=${encodeURIComponent(generation || '')}`);
     if(current!==detailSequence)return;
     const row=result.features || {}, host=$('board-detail-content');host.replaceChildren();$('board-detail').hidden=false;$('board-detail-title').textContent=row.name || id;
@@ -257,6 +305,16 @@
       if(!/^\d{6}\.(SH|SZ)$/.test(symbol)){list.append(node('span',`${label}（历史成员，不提供新分析）`,'subtle'));return;}
       const button=node('button',label);button.type='button';button.addEventListener('click',()=>window.dispatchEvent(new CustomEvent('khquant:board-stock',{detail:{symbol,price_date:row.price_date}})));list.append(button);});host.append(list);
     if(membership){const evidence=node('details');evidence.append(node('summary','来源与计算范围证明'),node('p',`来源 SHA ${membership.source_snapshot_hash}`),node('p',`投影 SHA ${membership.projection_hash}`),node('p',`排除成员：${membership.excluded_members.join('、') || '无'}`));host.append(evidence);}
+    if(current!==detailSequence)return;
+    detailTrigger=trigger;
+    if(document.activeElement!==focusedBefore)return;
+    const heading=$('board-detail-title');heading.tabIndex=-1;heading.focus?.({preventScroll:true});
+    $('board-detail').scrollIntoView?.({block:'start',behavior:globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches?'auto':'smooth'});
+  }
+  function closeDetail() {
+    ++detailSequence;$('board-detail').hidden=true;
+    const trigger=detailTrigger;detailTrigger=null;
+    if(trigger?.isConnected && !trigger.disabled)trigger.focus?.();
   }
   function renderJob(value) {
     $('board-job').hidden=false;const host=$('board-job');host.replaceChildren();const d=value.progress_detail || value.progress || {};
@@ -272,6 +330,11 @@
       ['board-calculate','board-sync','board-refresh-members'].forEach(id=>$(id).disabled=!!fillJob||historySelected());return;
     }
     host.append(node('p',`${names[value.status] || value.status} · ${d.stage || ''} ${d.current ?? d.completed ?? ''}${d.total ? ` / ${d.total}` : ''}${value.error ? ` · ${value.error}` : ''}`));
+    if(value.kind==='board_knowledge') {
+      const workers=d.workers ?? value.result?.workers ?? value.spec?.workers ?? 1;
+      const interval=d.min_interval ?? value.result?.min_interval ?? value.spec?.min_interval ?? 1.3;
+      host.append(node('p',`${workers} 线程 · 请求间隔 ≥ ${interval} 秒 · 新采集 ${d.fresh_boards ?? value.result?.fresh_boards ?? '—'} · 今日复用 ${d.reused_boards ?? value.result?.reused_boards ?? '—'} · 请求 ${d.request_count ?? value.result?.request_count ?? '—'}`,'subtle'));
+    }
     if(active.has(value.status)) {const cancel=node('button','取消');cancel.type='button';cancel.disabled=value.status==='cancelling';cancel.addEventListener('click',async()=>{try{job=await request(`/api/boards/jobs/${encodeURIComponent(value.job_id)}/cancel`,{method:'POST',body:'{}'});renderJob(job);}catch(exc){error(exc);}});host.append(cancel);}
     else if(['partial','failed','interrupted'].includes(value.status) && ['board_knowledge','board_features'].includes(value.kind)) {const retry=node('button','重试未完成阶段');retry.type='button';retry.addEventListener('click',()=>{const path=value.kind==='board_knowledge'?'/refresh':value.kind==='board_features'?'/features/build':'/sync';const body=value.kind==='board_knowledge'?{...value.spec,resume:value.result?.knowledge_run_id || value.knowledge_run_id || value.progress_detail?.knowledge_run_id || value.spec?.resume || null}:value.kind==='board_features'?value.spec:{resume_sync_id:value.result?.sync_id || value.progress_detail?.sync_id || value.spec?.resume_sync_id || null};start(path,body).catch(error);});host.append(retry);}
     ['board-calculate','board-sync','board-refresh-members'].forEach(id=>$(id).disabled=active.has(value.status)||!!fillJob||historySelected());
@@ -301,12 +364,16 @@
   }
   async function previewFill(){
     requireCurrentScope();
-    if(fillJob)return;
-    const scope=$('board-fill-scope').value;
-    if(scope==='current_board'&&!selectedCapital)throw Error('先从资金图选择一个板块。');
-    $('board-fill-execute').hidden=true;
-    fillPlan=await request('/api/boards/incremental/plan',{method:'POST',body:JSON.stringify({scope,...(scope==='current_board'?{board_id:selectedCapital.board_id}:{}),price_date:capitalData?.price_date,max_symbols:20,budget_seconds:300})});
-    describeFill(fillPlan);$('board-fill-execute').hidden=false;
+    if(fillJob||fillSubmitting)return;
+    const selection=fillSelection(),context=JSON.stringify(selection);
+    if(selection.scope==='current_board'&&!selection.board_id)throw Error('先从资金图选择一个板块。');
+    if(selection.scope==='current_board'&&selectedCapital?.kind!==selection.kind)throw Error('板块类型正在切换，请等待资金图更新后再预览缺口。');
+    clearFillPlan();const current=fillPreviewSequence;
+    const plan=await request('/api/boards/incremental/plan',{method:'POST',body:JSON.stringify({scope:selection.scope,...(selection.scope==='current_board'?{board_id:selection.board_id}:{}),price_date:selection.price_date,max_symbols:20,budget_seconds:300})});
+    if(current!==fillPreviewSequence || context!==JSON.stringify(fillSelection()) || fillJob||fillSubmitting)return;
+    if(plan.scope!==selection.scope || (selection.price_date&&plan.price_date!==selection.price_date) ||
+        (selection.scope==='current_board'&&plan.board_id!==selection.board_id))throw Error('补齐计划与当前选择不一致，请重新预览缺口。');
+    fillPlan=plan;fillPlanContext=context;describeFill(fillPlan);$('board-fill-execute').hidden=false;
   }
   async function pollFill(){
     if(document.hidden){clearTimeout(fillTimer);fillTimer=setTimeout(()=>pollFill().catch(()=>{}),15000);return;}
@@ -318,25 +385,41 @@
     renderFillResult(j);
     await refresh();
   }
-  async function executeFill(){if(!fillPlan||fillJob)return;
+  async function executeFill(){if(!fillPlan||fillJob||fillSubmitting)return;
     requireCurrentScope();
-    if(fillPlan.scope==='current_board'&&fillPlan.board_id!==selectedCapital?.board_id){clearFillPlan();throw Error('选定板块已变化，请重新预览缺口。');}
-    const j=await request('/api/boards/incremental/execute',{method:'POST',body:JSON.stringify({plan_id:fillPlan.plan_id})});
-    fillJob=j.job_id;$('board-fill-execute').hidden=true;$('board-fill-cancel').hidden=false;$('board-sync').disabled=true;await pollFill();
+    const selection=fillSelection();
+    if(fillPlanContext!==JSON.stringify(selection) || fillPlan.scope!==selection.scope ||
+        (selection.price_date&&fillPlan.price_date!==selection.price_date) ||
+        (selection.scope==='current_board'&&(fillPlan.board_id!==selection.board_id||selectedCapital?.kind!==selection.kind))){clearFillPlan();throw Error('补齐范围、板块或发布版本已变化，请重新预览缺口。');}
+    fillSubmitting=true;$('board-fill-execute').hidden=true;
+    try {const j=await request('/api/boards/incremental/execute',{method:'POST',body:JSON.stringify({plan_id:fillPlan.plan_id})});
+      fillJob=j.job_id;$('board-fill-cancel').hidden=false;$('board-sync').disabled=true;await pollFill();
+    } finally {fillSubmitting=false;}
   }
+  function changeBoardKind(){clearFillPlan();return refresh();}
   const run=(path,body)=>start(path,body).catch(error);
   if(!$('scan-board-panel'))return;
   setupCapital();
   window.addEventListener('resize',()=>{if(capitalData && !$('scan-board-panel').hidden){$('capital-tooltip').hidden=true;renderCapital(capitalData);}});
   window.addEventListener('keydown',event=>{if(event.key==='Escape')$('capital-tooltip').hidden=true;});
   $('scan-stock-tab').addEventListener('click',showStock);$('scan-board-tab').addEventListener('click',()=>{const alreadyLoaded=loaded;selectTab(true);if(alreadyLoaded)refresh().catch(error);});
-  ['board-kind','board-ranking'].forEach(id=>$(id).addEventListener('change',()=>refresh().catch(error)));
+  $('board-kind').addEventListener('change',()=>changeBoardKind().catch(error));
+  $('board-ranking').addEventListener('change',()=>refresh().catch(error));
   $('board-generation').addEventListener('change',()=>{clearFillPlan();++detailSequence;$('board-detail').hidden=true;refresh().catch(error);});
   $('board-refresh-view').addEventListener('click',()=>refresh().catch(error));$('board-calculate').addEventListener('click',()=>run('/features/build',{with_native:true}));$('board-sync').addEventListener('click',()=>previewFill().catch(error));
   $('board-fill-execute').addEventListener('click',()=>executeFill().catch(error));
   $('board-fill-cancel').addEventListener('click',()=>{if(fillJob)request('/api/light/jobs/'+encodeURIComponent(fillJob)+'/cancel',{method:'POST',body:'{}'}).catch(error);});
   $('board-fill-scope').addEventListener('change',clearFillPlan);
-  $('board-refresh-members').addEventListener('click',()=>run('/refresh'));$('board-detail-close').addEventListener('click',()=>{++detailSequence;$('board-detail').hidden=true;});
-  const panel={showStock,onRoute(){const wasLoaded=loaded;const desired=new URLSearchParams(location.search).get('board')==='1' || sessionStorage.getItem('khquant_scan_tab')==='board';selectTab(desired);if(desired && wasLoaded)refresh().catch(error);},refresh,async retryTask(id){const value=await request(`/api/boards/jobs/${encodeURIComponent(id)}`);selectTab(true);location.hash='scan';renderJob(value);},showResult(result){selectTab(true);refresh().catch(error);request('/api/boards/jobs').then(async data=>{const saved=(data.jobs || []).find(x=>x.run_id===result.run_id);if(saved)renderJob(await request(`/api/boards/jobs/${encodeURIComponent(saved.job_id)}`));}).catch(error);}};
+  $('board-refresh-members').addEventListener('click',()=>run('/refresh',{
+    workers:Number($('board-refresh-workers')?.value || 4),
+    reuse_today:$('board-refresh-reuse-today')?.checked ?? true,
+    min_interval:1.3
+  }));$('board-detail-close').addEventListener('click',closeDetail);
+  $('scan-backtest-tab')?.addEventListener('click',showBacktest);
+  for(const name of ['stock','backtest','board'])$('scan-'+name+'-tab')?.addEventListener('keydown',event=>{
+    const names=['stock','backtest','board'],index=names.indexOf(name),target=event.key==='ArrowRight'?names[(index+1)%3]:event.key==='ArrowLeft'?names[(index+2)%3]:event.key==='Home'?'stock':event.key==='End'?'board':null;
+    if(target){event.preventDefault();$('scan-'+target+'-tab').click();$('scan-'+target+'-tab').focus();}
+  });
+  const panel={showStock,showBacktest,onRoute(){const wasLoaded=loaded;const saved=sessionStorage.getItem('khquant_scan_tab');const desired=new URLSearchParams(location.search).get('board')==='1'?'board':['stock','backtest','board'].includes(saved)?saved:'stock';selectTab(desired);if(desired==='board' && wasLoaded)refresh().catch(error);},refresh,async retryTask(id){const value=await request(`/api/boards/jobs/${encodeURIComponent(id)}`);selectTab(true);location.hash='scan';renderJob(value);},showResult(result){selectTab(true);refresh().catch(error);request('/api/boards/jobs').then(async data=>{const saved=(data.jobs || []).find(x=>x.run_id===result.run_id);if(saved)renderJob(await request(`/api/boards/jobs/${encodeURIComponent(saved.job_id)}`));}).catch(error);}};
   globalThis.KHQuantBoardPanel=panel;panel.onRoute();
 })();

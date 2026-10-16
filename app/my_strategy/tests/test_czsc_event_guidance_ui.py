@@ -1,4 +1,4 @@
-"""Check the shipped event prices and latest-session guidance without future inference."""
+"""Check visible event prices and clean failure state without future inference."""
 from pathlib import Path
 import shutil
 import subprocess
@@ -8,7 +8,7 @@ import pytest
 
 
 
-def test_failed_analysis_clears_prior_buy_guidance():
+def test_failed_analysis_clears_prior_buy_reference_and_history():
     node = shutil.which("node")
     if not node:
         pytest.skip("Node required for shipped failed-analysis checks")
@@ -17,6 +17,7 @@ def test_failed_analysis_clears_prior_buy_guidance():
 const fs = require('fs'), vm = require('vm'), assert = require('node:assert/strict');
 const elements = new Map();
 function element(id) {
+  if (id === 'event-context') return null;
   if (!elements.has(id)) elements.set(id,{textContent:'',innerHTML:'',hidden:false,
     querySelector:(selector) => element(id+selector),replaceChildren() { this.innerHTML=''; }});
   return elements.get(id);
@@ -36,13 +37,13 @@ const {state,renderEvents,analyze}=failureTest;
     next_session_decision:{action:'BUY',reference_close:4.95,reference_price_date:'2026-09-30',
       next_market_session:'2026-10-08',basis:'最新收盘触发开多'}};
   renderEvents();
-  assert(element('event-context').innerHTML.includes('收盘参考价 4.95 元'));
   assert(element('event-list').innerHTML.includes('买入参考价 4.95 元'));
+  assert.equal(element('event-count').textContent,'1 / 1');
   await analyze({symbol:'600027.SH',as_of:'2026-09-30'});
   assert.equal(state.analysis,null);
-  assert.equal(element('event-context').innerHTML,'参考判断不可用，请重新分析。');
-  assert(!element('event-context').innerHTML.includes('买入'));
-  assert(!element('event-context').innerHTML.includes('4.95'));
+  assert(!element('position-reference-card').innerHTML.includes('4.95'));
+  assert(element('history-evidence-table').innerHTML.includes('不可用'));
+  assert(!element('history-evidence-table').innerHTML.includes('4.95'));
   assert(element('event-list').innerHTML.includes('分析未完成'));
   assert(!element('event-list').innerHTML.includes('买入参考价'));
   assert.equal(element('event-count').textContent,'0');

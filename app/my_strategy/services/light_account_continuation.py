@@ -301,10 +301,11 @@ def _continue_agent_account(service,account,previous_result,end,*,stop=None,dead
         raise ValueError('Account pointer changed')
     dates,cal=service.calendar()
     if end not in dates:raise ValueError('Continuation date is not verified')
-    adapter=_StopAdapter(stop);frames={};sources=[];evidence={};score_source_events={}
+    adapter=_StopAdapter(stop);frames={};raw_frames={};sources=[];evidence={};score_source_events={}
     for symbol in previous['symbols']:
         _check(stop)
-        _,frame,events,source=service.source(symbol,end,stop=adapter)
+        raw,frame,events,source=service.source(symbol,end,stop=adapter)
+        raw_frames[symbol]=raw
         if 'symbol' not in frame:frame=frame.assign(symbol=symbol)
         score_source_events[symbol]=events
         frames[symbol]=frame;sources.append(source)
@@ -357,17 +358,27 @@ def _continue_agent_account(service,account,previous_result,end,*,stop=None,dead
     def predict(symbol,day):
         if prediction_error:raise ValueError(prediction_error)
         return service.prediction(symbol,day,stop=prediction_stop,**parameters)
-    scheduled=run_daily_schedule(frames,evidence,configs=configs,calendar=dates,start=previous['start'],end=end,
-        comparisons=evaluation_accounts,checkpoint=checkpoint,
-        prediction=predict,score=scorer,
-        max_predictions_per_day=previous['identity']['max_predictions'],
-        deadline=deadline,stop=stop,progress=progress,
-        checkpoint_callback=save_checkpoint,corporate_actions=previous.get('corporate_actions'),execution_mode=mode,
-        checkpoint_stages={'day_committed','cancelled','interrupted','completed','partial'})
+    from contextlib import nullcontext
+    prepare=getattr(service,'account_prediction_inputs',None)
+    with prepare(raw_frames,dates,cal,stop=prediction_stop) if prepare else nullcontext(None) as inputs:
+        report_progress=progress
+        if inputs is not None and not prediction_error:
+            from my_strategy.services.light_prediction_inputs import account_prediction_callback
+            predict,report_progress=account_prediction_callback(service,inputs,parameters,prediction_stop,progress)
+        scheduled=run_daily_schedule(frames,evidence,configs=configs,calendar=dates,start=previous['start'],end=end,
+            comparisons=evaluation_accounts,checkpoint=checkpoint,
+            prediction=predict,score=scorer,
+            max_predictions_per_day=previous['identity']['max_predictions'],
+            deadline=deadline,stop=stop,progress=report_progress,
+            checkpoint_callback=save_checkpoint,corporate_actions=previous.get('corporate_actions'),execution_mode=mode,
+            checkpoint_stages={'day_committed','cancelled','interrupted','completed','partial'},
+            checkpoint_interval_seconds=5. if inputs is not None else 0.)
     identity={**deepcopy(previous['identity']),'kind':'agent-simulation-continuation-v1','sources':sources,
         'calendar':cal,'end':end,'parent_result_id':previous['result_id'],
         'observation_scope':_hash(scheduled['evidence']),
         'input_prefixes':{k:v['state']['input_prefix_hash'] for k,v in scheduled['comparisons'].items()}}
+    from my_strategy.services.light_account_compatibility import execution_adapter_identity
+    identity['execution_adapter']=execution_adapter_identity()
     result_id=service.store.cache_key(identity,'simulations')
     chart={}
     for symbol,frame in frames.items():

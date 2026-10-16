@@ -18,6 +18,10 @@ import pandas as pd
 from my_strategy.core.paths import ARTIFACT_ROOT, PROJECT_ROOT, RAW_DATA_ROOT
 from my_strategy.runtime_env import runtime_resource_root
 
+class MissingHistoricalBars(ValueError):
+    """No stored closed observations exist within the exact requested cutoff."""
+
+
 CZSC_VERSION = "1.0.1"
 SOURCE_SHA256 = "ab0e52644fe8936e0641372cb00a15e4b9d0bd93bb2c8d36402299e0d1af18c3"
 
@@ -127,13 +131,13 @@ def load_bars(symbol: str, start: str | None = None, end: str | None = None,
             selected += "," + ",".join(extras)
         frame = pd.read_sql_query(f"SELECT {selected} FROM stock_daily_normalized WHERE {' AND '.join(clauses)} ORDER BY date", connection, params=params)
     if frame.empty:
-        raise ValueError(f"{symbol} 在请求时点无本地行情")
+        raise MissingHistoricalBars(f"{symbol} 在请求时点无本地行情")
     frame["date"] = pd.to_datetime(frame["date"])
     frame["dt"] = frame["date"] + pd.Timedelta(hours=15)
     if cutoff is not None:
         frame = frame.loc[frame["dt"] <= cutoff].copy()
     if frame.empty:
-        raise ValueError(f"{symbol} 在请求时点尚无已收盘行情")
+        raise MissingHistoricalBars(f"{symbol} 在请求时点尚无已收盘行情")
     if frame["date"].duplicated().any() or not frame["date"].is_monotonic_increasing:
         raise ValueError(f"{symbol} 行情日期重复或乱序")
     numeric = ["open", "high", "low", "close", "volume", "amount"]

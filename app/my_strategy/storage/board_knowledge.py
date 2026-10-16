@@ -110,7 +110,7 @@ def _fuyao_response(proof, *, repeated=False):
     return response
 
 
-def _fuyao_proof(value, members):
+def _fuyao_proof(value, members, *, catalog_proofs=None):
     proof = value["provenance"]
     path = "/api/a-share-index/constituents/ths-stock-list"
     parsed = urlparse(value["source_url"])
@@ -172,11 +172,26 @@ def _fuyao_proof(value, members):
     if ("reported_count" in proof) != ("total" in responses[0]["data"]):
         raise ValueError("Fuyao reported count must come from the original response")
     catalog = proof.get("catalog_provenance")
+    # A single published catalog usually repeats two large directory proofs
+    # across hundreds of independently authenticated snapshots. Share only the
+    # completed directory validation, by exact content, within this read.
+    key = (value["kind"], _json(catalog))
+    identities = None if catalog_proofs is None else catalog_proofs.get(key)
+    if identities is None:
+        identities = _fuyao_catalog_proof(catalog, value["kind"])
+        if catalog_proofs is not None:
+            catalog_proofs[key] = identities
+    expected = tuple(value[key] for key in ("board_id", "source_code", "name", "kind", "source", "taxonomy"))
+    if expected not in identities:
+        raise ValueError("Fuyao original directory set or board identity proof inconsistent")
+
+
+def _fuyao_catalog_proof(catalog, kind):
     if (not isinstance(catalog, dict) or catalog.get("full_response_contract") is not True or
             catalog.get("catalog_set_stable") is not True or
             type(catalog.get("business_code")) is not int or catalog["business_code"] != 0):
         raise ValueError("Fuyao original directory proof missing")
-    tag = {"industry": "industry", "concept": "cn_concept", "region": "region"}[value["kind"]]
+    tag = {"industry": "industry", "concept": "cn_concept", "region": "region"}[kind]
     if (catalog.get("request_path") != "/api/a-share-index/catalog/ths-index-list" or
             catalog.get("request_params") != {"tag": tag}):
         raise ValueError("Fuyao original directory classification request inconsistent")
@@ -194,19 +209,19 @@ def _fuyao_proof(value, members):
             if isinstance(code, str): code = code.strip().upper()
             if not isinstance(code, str) or not re.fullmatch(r"\d{6}\.TI", code) or not isinstance(name, str) or not name.strip():
                 raise ValueError("Fuyao original directory identity invalid")
-            rows.append({"board_id": "THS_" + KINDS[value["kind"]] + "_" + code,
-                "source_code": code, "name": name.strip(), "kind": value["kind"],
+            rows.append({"board_id": "THS_" + KINDS[kind] + "_" + code,
+                "source_code": code, "name": name.strip(), "kind": kind,
                 "source": "fuyao:ths", "taxonomy": "THS_INDEX"})
         if not rows or len({row["board_id"] for row in rows}) != len(rows):
             raise ValueError("Fuyao original directory empty or duplicated")
         sets.append(sorted(rows, key=lambda row: row["board_id"]))
-    expected = {key: value[key] for key in ("board_id", "source_code", "name", "kind", "source", "taxonomy")}
-    if (sets[0] != sets[1] or expected not in sets[0] or type(catalog.get("board_count")) is not int or
+    if (sets[0] != sets[1] or type(catalog.get("board_count")) is not int or
             catalog["board_count"] != len(sets[0]) or catalog.get("catalog_set_hash") != _hash(sets[0])):
         raise ValueError("Fuyao original directory set or board identity proof inconsistent")
+    return frozenset(tuple(row[key] for key in ("board_id", "source_code", "name", "kind", "source", "taxonomy")) for row in sets[0])
 
 
-def _snapshot_input(snapshot, *, verified_at=None):
+def _snapshot_input(snapshot, *, verified_at=None, catalog_proofs=None):
     if not isinstance(snapshot, dict):
         raise ValueError("board snapshot must be an object")
     value = _strict_json(_json(snapshot))
@@ -252,7 +267,7 @@ def _snapshot_input(snapshot, *, verified_at=None):
     elif proof.get("full_response_contract") is not True or proof.get("membership_set_stable") is not True:
         raise ValueError("unpaginated member list needs a full-response contract and repeated-set proof")
     if source == "fuyao:ths":
-        _fuyao_proof(value, sorted(normalized))
+        _fuyao_proof(value, sorted(normalized), catalog_proofs=catalog_proofs)
     elif count == 0:
         raise ValueError("empty board list requires verified original successful full responses")
     if value.get("payload_sha256") is not None and not re.fullmatch(r"[a-f0-9]{64}", str(value["payload_sha256"])):
@@ -583,6 +598,46 @@ class BoardKnowledgeStore:
         with self._write() as con:
             return self._finish(con, run_id)
 
+    def reuse_current_snapshot(self, run_id, board_id, snapshot_hash):
+        """Attach today's verified immutable observation to a new frozen run.
+
+        Fresh directory response envelopes can differ, but their entire board
+        set must be identical. Never rewrite a snapshot's original source proof,
+        availability or observation time to make a cache look newly collected.
+        """
+        with self._write() as con:
+            run = self._run(con, run_id); self._running(run)
+            requested = next((item for item in run['requested_boards']
+                if isinstance(item, dict) and item.get('board_id') == board_id), None)
+            if requested is None or run['source'] != 'fuyao:ths':
+                raise ValueError('reused snapshot is outside frozen Fuyao catalog')
+            now = _now(); stamp = _stamp(now)
+            row = con.execute("""SELECT s.* FROM board_snapshots s
+                WHERE s.snapshot_hash=? AND EXISTS(SELECT 1 FROM board_refresh_runs r,
+                    json_each(r.snapshot_refs_json) refs WHERE refs.value=s.snapshot_hash
+                    AND r.status IN ('succeeded','partial') AND r.finished_at<=?)""",
+                (snapshot_hash, stamp)).fetchone()
+            if row is None: raise ValueError('reused snapshot has no completed verified publication')
+            value = self._verified_snapshot(con, row)
+            fields = ('board_id', 'source_code', 'name', 'kind', 'source', 'taxonomy')
+            if any(requested.get(key) != value[key] for key in fields):
+                raise ValueError('reused snapshot differs from frozen board identity')
+            if (_instant(value['observed_at']).astimezone(_SHANGHAI).date() != now.astimezone(_SHANGHAI).date()
+                    or value['available_at'] > stamp or value['effective_at'] > stamp):
+                raise ValueError('only an already available observation from today can be reused')
+            proof_ref = requested.get(_CATALOG_PROOF_REF)
+            fresh = self._source_payload(con, proof_ref) if proof_ref else None
+            original = value['provenance'].get('catalog_provenance')
+            identities = _fuyao_catalog_proof(fresh, value['kind'])
+            if (tuple(value[key] for key in fields) not in identities or
+                    not isinstance(original, dict) or fresh['catalog_set_hash'] != original.get('catalog_set_hash')):
+                raise ValueError('reused snapshot complete directory set differs from frozen catalog')
+            refs = dict(run['snapshot_refs']); prior = refs.get(board_id)
+            if prior and prior != snapshot_hash: raise ValueError('refresh already bound a different board snapshot')
+            refs[board_id] = snapshot_hash
+            con.execute('UPDATE board_refresh_runs SET snapshot_refs_json=? WHERE run_id=?', (_json(refs), run_id))
+        return value
+
     def import_snapshot(self, snapshot, run_id=None):
         original, input_hash, value = _snapshot_input(snapshot)
         with self._write() as con:
@@ -629,7 +684,7 @@ class BoardKnowledgeStore:
         return {**value, "run_id": run_id, "import_reused": existing is not None}
 
     @staticmethod
-    def _verified_snapshot(con, row):
+    def _verified_snapshot(con, row, *, catalog_proofs=None):
         encoded = row["payload_json"]
         if _sha(encoded.encode()) != row["payload_sha256"]:
             raise ValueError("board snapshot payload SHA drift")
@@ -646,7 +701,8 @@ class BoardKnowledgeStore:
             raise ValueError("board source payload identity drift")
         # Reconstruct at the first local verified import clock, so reads retain
         # immutable availability while checking projection and original proof.
-        _, digest, derived = _snapshot_input(original, verified_at=_instant(value.get("imported_at")))
+        _, digest, derived = _snapshot_input(original, verified_at=_instant(value.get("imported_at")),
+            catalog_proofs=catalog_proofs)
         if digest != row["input_hash"] or derived != value:
             raise ValueError("board snapshot differs from its original source proof")
         catalog = con.execute("SELECT * FROM board_catalog_versions WHERE catalog_hash=?", (row["catalog_hash"],)).fetchone()
@@ -666,6 +722,10 @@ class BoardKnowledgeStore:
         with self._read() as con:
             if con is None:
                 return []
+            # Bind all reused proofs and per-board physical/index checks to one
+            # SQLite view. The proof dictionary is discarded after this call.
+            con.execute("BEGIN")
+            catalog_proofs = {}
             for manifest in con.execute("SELECT run_id FROM board_refresh_runs WHERE status IN ('succeeded','partial')").fetchall():
                 self._run(con, manifest[0])
             rows = con.execute("""SELECT DISTINCT s.* FROM board_snapshots s
@@ -677,7 +737,7 @@ class BoardKnowledgeStore:
             for row in rows:
                 if row["board_id"] in seen:
                     continue
-                value = self._verified_snapshot(con, row)
+                value = self._verified_snapshot(con, row, catalog_proofs=catalog_proofs)
                 if kind is not None and value["kind"] != kind:
                     continue
                 seen.add(row["board_id"])

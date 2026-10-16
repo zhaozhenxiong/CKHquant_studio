@@ -1,6 +1,6 @@
-# KHQuant v1.0.2 原生安装
+# KHQuant v1.0.3 原生安装
 
-安装 Python 3.12，下载本版 `KHQuant-1.0.2.zip`，按 `SHA256SUMS.txt` 核验并解压。不要把上一版本的安装证明用于本版。
+安装 Python 3.12，下载本版 `KHQuant-1.0.3.zip`，按 `SHA256SUMS.txt` 核验并解压。不要把上一版本的安装证明用于本版。
 
 Windows x64：`py -3.12 install.py --device auto`，随后 `.\khquant-native.bat dashboard`。
 Apple Silicon macOS / Linux x64：`python3.12 install.py --device auto`，随后 `./khquant-native.sh dashboard`。

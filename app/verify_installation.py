@@ -218,6 +218,31 @@ def verify_v102_views(report: dict) -> dict:
     return report
 
 
+def verify_v103_followup(report: dict) -> dict:
+    expected = dict(schema='followup_views_installation_v1', status='passed', fixture='synthetic_installation_only',
+        production_state_touched=False, inference_calls=0, work_submitted=False,
+        navigation=dict(status='passed', existing_account_chart=True, parallel_method_device=True,
+            requested_explanations_removed=True, market_workspace=True, capital_windows=[90, 50, 20],
+            capital_default=20, icon_license_present=True),
+        capital_history=dict(status='passed', windows=[90, 50, 20], exact_amount_and_scope=True,
+            fixed_generation=True, cached_slices_no_reload=True, raw_unchanged=True, invalid_window_rejected=True),
+        account_chart=dict(status='passed', http_gets=4, actual_fill_actions=['BUY', 'REDUCE', 'SELL'],
+            exact_price_fee_order_preserved=True, cutoff_preserved=True, missing_unavailable=True,
+            qualification_preserved=True, readonly_store_unchanged=True))
+    def match(actual, wanted, location):
+        if type(actual) is not type(wanted):
+            raise RuntimeError('Installed v1.0.3 evidence type differs: '+location)
+        if isinstance(wanted, dict):
+            for key, value in wanted.items():
+                if key not in actual:
+                    raise RuntimeError('Installed v1.0.3 evidence is missing: '+location+'.'+key)
+                match(actual[key], value, location+'.'+key)
+        elif actual != wanted:
+            raise RuntimeError('Installed v1.0.3 evidence differs: '+location)
+    match(report, expected, 'v103_followup')
+    return report
+
+
 def verify_v102_navigation(html: str) -> dict:
     from importlib.util import module_from_spec, spec_from_file_location
     path=Path(__file__).with_name('verify_views_installation.py').resolve()
@@ -533,6 +558,7 @@ print(json.dumps({'version':distribution.version,'package_path':str(path),'prefi
     lightweight = verify_lightweight_probe(command(str(Path(__file__).with_name('verify_agent_installation.py').resolve()),
         '--internal-probe','--device',device),device)
     v102_views = command(str(Path(__file__).with_name('verify_views_installation.py').resolve()))
+    v103_followup = verify_v103_followup(command(str(Path(__file__).with_name('verify_followup_installation.py').resolve())))
     command("-m", "my_strategy.cli", "update-data", "--help", json_output=False)
     command("-m", "my_strategy.cli", "train-reference", "--help", json_output=False)
     command("-m", "my_strategy.cli", "light-research", "--help", json_output=False)
@@ -592,7 +618,7 @@ print(json.dumps({'version':distribution.version,'package_path':str(path),'prefi
     report = {"status": "passed", "python": sys.executable, "state": str(state), "device": device,
               "application_identity": identity, "doctor": doctor, "model": model,
               "lightweight_v1": lightweight, "lightweight_api":lightweight_api,
-              "v101_api": v101_api, "v102_views": v102_views,
+              "v101_api": v101_api, "v102_views": v102_views, "v103_followup": v103_followup,
               "primary_navigation":navigation, "lightweight_entrypoint":True,
               "training_center": training_center, "dashboard_pages": list(pages), "watchlist_restart": True,
               "retired_routes_rejected": [f"{method} {path}" for path, method, _ in retired_routes],

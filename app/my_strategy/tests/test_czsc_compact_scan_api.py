@@ -80,17 +80,49 @@ def test_position_and_source_projection_does_not_invent_recommendations():
     assert source == before
 
 
+@pytest.mark.parametrize('plan_key', ['entry_plan', 'raw_risk_plan'])
+def test_saved_price_plan_survives_read_only_projection_without_raw_inputs(client, plan_key):
+    client, store = client
+    source = scan_fixture()
+    plan = {'plan_id': 'original-plan', 'symbol': '002436.SZ', 'signal_date': '2026-10-09',
+        'available_at': '2026-10-09T15:00:00+08:00', 'reference_price': 35.,
+        'status': 'active', 'policy': 'risk', 'entry_allowed': True, 'valid_for_sessions': 1,
+        'stop_price': 31., 'invalidation_price': 31.5, 'price_floor': 32., 'price_ceiling': 36.,
+        'source_event_ids': ['original-buy'], 'reason_codes': [],
+        'raw_model_inputs': [123.] * 100}
+    source['rows'][0][plan_key] = plan
+    store.save('scan', source)
+    report = store.runs_root / 'saved-scan/reports/czsc.json'
+    before = report.read_bytes()
+    original = copy.deepcopy(source)
+    response = client.get('/api/runs/saved-scan?view=scan')
+    assert response.status_code == 200
+    projected = response.json()['rows'][0][plan_key]
+    assert projected == {key: value for key, value in plan.items() if key != 'raw_model_inputs'}
+    assert source == original
+    assert report.read_bytes() == before
+    assert store.get('saved-scan') == original
+
+
 @pytest.mark.parametrize("kind", ["analysis", "model_training", "model_validation"])
 def test_compact_view_only_projects_scans(client, kind):
     client, store = client; source = {"run_id": "other-run", "rows": [{"raw": [1., 2.]}]}
     store.save(kind, source)
-    result = client.get("/api/runs/other-run").json()
-    if kind == "analysis":
-        assert result.pop("method_view")["status"] == "not_applicable"
-        assert result.pop("method_reference_points") == []
-    assert result == source
-    assert store.get("other-run") == source
+    report = store.runs_root / "other-run/reports/czsc.json"
+    before = report.read_bytes()
+    response = client.get("/api/runs/other-run")
+    assert response.status_code == 200
+    result = response.json()
+    if kind == 'analysis':
+        # Analysis now adds a response-only method view, including for old reports.
+        assert {key: result[key] for key in source} == source
+        assert result['method_view']['valid'] is False
+        assert result['method_view']['status'] == 'not_applicable'
+        assert result['method_reference_points'] == []
+    else:
+        assert result == source
     assert client.get("/api/runs/other-run?view=scan").status_code == 422
+    assert store.get('other-run') == source and report.read_bytes() == before
 
 
 @pytest.mark.parametrize("kind", ["backtest", "czsc-trend-consensus-v2-train"])

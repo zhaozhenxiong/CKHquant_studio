@@ -54,7 +54,7 @@ def _code_identity():
     # method inputs. Keep every actual scorer, prediction and source dependency.
     names=('light_ma_features.py','light_score_training.py','light_score_v2.py','simple_score.py',
            'light_qualification.py','light_experiment_registry.py','czsc_market_features.py','czsc_market_profiles.py',
-           'kronos_prediction.py','agent_evidence.py')
+           'kronos_prediction.py','agent_evidence.py','method_compute.py')
     root=Path(__file__).parent
     research={name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in names}
     methods=('source','prediction','scorer','resolve_score_model','score_model','current_score','_check')
@@ -306,7 +306,7 @@ def prepare_stock(light, symbol, day, stop):
     return light.source(symbol, day, stop=stop, raw_snapshot=observed)
 
 
-def evaluate_prepared(light, symbol, day, frozen, prepared, stop):
+def evaluate_prepared(light, symbol, day, frozen, prepared, stop, *, prediction_execution=None):
     raw, frame, events, source = prepared
     context = frozen['context']; method = context['analysis_method']
     reasons = []
@@ -321,6 +321,8 @@ def evaluate_prepared(light, symbol, day, frozen, prepared, stop):
             raise
         except (ValueError, OSError, RuntimeError) as exc:
             forecast = {**forecast, 'reason': str(exc)}
+    if prediction_execution is not None and frozen['assets_ready']:
+        prediction_execution.add(forecast)
     usable = (forecast.get('quality') or {}).get('prediction_usable') is True
     if not usable: reasons.append(forecast.get('reason') or 'kronos_prediction_unusable')
     score = None
@@ -471,7 +473,9 @@ def scan_methods(light, result_store, spec, *, progress=None, check_cancel=None,
             # Failures are terminal for this frozen batch; they remain inspectable.
             pending = [s for s in selected if s not in completed]
             max_calls = int(spec.get('max_predictions', 200))
-            workers = min(4, int(spec.get('cpu_workers') or 2))
+            from my_strategy.services.method_compute import source_workers, PredictionExecution
+            workers = source_workers(spec.get('cpu_workers'), population=len(pending))
+            prediction_execution = PredictionExecution()
             calls = 0; status = 'partial'
             prepare_stats={'maximum_buffered_stocks':0,'buffer_limit':2*workers,'prediction_order':'frozen_population'}
 
@@ -494,7 +498,7 @@ def scan_methods(light, result_store, spec, *, progress=None, check_cancel=None,
                         for row in rows if row['method_evaluation']['status'] == 'failed'],
                     'compute_info': {'method': method, 'cpu_workers': workers, 'prediction_calls_this_batch': calls,
                         'prediction_calls_total': calls + (previous or {}).get('compute_info', {}).get('prediction_calls_total', 0),
-                        'single_prediction_owner': True, 'preparation':dict(prepare_stats), 'score_model_id': frozen['context'].get('score_model_id'),
+                        'single_prediction_owner': True, 'prediction_execution':prediction_execution.report(), 'preparation':dict(prepare_stats), 'score_model_id': frozen['context'].get('score_model_id'),
                         'timing': timing.snapshot()},
                     'market_history': {'status': 'unavailable', 'reason': 'method_history_not_generated',
                         'message': '本方法仅计算截止日；未生成的历史预测不会回填。'},
@@ -534,6 +538,11 @@ def scan_methods(light, result_store, spec, *, progress=None, check_cancel=None,
                         if not futures:break
                         symbol=next(iter(futures));future=futures[symbol]
                     try:
+                        if progress:
+                            progress('组合方法扫描',len(completed),len(selected),
+                                failed=sum(r['method_evaluation']['status'] == 'failed' for r in completed.values()),
+                                current_phase='source_preparation',cpu_workers=workers,
+                                phase_wall_seconds=dict(timing.seconds),prediction_execution=prediction_execution.report())
                         with timing.measure('waiting_preparation'):
                             while not future.done():
                                 stop.check()
@@ -545,8 +554,14 @@ def scan_methods(light, result_store, spec, *, progress=None, check_cancel=None,
                             futures.pop(symbol);calls+=1
                         wake.set()
                         fill()
+                        if progress:
+                            progress('组合方法扫描',len(completed),len(selected),
+                                failed=sum(r['method_evaluation']['status'] == 'failed' for r in completed.values()),
+                                current_phase='model_inference',cpu_workers=workers,
+                                phase_wall_seconds=dict(timing.seconds),prediction_execution=prediction_execution.report())
                         with timing.measure('evaluation'):
-                            completed[symbol] = evaluate_prepared(light, symbol, day, frozen, prepared, stop)
+                            completed[symbol] = evaluate_prepared(light, symbol, day, frozen, prepared, stop,
+                                prediction_execution=prediction_execution)
                     except (InterruptedError, TimeoutError):
                         raise
                     except Exception as exc:
@@ -555,7 +570,9 @@ def scan_methods(light, result_store, spec, *, progress=None, check_cancel=None,
                     wake.set()
                     if progress:
                         progress('组合方法扫描', len(completed), len(selected),
-                            failed=sum(r['method_evaluation']['status'] == 'failed' for r in completed.values()))
+                            failed=sum(r['method_evaluation']['status'] == 'failed' for r in completed.values()),
+                            current_phase='source_preparation',cpu_workers=workers,
+                            phase_wall_seconds=dict(timing.seconds),prediction_execution=prediction_execution.report())
                     if len(completed) % 10 == 0:
                         with timing.measure('checkpoint_verification'):
                             if database_identity(light, stop.check) != raw_identity:

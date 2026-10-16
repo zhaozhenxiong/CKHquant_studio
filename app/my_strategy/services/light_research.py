@@ -38,7 +38,7 @@ def plain(value):
 def code_identity():
     base = Path(__file__).parent
     names = ['light_research.py', 'position_simulation.py', 'light_account_continuation.py', 'simple_score.py', 'kronos_tuning.py',
-             'agent_evidence.py','light_daily_scheduler.py','light_score_v2.py','light_score_training.py','light_ma_features.py','light_qualification.py','light_experiment_registry.py',
+             'agent_evidence.py','light_daily_scheduler.py','light_prediction_inputs.py','light_source_preparation.py','method_scan_acceleration.py','method_compute.py','analysis_methods.py','light_score_v2.py','light_score_training.py','light_ma_features.py','light_qualification.py','light_experiment_registry.py',
              'kronos_prediction.py', 'czsc_native_evidence.py', 'czsc_market_features.py']
     identities = {name: hashlib.sha256((base / name).read_bytes()).hexdigest()
             for name in names if (base / name).is_file()}
@@ -357,20 +357,28 @@ class LightResearch:
         return evaluate
 
     @serialized_compute
-    def prediction(self, symbol, end=None, *, stop=None, raw_snapshot=None, **parameters):
+    def prediction(self, symbol, end=None, *, stop=None, raw_snapshot=None, _prepared_input=None, **parameters):
         from my_strategy.services.kronos_prediction import predict
         parameters={**dict(lookback=128,horizon=5,samples=8,seed=42,device='auto',temperature=.8,top_p=.9),**parameters}
         symbol = normalize_symbol(symbol)
         end = end or latest_market_date(db_path=self.raw_db)
-        raw = load_bars(symbol, end=end, db_path=self.raw_db) if raw_snapshot is None else raw_snapshot
+        if _prepared_input is not None:
+            from my_strategy.services.light_prediction_inputs import PreparedPredictionInput
+            if (not isinstance(_prepared_input,PreparedPredictionInput) or raw_snapshot is not None
+                    or (_prepared_input.symbol,_prepared_input.as_of)!=(symbol,end)):
+                raise ValueError('Prepared prediction input does not match the causal request')
+            raw=_prepared_input.raw
+        else:raw = load_bars(symbol, end=end, db_path=self.raw_db) if raw_snapshot is None else raw_snapshot
         if raw.empty or set(raw.symbol.astype(str))!={symbol} or str(raw.iloc[-1].date)[:10] != end:
             raise ValueError(f'{symbol} 缺少 {end} 行情，不能使用旧日报价')
-        dates, cal = self.calendar()
+        dates, cal = ((_prepared_input.calendar_dates,_prepared_input.calendar_identity)
+                      if _prepared_input is not None else self.calendar())
         future = [d for d in dates if d > end][:int(parameters.get('horizon', 5))]
         from my_strategy.services.kronos_prediction import asset_status
         identity = {'kind': 'prediction-v1', 'symbol': symbol, 'as_of': end,
             'data': raw.attrs['data_version'], 'calendar': cal,
-            'exact_price_input_sha256': stable_hash(plain(raw.to_dict('records'))),
+            'exact_price_input_sha256': (_prepared_input.exact_price_input_sha256
+                if _prepared_input is not None else stable_hash(plain(raw.to_dict('records')))),
             'model': prediction_identity(parameters.get('device','auto')),
             'parameters': parameters, 'code': 'kronos_request_cache_v2'}
         # Asset status can include volatile load-state fields. The predictor also
@@ -390,6 +398,10 @@ class LightResearch:
         ref = self.store.put(identity, result, namespace='predictions')
         result['result_ref'] = ref
         return result
+
+    def account_prediction_inputs(self, raw_frames, dates, calendar_identity, *, stop=None):
+        from my_strategy.services.light_prediction_inputs import AccountPredictionInputs
+        return AccountPredictionInputs(raw_frames, dates, calendar_identity, stop=stop)
 
     @serialized_compute
     def tune(self, symbols, validation_dates, test_dates, *, device='auto', budget_seconds=300, stop=None):
@@ -675,12 +687,13 @@ class LightResearch:
         if execution_mode=='forward' and research_mode!='paper':raise ValueError('前向模拟须使用paper模式及独立资格')
         started=time.monotonic();deadline=started+float(budget_seconds)
         prediction_stop=DeadlineStop(stop,deadline)
-        dates,cal=self.calendar();frames={};evidence={};sources=[];score_source_events={}
+        dates,cal=self.calendar();frames={};raw_frames={};evidence={};sources=[];score_source_events={}
         symbols=sorted(set(normalize_symbol(s) for s in symbols))
-        for symbol in symbols:
-            self._check(stop,deadline)
-            if progress:progress(stage='structure',symbol=symbol)
-            raw,frame,events,source=self.source(symbol,end,stop=prediction_stop)
+        from my_strategy.services.light_source_preparation import prepare_account_sources
+        source_preparation={}
+        for symbol, prepared in prepare_account_sources(self,symbols,end,stop=prediction_stop,progress=progress,stats=source_preparation):
+            raw,frame,events,source=prepared
+            raw_frames[symbol]=raw
             if 'symbol' not in frame:frame=frame.assign(symbol=symbol)
             score_source_events[symbol]=events
             frames[symbol]=frame;sources.append(source)
@@ -703,6 +716,8 @@ class LightResearch:
             'max_predictions':max_predictions,'budget_seconds':budget_seconds,'configs':configs,
             'corporate_actions':corporate_actions or [],'code':code_identity(),
             'execution_mode':execution_mode,'qualification_event':qualification_event}
+        from my_strategy.services.light_account_compatibility import execution_adapter_identity
+        identity['execution_adapter']=execution_adapter_identity()
         if feature_profile is not None:identity['feature_profile']=feature_profile
         cached=self.store.get(identity,namespace='simulations')
         if cached:
@@ -720,12 +735,16 @@ class LightResearch:
             if value.get('stage')!='observing':
                 self._write_checkpoint(checkpoint_identity,plain(value),'simulation_checkpoints')
         preparation_seconds=time.monotonic()-started
-        scheduled=run_daily_schedule(frames,evidence,configs=configs,calendar=dates,start=start,end=end,
-            prediction=lambda symbol,day:self.prediction(symbol,day,stop=prediction_stop,**params),score=scorer,
-            max_predictions_per_day=max_predictions,deadline=deadline,stop=stop,
-            checkpoint=checkpoint,checkpoint_callback=save_checkpoint,progress=progress,
-            checkpoint_stages={'day_committed','cancelled','interrupted','completed','partial'},
-            corporate_actions=corporate_actions,execution_mode=execution_mode)
+        with self.account_prediction_inputs(raw_frames,dates,cal,stop=prediction_stop) as inputs:
+            from my_strategy.services.light_prediction_inputs import account_prediction_callback
+            predict_account,report_progress=account_prediction_callback(self,inputs,params,prediction_stop,progress)
+            scheduled=run_daily_schedule(frames,evidence,configs=configs,calendar=dates,start=start,end=end,
+                prediction=predict_account,score=scorer,
+                max_predictions_per_day=max_predictions,deadline=deadline,stop=stop,
+                checkpoint=checkpoint,checkpoint_callback=save_checkpoint,progress=report_progress,
+                checkpoint_stages={'day_committed','cancelled','interrupted','completed','partial'},
+                corporate_actions=corporate_actions,execution_mode=execution_mode,checkpoint_interval_seconds=5.)
+            input_preparation=dict(inputs.stats)
         self._check(stop)
         comparisons=scheduled['comparisons'];evidence=scheduled['evidence']
         if scheduled['status']=='partial':identity={**identity,'partial_observation_scope':stable_hash(evidence),
@@ -743,8 +762,9 @@ class LightResearch:
             'score_variant':(model or {}).get('artifact',{}).get('variant'),
             'feature_profile':(model or {}).get('artifact',{}).get('feature_profile','mixed_v1') if model else feature_profile,
             'qualification_mode':research_mode,'scheduler':scheduled['scheduler'],
-            'timing':{'budget_scope':'preparation_and_replay','preparation_seconds':preparation_seconds,
-                'total_compute_seconds':time.monotonic()-started,'budget_seconds':budget_seconds},
+            'timing':{'budget_scope':'preparation_and_replay','preparation_seconds':preparation_seconds,'source_preparation':source_preparation,
+                'total_compute_seconds':time.monotonic()-started,'budget_seconds':budget_seconds,
+                'input_preparation':input_preparation},
             'risk_comparisons':scheduled.get('risk_comparisons'),
             'comparison_scope':scheduled.get('comparison_scope','completed_evaluation'),
             'diagnostics':{'opportunity_funnel':{k:v['opportunity_funnel'] for k,v in comparisons.items()},
@@ -825,11 +845,16 @@ class LightResearch:
             self._check(stop)
             if end < account['last_date']:
                 out.append({'account_id':account_id,'status':'blocked','reason':'cannot rewind account'});continue
-            if account['code']!=code_identity():
+            from my_strategy.services.light_account_compatibility import account_code_compatible
+            if not account_code_compatible(account['code'],code_identity()):
                 out.append({'account_id':account_id,'status':'blocked',
                             'reason':'模型或政策版本改变，需要建立新的账户分支'});continue
             try:
                 previous=self.result(account['last_result_id'])
+                from my_strategy.services.light_account_compatibility import execution_adapter_identity
+                adapter_identity=previous.get('identity',{}).get('execution_adapter')
+                if adapter_identity is not None and adapter_identity!=execution_adapter_identity():
+                    raise ValueError('账户执行适配版本改变，需要建立新的账户分支')
                 result=continue_saved_account(self,account,previous,end,stop=stop,deadline=deadline,progress=progress)
                 self._check(stop)
                 if result['result_id']!=previous['result_id']:

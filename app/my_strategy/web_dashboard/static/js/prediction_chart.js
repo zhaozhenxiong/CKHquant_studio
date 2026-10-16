@@ -61,7 +61,7 @@
   function apply(value) {
     prepareSeries(value);data=value;
     const verification=value.history_verification||{},basis=value.input?.price_basis;
-    $('light-prediction-history-state').textContent=verification.status==='verified'?`已核验 ${value.history.length} 根历史 · 截止 ${value.as_of} · ${basis==='unadjusted'?'实际未复权价格':basis||'价格口径未记录'}。显示范围不改变预测参数。`:`历史输入无法核验：${verification.reason||'该结果没有可核验的历史引用'}。保留原预测；未补算。`;
+    if ($('light-prediction-history-state')) $('light-prediction-history-state').textContent=verification.status==='verified'?`已核验 ${value.history.length} 根历史 · 截止 ${value.as_of} · ${basis==='unadjusted'?'实际未复权价格':basis||'价格口径未记录'}。显示范围不改变预测参数。`:`历史输入无法核验：${verification.reason||'该结果没有可核验的历史引用'}。保留原预测；未补算。`;
     draw();
   }
   async function render(result,api) {
@@ -73,7 +73,7 @@
       const actual=typeof value.prediction_ref==='object'?value.prediction_ref.cache_key:value.prediction_ref;
       if(actual!==reference || value.as_of!==asOf || value.symbol!==(result.symbol||result.input?.symbol))throw Error('历史图表与当前预测身份不一致');
       apply(value);
-    } catch(error) {if(request!==sequence)return;$('light-prediction-history-state').textContent=`历史图表读取失败：${error.message||error}。保留原预测，不自动重算。`;}
+    } catch(error) {if(request!==sequence)return;if($('light-prediction-history-state'))$('light-prediction-history-state').textContent=`历史图表读取失败：${error.message||error}。保留原预测，不自动重算。`;}
   }
   function onRoute() {if(visible())draw();else dispose();}
   function boot() {

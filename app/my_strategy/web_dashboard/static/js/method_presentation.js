@@ -26,14 +26,22 @@
   function analysisChart(result,request,{dirty=false}={}) {
     const host=$('analysis-prediction'),view=result?.method_view;
     if(!host)return;
-    if(dirty||!view||view.status==='not_applicable'){
+    globalThis.KHQuantAnalysisAccountView?.setContext(result,request,{dirty,onChange:()=>analysisChart(result,request,{dirty})});
+    if(dirty||!view){
       renderedKey=null;instance?.clear();host.hidden=true;return;
     }
     host.hidden=false;
+    const forecastOption=$('analysis-chart-content')?.querySelector('option[value="forecast"]');
+    if(forecastOption)forecastOption.disabled=view.status==='not_applicable';
+    if(view.status==='not_applicable'&&globalThis.KHQuantAnalysisAccountView){
+      instance?.clear();$('analysis-prediction-title').textContent=`${result.symbol||''} · 已有回测成交 B/S`;
+      $('analysis-prediction-summary').textContent='';globalThis.KHQuantAnalysisAccountView.activate();return;
+    }
+    if(globalThis.KHQuantAnalysisAccountView?.isActive()){instance?.onRoute();globalThis.KHQuantAnalysisAccountView.onRoute();return;}
     $('analysis-prediction-title').textContent=`${result.symbol||''} · ${view.label||'所选方法'} · ${view.as_of||'—'}`;
-    $('analysis-prediction-summary').textContent=`${label(view)}。${view.forecast_valid===false?'预测质量未通过可用性核验，曲线仅展示原结果；不生成方法 B/S。':'采样分位数及上涨比例未经独立校准。'}历史显示范围不改变模型输入。`;
+    $('analysis-prediction-summary').textContent=`截止日：${label(view)}${view.forecast_valid===false?' · 预测路径质量不足':''}`;
     $('analysis-prediction-details').textContent='';$('analysis-prediction-resource').textContent='';
-    if(!instance&&globalThis.KHQuantPredictionChart)instance=KHQuantPredictionChart.create({prefix:'analysis',isVisible:()=>!$('view-analysis')?.hidden&&!host.hidden});
+    if(!instance&&globalThis.KHQuantPredictionChart)instance=KHQuantPredictionChart.create({prefix:'analysis',isVisible:()=>!$('view-analysis')?.hidden&&!host.hidden&&!globalThis.KHQuantAnalysisAccountView?.isActive()});
     const key=JSON.stringify([result.symbol,view.method,view.as_of,view.prediction_ref]);
     if(key===renderedKey){instance?.onRoute();return;}
     renderedKey=key;
@@ -41,6 +49,6 @@
     instance?.render({symbol:result.symbol,as_of:view.as_of,result_ref:{cache_key:view.prediction_ref},forecast:[]},
       (path,options)=>request('/api/light'+path,options));
   }
-  function clearAnalysis(){renderedKey=null;instance?.clear();if($('analysis-prediction'))$('analysis-prediction').hidden=true;}
-  globalThis.KHQuantMethodPresentation={category,label,reason,summaryHtml,analysisChart,clearAnalysis,onRoute:()=>instance?.onRoute()};
+  function clearAnalysis(){renderedKey=null;instance?.clear();globalThis.KHQuantAnalysisAccountView?.clear();if($('analysis-prediction'))$('analysis-prediction').hidden=true;}
+  globalThis.KHQuantMethodPresentation={category,label,reason,summaryHtml,analysisChart,clearAnalysis,onRoute:()=>{instance?.onRoute();globalThis.KHQuantAnalysisAccountView?.onRoute();}};
 })();

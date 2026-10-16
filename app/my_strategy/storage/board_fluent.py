@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from collections import OrderedDict
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import sqlite3
+import threading
 import time
 import uuid
 
@@ -30,6 +32,32 @@ STOCK_COLUMNS = tuple('industry_'+name[6:] for name in BOARD_COLUMNS)+(
 RANK_POLICY = {'version': 'board_ranking_v1', 'activity': '50*average_rank_percentile(relative_amount20)+50*average_rank_percentile(abs(return1))',
                'percentile': '(average_1_based_rank-1)/(n-1);singleton=.5',
                'capital': 'qualified_member_amount_desc;tie=board_id', 'limit': 30}
+
+# Only successful validation markers are retained, never market payloads or
+# populations. Independent API store instances share this bounded process cache.
+_SCOPE_CACHE_ENTRIES = 32
+_SCOPE_CACHE_BYTES = 64 * 1024
+_scope_cache = OrderedDict()
+_scope_cache_bytes = 0
+_scope_cache_lock = threading.RLock()
+
+
+def _scope_file_signature(path):
+    signatures = []
+    for candidate in (path, Path(str(path) + '-wal'), Path(str(path) + '-journal')):
+        try:
+            stat = candidate.stat()
+            signatures.append((stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+        except FileNotFoundError:
+            signatures.append(None)
+    return tuple(signatures)
+
+
+class _FluentReadConnection(sqlite3.Connection):
+    """Bind the connection to the files observed when it was opened."""
+
+    scope_path = None
+    scope_signature = None
 
 
 def canonical(value):
@@ -155,9 +183,20 @@ class BoardFluentStore:
     @contextmanager
     def _read(self):
         if not self.path.is_file():yield None;return
-        conn=sqlite3.connect(self.path.as_uri()+'?mode=ro',uri=True,timeout=30);conn.row_factory=sqlite3.Row
-        conn.execute('PRAGMA query_only=ON')
-        try:yield conn
+        signature=_scope_file_signature(self.path)
+        conn=sqlite3.connect(self.path.as_uri()+'?mode=ro',uri=True,timeout=30,factory=_FluentReadConnection);conn.row_factory=sqlite3.Row
+        try:
+            conn.execute('PRAGMA query_only=ON')
+            # SQLite can create an empty WAL on its first read. Observe that
+            # before binding the witness; it contains no committed page data.
+            conn.execute('PRAGMA schema_version').fetchone()
+            opened=_scope_file_signature(self.path)
+            empty_wal_created=(signature[1] is None and opened[1] is not None and opened[1][2]<=32)
+            if (signature[0]!=opened[0] or signature[2]!=opened[2] or
+                    (signature[1]!=opened[1] and not empty_wal_created)):
+                raise ValueError('Fluent database changed while opening read; retry')
+            conn.scope_path=self.path;conn.scope_signature=opened
+            yield conn
         finally:conn.close()
 
     @contextmanager
@@ -183,7 +222,13 @@ class BoardFluentStore:
 
     @staticmethod
     def _generation(conn,generation_id):
-        row=conn.execute('SELECT * FROM feature_generations WHERE generation_id=?',(generation_id,)).fetchone()
+        # Status, ranking and detail reads authenticate only the publication
+        # metadata below. Do not also materialize the much larger top_json
+        # market bundle; load_market retains its independent complete check.
+        row=conn.execute('''SELECT generation_id,cache_key,contract_hash,price_date,
+            public_json,public_sha,identity_json,identity_sha,native_identity_json,native_identity_sha,
+            market_ready,full_ready,market_active,full_active,created_at
+            FROM feature_generations WHERE generation_id=?''',(generation_id,)).fetchone()
         if row is None:return None
         public=_verified(row['public_json'],row['public_sha'])
         identity=_verified(row['identity_json'],row['identity_sha'])
@@ -231,8 +276,41 @@ class BoardFluentStore:
     @staticmethod
     def _scope_projection(conn,generation):
         """Validate the saved calculation population without raw-price reads."""
-        from my_strategy.services.board_calculation_scope import CALCULATION_SCOPE,verify_calculation_membership
+        from my_strategy.services.board_calculation_scope import CALCULATION_SCOPE
         if generation.get('calculation_scope')!=CALCULATION_SCOPE:return None
+        # Uncommitted writes and caller-owned connections must always take the
+        # complete path. A read connection's opening witness prevents poisoning
+        # the cache if its pathname is replaced while SQLite still has the old
+        # inode open. A changed witness fails closed and a fresh request retries.
+        path=getattr(conn,'scope_path',None)
+        if path is None or conn.in_transaction:
+            return BoardFluentStore._validate_scope_projection(conn,generation)
+        signature=_scope_file_signature(path)
+        if signature!=conn.scope_signature:raise ValueError('Fluent database changed before scope verification; retry')
+        key=(str(path),signature,digest(generation))
+        global _scope_cache_bytes
+        with _scope_cache_lock:
+            if signature!=_scope_file_signature(path):raise ValueError('Fluent database changed during scope verification; retry')
+            if key in _scope_cache:
+                _scope_cache.move_to_end(key)
+                if signature!=_scope_file_signature(path):raise ValueError('Fluent database changed during scope verification; retry')
+                # The key binds every field of this already SHA-verified
+                # generation. Return its request-owned population, not a shared
+                # mutable object retained by the cache.
+                return generation['calculation_membership']
+            projections=BoardFluentStore._validate_scope_projection(conn,generation)
+            if signature!=_scope_file_signature(path):raise ValueError('Fluent database changed during scope verification; retry')
+            size=len(canonical(key).encode())
+            if _SCOPE_CACHE_ENTRIES and size<=_SCOPE_CACHE_BYTES:
+                while _scope_cache and (len(_scope_cache)>=_SCOPE_CACHE_ENTRIES or _scope_cache_bytes+size>_SCOPE_CACHE_BYTES):
+                    _,removed=_scope_cache.popitem(last=False);_scope_cache_bytes-=removed
+                _scope_cache[key]=size;_scope_cache_bytes+=size
+            return projections
+
+    @staticmethod
+    def _validate_scope_projection(conn,generation):
+        """Perform the original complete row, numeric and membership proof."""
+        from my_strategy.services.board_calculation_scope import CALCULATION_SCOPE,verify_calculation_membership
         projections={}
         for row in conn.execute('SELECT * FROM board_daily_features WHERE generation_id=? ORDER BY board_id',
                                 (generation['generation_id'],)):
