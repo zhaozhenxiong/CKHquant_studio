@@ -6,7 +6,7 @@ snapshot references; a failed board never replaces an earlier complete board.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, time, timezone
 import gzip
 import hashlib
@@ -342,7 +342,9 @@ class BoardKnowledgeStore:
                     self._verify_schema(con)
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as con:
+        # SQLite's transaction context commits/rolls back but does not close.
+        # Close before returning, including schema verification failures.
+        with closing(self._connect()) as con, con:
             con.execute("PRAGMA journal_mode=WAL")
             con.execute("PRAGMA synchronous=FULL")
             con.execute("BEGIN IMMEDIATE")

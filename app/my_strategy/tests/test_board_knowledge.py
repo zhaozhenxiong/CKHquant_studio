@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import copy
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -98,6 +99,49 @@ def test_readonly_missing_database_never_creates_files(tmp_path):
     with pytest.raises(ValueError, match="read-only"):
         store.begin_refresh()
     assert not path.parent.exists()
+
+
+def test_constructor_closes_its_connection_after_committing_without_gc(tmp_path, monkeypatch):
+    connections = []
+    connect = kb.BoardKnowledgeStore._connect
+    def observed(self):
+        connection = connect(self)
+        connections.append(connection)  # Keep the handle alive: GC cannot hide a leak.
+        return connection
+    monkeypatch.setattr(kb.BoardKnowledgeStore, '_connect', observed)
+    path = tmp_path / 'committed.db'
+    kb.BoardKnowledgeStore(path)
+    assert len(connections) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+        connections[0].execute('SELECT 1')
+    with closing(sqlite3.connect(path)) as connection:
+        assert {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")} == kb.TABLES
+        assert connection.execute('PRAGMA user_version').fetchone()[0] == kb.VERSION
+        assert connection.execute('PRAGMA application_id').fetchone()[0] == kb.APPLICATION_ID
+
+
+def test_constructor_rolls_back_and_closes_its_connection_on_error_without_gc(tmp_path, monkeypatch):
+    connections = []
+    connect = kb.BoardKnowledgeStore._connect
+    def observed(self):
+        connection = connect(self)
+        connections.append(connection)
+        return connection
+    def fail_verification(connection):
+        assert connection.in_transaction
+        raise ValueError('synthetic constructor verification failure')
+    monkeypatch.setattr(kb.BoardKnowledgeStore, '_connect', observed)
+    monkeypatch.setattr(kb.BoardKnowledgeStore, '_verify_schema', staticmethod(fail_verification))
+    path = tmp_path / 'rolled-back.db'
+    with pytest.raises(ValueError, match='synthetic constructor verification failure'):
+        kb.BoardKnowledgeStore(path)
+    assert len(connections) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+        connections[0].execute('SELECT 1')
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == []
+        assert connection.execute('PRAGMA user_version').fetchone()[0] == 0
+        assert connection.execute('PRAGMA application_id').fetchone()[0] == 0
 
 
 def test_exact_eight_tables_and_immutable_history(store):

@@ -306,7 +306,7 @@ def test_parser_offers_only_current_industry_concept_and_no_plaintext_key_argume
 def test_provider_defaults_to_one_second_start_interval_without_real_wait(monkeypatch):
     monkeypatch.setenv('FUYAO_API_KEY', 'test-only-credential')
     clock, sleeps = [10.0], []
-    monkeypatch.setattr(provider_module.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(provider_module.time, 'perf_counter', lambda: clock[0])
     def sleep(seconds): sleeps.append(seconds); clock[0] += seconds
     session = Session([Response(catalogs()), Response(catalogs())])
     provider = FuyaoBoardProvider(session=session)
@@ -314,6 +314,77 @@ def test_provider_defaults_to_one_second_start_interval_without_real_wait(monkey
     assert provider.min_interval == 1.0
     assert len(provider.catalog(['industry'])) == 2
     assert sleeps == [1.0] and provider.request_count == 2
+
+
+def test_rate_permit_rechecks_time_after_an_early_timeout(monkeypatch):
+    monkeypatch.setenv('FUYAO_API_KEY', 'test-only-credential')
+    clock, waits = [10.0], []
+    monkeypatch.setattr(provider_module.time, 'perf_counter', lambda: clock[0])
+    provider = FuyaoBoardProvider(session=Session([]), request_budget=2, min_interval=1.0)
+    def early_wait(seconds):
+        waits.append(seconds)
+        if len(waits) > 1:
+            clock[0] += seconds
+        return False
+    monkeypatch.setattr(provider._stop, 'wait', early_wait)
+    try:
+        provider._permit()
+        provider._permit()
+        assert waits == [1.0, 1.0]
+        assert provider.request_count == 2 and provider._last_request == 11.0
+        with pytest.raises(BoardBudgetExhausted):
+            provider._permit()
+        assert waits == [1.0, 1.0] and provider.request_count == 2
+    finally:
+        provider.close()
+
+
+def test_rate_permit_is_not_fooled_by_a_coarse_monotonic_tick(monkeypatch):
+    monkeypatch.setenv('FUYAO_API_KEY', 'test-only-credential')
+    clock, waits = [0.014], []
+    tick = 1 / 64  # Windows' coarse clock can cross a tick in only 2 ms.
+    monkeypatch.setattr(provider_module.time, 'monotonic', lambda: int(clock[0] / tick) * tick)
+    monkeypatch.setattr(provider_module.time, 'perf_counter', lambda: clock[0])
+    provider = FuyaoBoardProvider(session=Session([]), min_interval=0.01)
+    def wait(seconds):
+        waits.append(seconds)
+        assert provider.request_count == 1
+        clock[0] += seconds + 1e-12
+        return False
+    monkeypatch.setattr(provider._stop, 'wait', wait)
+    try:
+        provider._permit()
+        first_start = provider._last_request
+        clock[0] = 0.016
+        assert int(clock[0] / tick) * tick - int(first_start / tick) * tick > provider.min_interval
+        provider._permit()
+        assert len(waits) == 1 and waits[0] == pytest.approx(0.008)
+        assert provider._last_request - first_start >= provider.min_interval
+        assert provider.request_count == 2
+    finally:
+        provider.close()
+
+
+@pytest.mark.parametrize('access_refusal', [False, True])
+def test_rechecked_rate_wait_never_grants_after_stop(monkeypatch, access_refusal):
+    monkeypatch.setenv('FUYAO_API_KEY', 'test-only-credential')
+    monkeypatch.setattr(provider_module.time, 'perf_counter', lambda: 10.0)
+    provider = FuyaoBoardProvider(session=Session([]), min_interval=1.0)
+    def stopped(seconds):
+        assert seconds == 1.0 and provider.request_count == 1
+        if access_refusal:
+            provider._access_error = 'fixture access refusal'
+        provider.stop()
+        return True
+    monkeypatch.setattr(provider._stop, 'wait', stopped)
+    try:
+        provider._permit()
+        error = BoardAccessError if access_refusal else provider_module.BoardCollectionStopped
+        with pytest.raises(error):
+            provider._permit()
+        assert provider.request_count == 1
+    finally:
+        provider.close()
 
 
 @pytest.mark.parametrize('interval', [1.0, 1.3])

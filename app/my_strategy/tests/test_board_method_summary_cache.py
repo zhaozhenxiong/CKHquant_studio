@@ -1,8 +1,8 @@
 """Authenticated saved board projections: equivalent, bounded and invalidated."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from copy import deepcopy
 from datetime import datetime, timezone
-import gc
 import hashlib
 import json
 import os
@@ -64,9 +64,6 @@ def saved(tmp_path, monkeypatch):
     store = kb.BoardKnowledgeStore(tmp_path/'kb.db')
     store.import_snapshot(snapshot(members=['000001.SZ', '000002.SZ', '000003.SZ',
         '000007.SZ', '830001.BJ']))
-    # SQLite writer finalizers may checkpoint/remove WAL; finish fixture setup
-    # before counting immutable read-only cache hits.
-    gc.collect()
     reader = service.BoardMethodSummary(results.db_path, results.runs_root, store.path)
     return results, store, reader, original, clock
 
@@ -133,7 +130,7 @@ def test_concurrent_cold_summary_and_members_share_one_verified_projection(saved
 def test_wal_only_new_snapshot_and_running_manifest_invalidate(saved, monkeypatch):
     _, store, reader, original, clock = saved
     calls = counted(reader, monkeypatch)
-    with sqlite3.connect(store.path) as keeper:
+    with closing(sqlite3.connect(store.path)) as keeper, keeper:
         keeper.execute('PRAGMA wal_autocheckpoint=0')
         keeper.execute('BEGIN')
         keeper.execute('SELECT COUNT(*) FROM board_refresh_runs').fetchone()
@@ -162,7 +159,7 @@ def test_wal_only_new_snapshot_and_running_manifest_invalidate(saved, monkeypatc
 ])
 def test_wal_source_membership_or_catalog_corruption_cannot_hide_behind_warm_cache(saved, table, operation, sql):
     _, store, reader, original, _ = saved
-    with sqlite3.connect(store.path) as connection:
+    with closing(sqlite3.connect(store.path)) as connection, connection:
         connection.execute('PRAGMA wal_autocheckpoint=0')
         connection.execute('SELECT COUNT(*) FROM board_refresh_runs').fetchone()
         read(reader, original)
@@ -178,12 +175,12 @@ def test_checkpoint_main_file_replacement_and_missing_database_invalidate(saved,
     _, store, reader, original, _ = saved
     calls = counted(reader, monkeypatch)
     expected = read(reader, original)
-    with sqlite3.connect(store.path) as connection:
+    with closing(sqlite3.connect(store.path)) as connection, connection:
         connection.execute('PRAGMA wal_checkpoint(TRUNCATE)')
     assert read(reader, original) == expected
     # Replace with equivalent verified bytes and a different inode.
     other = tmp_path/'replacement.db'
-    with sqlite3.connect(store.path) as source, sqlite3.connect(other) as destination:
+    with closing(sqlite3.connect(store.path)) as source, closing(sqlite3.connect(other)) as destination, destination:
         source.backup(destination)
     os.replace(other, store.path)
     assert read(reader, original) == expected

@@ -35,7 +35,7 @@ class Source:
             def get(self, url, **kwargs):
                 with source.lock:
                     self.threads.add(threading.get_ident())
-                    source.calls.append({'at': time.monotonic(), 'url': url, 'params': kwargs['params']})
+                    source.calls.append({'at': time.perf_counter(), 'url': url, 'params': kwargs['params']})
                     source.active += 1; source.peak = max(source.peak, source.active)
                 try:
                     if url.endswith(CATALOG_PATH): return Response(envelope(source.rows))

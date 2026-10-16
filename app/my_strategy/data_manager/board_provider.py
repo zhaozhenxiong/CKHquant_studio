@@ -147,13 +147,20 @@ class FuyaoBoardProvider:
             if self.request_count >= self.request_budget:
                 raise BoardBudgetExhausted('Fuyao request budget exhausted; resume with a new explicit budget')
             if self._last_request is not None:
-                remaining = self.min_interval - (time.monotonic() - self._last_request)
-                if remaining > 0 and self._stop.wait(remaining):
-                    if self._access_error: raise BoardAccessError(self._access_error)
-                    raise BoardCollectionStopped('Fuyao collection stopped')
+                # Python 3.12 on Windows can expose a coarse monotonic clock.
+                # Measure the actual interval with the performance counter and
+                # recheck after every timeout rather than assuming a wait slept
+                # for the requested duration.
+                while True:
+                    remaining = self.min_interval - (time.perf_counter() - self._last_request)
+                    if remaining <= 0:
+                        break
+                    if self._stop.wait(remaining):
+                        if self._access_error: raise BoardAccessError(self._access_error)
+                        raise BoardCollectionStopped('Fuyao collection stopped')
             if self._access_error: raise BoardAccessError(self._access_error)
             if self._stop.is_set(): raise BoardCollectionStopped('Fuyao collection stopped')
-            self.request_count += 1; self._last_request = time.monotonic()
+            self.request_count += 1; self._last_request = time.perf_counter()
 
     def _refuse(self, message):
         # Set the event before acquiring the gate: a waiting limiter must wake

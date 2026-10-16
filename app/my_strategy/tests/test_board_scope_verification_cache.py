@@ -1,5 +1,6 @@
 """Successful scope proofs are reusable only for the same observed database."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from copy import deepcopy
 import os
 from pathlib import Path
@@ -58,7 +59,7 @@ def wide_bundle(market,count=710):
 
 
 def corrupt_board(path,field):
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn, conn:
         conn.execute('DROP TRIGGER immutable_board_daily_features_update')
         if field=='payload_sha':conn.execute("UPDATE board_daily_features SET payload_sha=?",('0'*64,))
         elif field=='board_amount':conn.execute('UPDATE board_daily_features SET board_amount=board_amount+1')
@@ -117,7 +118,7 @@ def test_every_original_row_integrity_check_runs_again_after_database_edit(publi
 
 def test_committed_wal_corruption_invalidates_even_when_main_database_is_unchanged(published,monkeypatch):
     store,generation,_=published;calls=count_validations(monkeypatch)
-    with sqlite3.connect(store.path) as writer:
+    with closing(sqlite3.connect(store.path)) as writer, writer:
         writer.execute('PRAGMA journal_mode=WAL')
         store.current_generation();before=storage._scope_file_signature(store.path)
         writer.execute('DROP TRIGGER immutable_board_daily_features_update')
@@ -140,7 +141,8 @@ def test_same_size_restored_mtime_does_not_hide_a_modified_database(published,mo
 
 
 def replacement_database(store,path):
-    with sqlite3.connect(store.path) as source,sqlite3.connect(path) as target:source.backup(target)
+    with closing(sqlite3.connect(store.path)) as source, closing(sqlite3.connect(path)) as target, target:
+        source.backup(target)
     corrupt_board(path,'board_amount')
     return path
 
@@ -159,18 +161,37 @@ def test_atomic_replacement_with_same_size_and_mtime_is_not_a_cache_hit(publishe
 
 def test_replacement_while_connection_is_open_cannot_certify_the_new_path(published,tmp_path):
     store,generation,_=published;staged=replacement_database(store,tmp_path/'replacement.db')
+    blocked=False
     with store._read() as conn:
         frozen=store._generation(conn,generation)
-        os.replace(staged,store.path)
-        with pytest.raises(ValueError,match='changed before scope'):store._scope_projection(conn,frozen)
+        signature=storage._scope_file_signature(store.path)
+        try:
+            os.replace(staged,store.path)
+        except PermissionError:
+            # Windows disallows replacing an open SQLite file. That refusal
+            # must leave the old pathname and the unconsumed replacement intact.
+            if os.name!='nt':raise
+            blocked=True
+            assert storage._scope_file_signature(store.path)==signature
+            assert staged.is_file()
+        else:
+            with pytest.raises(ValueError,match='changed before scope'):store._scope_projection(conn,frozen)
     assert not storage._scope_cache
+    if blocked:
+        # After the actual handle closes, the same corrupt replacement must
+        # still fail the complete proof on a fresh read; do not skip Windows.
+        os.replace(staged,store.path)
+        with pytest.raises((ValueError,sqlite3.DatabaseError)):store.current_generation()
+        assert not storage._scope_cache
 
 
 def test_signature_change_during_complete_verification_fails_without_caching(published,monkeypatch):
     store,generation,_=published;original=BoardFluentStore._validate_scope_projection
     def changed(conn,value):
         result=original(conn,value)
-        stat=store.path.stat();os.utime(store.path,ns=(stat.st_atime_ns,stat.st_mtime_ns+1))
+        before=storage._scope_file_signature(store.path)
+        stat=store.path.stat();os.utime(store.path,ns=(stat.st_atime_ns,stat.st_mtime_ns+1_000_000_000))
+        assert storage._scope_file_signature(store.path)!=before
         return result
     monkeypatch.setattr(BoardFluentStore,'_validate_scope_projection',staticmethod(changed))
     with pytest.raises(ValueError,match='changed during scope'):store.current_generation()
@@ -210,7 +231,7 @@ def test_uncommitted_transactions_and_external_connections_always_verify(publish
             conn.execute('DROP TRIGGER immutable_board_daily_features_update')
             conn.execute('UPDATE board_daily_features SET board_amount=board_amount+1')
             store._scope_projection(conn,store._generation(conn,generation))
-    with sqlite3.connect(store.path) as conn:
+    with closing(sqlite3.connect(store.path)) as conn, conn:
         conn.row_factory=sqlite3.Row
         for _ in range(2):store._scope_projection(conn,store._generation(conn,generation))
     assert calls==[generation]*4
@@ -227,7 +248,7 @@ def test_concurrent_readers_share_one_successful_complete_verification(published
         barrier.wait();return BoardFluentStore(store.path,readonly=True).current_generation()
     # Keep the existing WAL open so simultaneous first-reader creation does not
     # obscure the actual concurrency property under test.
-    with sqlite3.connect(store.path) as keeper,ThreadPoolExecutor(max_workers=8) as executor:
+    with closing(sqlite3.connect(store.path)) as keeper, keeper, ThreadPoolExecutor(max_workers=8) as executor:
         keeper.execute('SELECT COUNT(*) FROM feature_generations').fetchone()
         results=list(executor.map(read,range(8)))
     assert all(value==results[0] for value in results) and calls==[generation]
