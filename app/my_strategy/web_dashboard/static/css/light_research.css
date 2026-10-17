@@ -2,3 +2,77 @@
 .light-card p,.light-status,#light-error{overflow-wrap:anywhere}.light-result-controls>*{min-width:0;max-width:100%}.light-result-controls select{width:100%}
 .light-result-controls{align-items:flex-end}.light-result-controls input,.light-result-controls select,.light-result-controls>button{box-sizing:border-box;height:40px;min-height:40px}.light-result-controls>button{align-self:flex-end;white-space:nowrap}
 .watchlist-tabs{margin-bottom:18px}.light-card>summary{font-size:18px;font-weight:650;cursor:pointer}.light-card>summary+form,.light-card>summary+p{margin-top:16px}.light-parameter-details{width:100%}.light-parameter-details>summary{cursor:pointer;margin-bottom:10px}.light-task-state{display:flex;align-items:center;gap:12px;flex-wrap:wrap}#light-account-error{color:var(--down,#a82030);overflow-wrap:anywhere}#light-new-account input,#light-new-account select{max-width:100%}#light-sim-form>label{flex:1 1 170px;min-width:0}.light-chart-legend{display:flex;gap:18px;flex-wrap:wrap;font-size:12px;color:var(--muted)}.light-prediction-host{position:relative;min-width:0;overflow:hidden}#light-prediction-chart{height:320px;margin:0}.light-forecast-boundary{position:absolute;z-index:3;top:0;bottom:28px;border-left:1px dashed var(--accent);background:rgba(70,120,190,.055);pointer-events:none}.light-forecast-boundary>span{position:absolute;top:4px;left:6px;white-space:nowrap;font-size:11px;color:var(--muted);background:var(--panel);padding:2px}#watchlist-accounts-panel{min-width:0}#watchlist-rows .link-button{display:inline-block;margin-right:8px}#light-results{scroll-margin-top:20px}#light-history-start{max-width:170px}#light-account-transfer{overflow-wrap:anywhere}@media(max-width:760px){#watchlist-accounts-panel{min-width:0}.light-task-state button{max-width:100%}.light-forecast-boundary>span{max-width:100px;white-space:normal}.light-result-controls>label{flex:1 1 140px}}
+
+/* Keep prediction and account controls on shared columns as the workspace grows. */
+.light-card :is(input:not([type=checkbox]),select),
+.light-card form>button,
+.light-result-controls>button{height:40px;min-height:40px}
+.light-card label{min-width:0}
+.light-card input[type=checkbox]{flex:0 0 15px;width:15px;height:15px;min-height:0;padding:0}
+.light-card .light-check{width:auto;min-width:0;line-height:1.6}
+#light-predict-form{display:grid;grid-template-columns:minmax(150px,1.4fr) minmax(150px,1.3fr) repeat(4,minmax(80px,.8fr)) minmax(90px,.9fr) minmax(140px,1.2fr);gap:16px 12px;align-items:end}
+#light-predict-form>*{min-width:0;max-width:100%}
+#light-predict-form>button{width:100%;padding-inline:10px}
+.light-forecast-note{margin-top:14px}
+#light-sim-form{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:18px 16px;align-items:end}
+#light-sim-form>.light-wide{grid-column:1/-1;width:100%;margin:0}
+#light-sim-form>label:has(#light-cost-stress){grid-column:span 2}
+#light-sim-form>.light-check{grid-column:1/span 3;align-self:center}
+#light-sim-form>button{width:100%;white-space:normal}
+#light-sim-form .light-parameter-details{margin:0;padding-top:14px}
+#light-sim-form .light-result-controls{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}
+#light-new-account>p{margin-top:16px}
+.light-result-controls:has(#light-saved){display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr) minmax(0,1.5fr) minmax(0,1fr);gap:18px 16px;align-items:end}
+.light-result-controls:has(#light-saved)>.light-check{align-self:end;min-height:40px}
+.light-result-controls:has(#light-saved)>button{white-space:normal;height:auto;min-height:40px}
+#light-accounts-state:not(:empty),#light-daily-state{margin-top:14px}
+
+/* A closed details element must retain its native collapsed behavior. */
+#light-training-panel[open]{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;align-items:end}
+#light-training-panel>summary,
+#light-training-panel>p,
+#light-training-panel>.light-result-controls,
+#light-training-panel>details{grid-column:1/-1;min-width:0;margin:0}
+#light-training-panel>.light-result-controls{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
+#light-training-panel>label:has(#light-training-symbols){grid-column:1/span 2}
+#light-training-panel>p:has(>#light-training-watchlist){grid-column:3/-1}
+#light-training-panel>p:has(>#light-train){grid-column:3/-1;display:flex;flex-wrap:wrap;gap:8px}
+#light-training-panel>p:has(>button)>button{min-height:40px;white-space:normal}
+#light-training-panel>details{margin-top:4px}
+#light-observe-panel[open]{display:grid;grid-template-columns:minmax(150px,1fr) minmax(0,2fr) minmax(150px,1fr);gap:14px 16px;align-items:end}
+#light-observe-panel>summary,#light-observe-panel>p{grid-column:1/-1;margin:0}
+#light-observe-panel>button{height:40px;min-width:0;white-space:normal}
+
+@media(max-width:1200px){
+  #light-predict-form{grid-template-columns:repeat(4,minmax(0,1fr))}
+  #light-sim-form{grid-template-columns:repeat(2,minmax(0,1fr))}
+  #light-sim-form>.light-check{grid-column:1}
+  #light-sim-form .light-result-controls{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .light-result-controls:has(#light-saved){grid-template-columns:repeat(2,minmax(0,1fr))}
+  #light-training-panel[open]{grid-template-columns:repeat(2,minmax(0,1fr))}
+  #light-training-panel>label:has(#light-training-symbols){grid-column:1}
+  #light-training-panel>p:has(>#light-training-watchlist){grid-column:2}
+  #light-training-panel>p:has(>#light-train){grid-column:1/-1}
+}
+@media(max-width:760px){
+  #light-predict-form,#light-sim-form{grid-template-columns:repeat(2,minmax(0,1fr));gap:16px 12px}
+  #light-sim-form>.light-check{grid-column:1/-1}
+  #light-sim-form>button{grid-column:1/-1}
+  #light-sim-form .light-result-controls{grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 12px}
+  #light-training-panel>.light-result-controls{grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 12px}
+  #light-training-panel>.light-result-controls>label:last-child{grid-column:1/-1}
+  #light-observe-panel[open]{grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 12px}
+  #light-observe-panel>button{grid-column:1/-1}
+}
+@media(max-width:520px){
+  #light-predict-form>label:nth-child(-n+2){grid-column:1/-1}
+  #light-sim-form>label:has(#light-cash),#light-sim-form>label:has(#light-score-model){grid-column:1/-1}
+  .light-result-controls:has(#light-saved){grid-template-columns:minmax(0,1fr);gap:12px}
+  .light-result-controls:has(#light-saved)>.light-check{margin-top:6px}
+  #light-training-panel[open]{grid-template-columns:minmax(0,1fr);gap:14px}
+  #light-training-panel>label:has(#light-training-symbols),
+  #light-training-panel>p:has(>#light-training-watchlist){grid-column:1/-1}
+  #light-training-panel>p:has(>button)>button{width:100%}
+  #light-observe-panel[open]{grid-template-columns:minmax(0,1fr)}
+  #light-predict-form>button,#light-observe-panel>button{height:auto;min-height:40px;white-space:normal}
+}

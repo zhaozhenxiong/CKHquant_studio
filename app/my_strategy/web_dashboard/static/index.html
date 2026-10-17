@@ -27,6 +27,7 @@
   <link rel="stylesheet" href="/static/css/board_panel.css">
   <link rel="stylesheet" href="/static/css/market_opportunities.css">
   <link rel="stylesheet" href="/static/css/market_workspace.css">
+  <link rel="stylesheet" href="/static/css/layout.css">
   <script src="/static/js/market_workspace.js" defer></script>
 </head>
 <body>
@@ -114,7 +115,7 @@
         <section id="board-incremental" class="light-card"><label>补齐范围<select id="board-fill-scope"><option value="current_board">图中选定板块</option><option value="watch">我的关注</option><option value="held">模拟账户持仓</option><option value="full">全市场（限额分批）</option></select></label><p class="subtle">先核验行情与版本缺口；单批最多计算20只，已完成内容直接复用。变更范围与延后数量在执行前列明。</p><div id="board-fill-plan" aria-live="polite"></div><button id="board-fill-execute" type="button" hidden>执行本批缺口</button><button id="board-fill-cancel" type="button" hidden>取消本批</button></section><div id="board-job" class="inline-progress" hidden aria-live="polite"></div>
         <div class="board-controls"><label>发布版本<select id="board-generation"><option value="">当前沪深 A 股</option></select></label><label>板块类型<select id="board-kind"><option value="industry">行业</option><option value="concept">概念</option></select></label><label>排名<select id="board-ranking"><option value="activity">活跃 Top30</option><option value="capital">成交资金 Top30</option></select></label><label>成员更新并发<select id="board-refresh-workers"><option value="1">1 线程</option><option value="2">2 线程</option><option value="4" selected>4 线程</option><option value="6">6 线程</option><option value="8">8 线程</option></select></label><label class="board-refresh-reuse"><input id="board-refresh-reuse-today" type="checkbox" checked>复用今日已核验成员</label><button id="board-refresh-members" type="button">更新当前成员</button></div>
         <p class="form-note">活跃分数综合 20 日相对成交额与当日涨跌幅绝对值；成交资金按成交额排序。不同概念可重叠，成交额不表示净流入。</p>
-        <div class="board-layout"><div><p id="board-count" class="subtle"></p><div class="table-wrap"><table><thead><tr><th>排名</th><th>板块</th><th>活跃</th><th>涨跌幅</th><th>成交额</th><th>市场占比</th><th>相对成交额</th><th>成员覆盖</th><th>详情</th></tr></thead><tbody id="board-rows"><tr><td colspan="9" class="empty-cell">尚无已发布板块结果，点击计算。</td></tr></tbody></table></div></div>
+        <p id="board-count" class="subtle"></p><div class="board-layout"><div><div class="table-wrap"><table><thead><tr><th>排名</th><th>板块</th><th>活跃</th><th>涨跌幅</th><th>成交额</th><th>市场占比</th><th>相对成交额</th><th>成员覆盖</th><th>详情</th></tr></thead><tbody id="board-rows"><tr><td colspan="9" class="empty-cell">尚无已发布板块结果，点击计算。</td></tr></tbody></table></div></div>
         <aside id="board-detail" class="board-detail" aria-label="板块详情" hidden><div class="table-toolbar"><h3 id="board-detail-title">板块详情</h3><button id="board-detail-close" type="button" aria-label="关闭板块详情">关闭</button></div><div id="board-detail-content"></div></aside></div>
       </div>
     </section>
